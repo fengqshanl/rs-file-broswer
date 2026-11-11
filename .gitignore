@@ -1,0 +1,7 @@
+/target
+/state
+/data
+/.env
+/testdata
+*.log
+.DS_Store

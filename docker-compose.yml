@@ -1,0 +1,70 @@
+services:
+  agentgod-files:
+    image: agentgod-files:latest
+    build:
+      context: .
+      args:
+        RUST_IMAGE: "${RUST_IMAGE:-rust:1-alpine}"
+        ALPINE_IMAGE: "${ALPINE_IMAGE:-alpine:3.20}"
+    container_name: agentgod-files
+    restart: unless-stopped
+    stop_grace_period: 20s
+    init: true
+    user: "0:0"
+    ports:
+      # Loopback by default. Set LISTEN_IP to a LAN/VPN address (or 0.0.0.0)
+      # to reach it from other devices.
+      - "${LISTEN_IP:-127.0.0.1}:${HOST_PORT:-8090}:8090"
+    volumes:
+      - "${FILES_DIR:-./data}:/data/files"
+      - "./state:/data/state"
+    environment:
+      DATA_ROOT: /data/files
+      TMP_ROOT: /data/files/.agentgod-tmp
+      STATE_DIR: /data/state
+      TLS_DIR: /data/state/tls
+      BIND: 0.0.0.0
+      PORT: "8090"
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}"
+      TLS_EXTRA_IPS: "${TLS_EXTRA_IPS:-127.0.0.1}"
+      TLS_EXTRA_DNS: "${TLS_EXTRA_DNS:-localhost}"
+      UPLOAD_RATE_MBPS: "${UPLOAD_RATE_MBPS:-20}"
+      DOWNLOAD_RATE_MBPS: "${DOWNLOAD_RATE_MBPS:-30}"
+      MAX_CONCURRENT_UPLOADS: "${MAX_CONCURRENT_UPLOADS:-2}"
+      MAX_CONCURRENT_DOWNLOADS: "${MAX_CONCURRENT_DOWNLOADS:-2}"
+      MAX_CONCURRENT_PREVIEWS: "${MAX_CONCURRENT_PREVIEWS:-4}"
+      MAX_ACTIVE_UPLOADS: "${MAX_ACTIVE_UPLOADS:-32}"
+      MAX_FILE_SIZE_GB: "${MAX_FILE_SIZE_GB:-100}"
+      DISK_RESERVE_MB: "${DISK_RESERVE_MB:-2048}"
+      SESSION_TTL_SECS: "${SESSION_TTL_SECS:-7200}"
+      SESSION_MAX_TTL_SECS: "${SESSION_MAX_TTL_SECS:-86400}"
+      LOGIN_MAX_FAILURES: "${LOGIN_MAX_FAILURES:-8}"
+      LOGIN_WINDOW_SECS: "${LOGIN_WINDOW_SECS:-600}"
+      RSA_BITS: "${RSA_BITS:-2048}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    mem_limit: 256m
+    memswap_limit: 384m
+    cpus: "1.0"
+    pids_limit: 128
+    read_only: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8090/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

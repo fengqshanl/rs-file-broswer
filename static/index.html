@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AgentGod Files</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <section id="login-view" class="login-view">
+    <div class="login-bg" aria-hidden="true"></div>
+    <form id="login-form" class="login-card" autocomplete="on" novalidate>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M24 4.5 39.5 11v11.2c0 9.8-6.4 17.9-15.5 21.8C14.9 40.1 8.5 32 8.5 22.2V11Z"/>
+            <path d="M17.5 18.2a1.8 1.8 0 0 1 1.8-1.8h3.8l2.4 2.6h5.2a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H19.3a1.8 1.8 0 0 1-1.8-1.8Z"/>
+          </svg>
+        </span>
+        <div class="brand-text">
+          <h1>AgentGod Files</h1>
+          <p>私有文件空间</p>
+        </div>
+      </div>
+
+      <p class="login-desc">登录后即可安全地浏览、上传与下载文件。</p>
+
+      <label class="field">
+        <span>用户名</span>
+        <input id="username" name="username" autocomplete="username" spellcheck="false" required autofocus>
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+
+      <button id="login-btn" class="btn primary block" type="submit">加密登录</button>
+      <p id="login-error" class="form-error" role="alert"></p>
+
+      <div class="secure-badges" aria-label="安全特性">
+        <span>RSA-OAEP 登录</span>
+        <span>AES-256-GCM 传输</span>
+        <span>带宽限速</span>
+      </div>
+      <p class="login-foot">会话密钥仅保存在当前页面内存中，刷新后需重新登录。</p>
+    </form>
+  </section>
+
+  <section id="app-view" class="app-view" hidden>
+    <header class="topbar">
+      <div class="brand small">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M24 4.5 39.5 11v11.2c0 9.8-6.4 17.9-15.5 21.8C14.9 40.1 8.5 32 8.5 22.2V11Z"/>
+            <path d="M17.5 18.2a1.8 1.8 0 0 1 1.8-1.8h3.8l2.4 2.6h5.2a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H19.3a1.8 1.8 0 0 1-1.8-1.8Z"/>
+          </svg>
+        </span>
+        <div class="brand-text">
+          <strong>AgentGod Files</strong>
+          <button id="user-badge" class="user-badge" type="button" title="账户设置：修改用户名和密码">未登录</button>
+        </div>
+      </div>
+
+      <nav id="breadcrumbs" class="crumbs" aria-label="当前路径"></nav>
+
+      <div class="top-actions">
+        <button id="btn-upload" class="btn primary" type="button">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>
+            </svg>
+          </span>
+          <span class="btn-label">上传</span>
+        </button>
+        <button id="btn-upload-folder" class="btn" type="button" title="上传文件夹">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>
+              <path d="M12 17v-6"/><path d="m9 14 3-3 3 3"/>
+            </svg>
+          </span>
+          <span class="btn-label">文件夹</span>
+        </button>
+        <button id="btn-mkdir" class="btn" type="button">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>
+              <path d="M12 11v6"/><path d="M9 14h6"/>
+            </svg>
+          </span>
+          <span class="btn-label">新建文件夹</span>
+        </button>
+        <button id="btn-refresh" class="btn icon-only" type="button" title="刷新" aria-label="刷新">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>
+            </svg>
+          </span>
+        </button>
+        <button id="btn-account" class="btn" type="button" title="账户设置：修改用户名和密码" aria-label="账户设置：修改用户名和密码">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="8" r="3.2"/><path d="M5 20a7 7 0 0 1 14 0"/>
+            </svg>
+          </span>
+          <span class="btn-label">账户</span>
+        </button>
+        <button id="btn-logout" class="btn ghost" type="button">退出</button>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <span id="dir-summary" class="dir-summary">加载中…</span>
+        <label class="filter">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+            </svg>
+          </span>
+          <input id="filter" type="search" placeholder="筛选当前目录" autocomplete="off">
+        </label>
+      </div>
+      <div class="toolbar-right">
+        <span id="free-space" class="free-space"></span>
+      </div>
+    </div>
+
+    <main class="content">
+      <div class="list-head" aria-hidden="true">
+        <span>名称</span>
+        <span class="col-size">大小</span>
+        <span class="col-time">修改时间</span>
+        <span class="col-actions">操作</span>
+      </div>
+      <div id="file-list" class="file-list" role="list"></div>
+      <div id="empty-state" class="empty-state" hidden>
+        <span class="empty-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>
+          </svg>
+        </span>
+        <p>这个文件夹还是空的</p>
+        <span>拖拽文件到此处或点击“上传”</span>
+      </div>
+    </main>
+
+    <footer class="status-bar">
+      <span class="lock-note">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
+          </svg>
+        </span>
+        会话已加密
+      </span>
+      <span id="session-note">密钥仅保存在本页内存，刷新后需重新登录</span>
+    </footer>
+
+    <aside id="upload-panel" class="upload-panel" hidden>
+      <div class="upload-head">
+        <strong>传输任务</strong>
+        <button id="btn-clear-uploads" class="link" type="button">清除已完成</button>
+      </div>
+      <div id="upload-list" class="upload-list"></div>
+    </aside>
+
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <div class="drop-card">
+        <span class="drop-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>
+          </svg>
+        </span>
+        <strong>松开鼠标上传</strong>
+        <span>文件将上传到当前目录</span>
+      </div>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <input id="file-input" type="file" multiple hidden>
+    <input id="dir-input" type="file" webkitdirectory multiple hidden>
+    <dialog id="modal" class="modal"></dialog>
+  </section>
+</body>
+</html>

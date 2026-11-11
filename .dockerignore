@@ -1,0 +1,11 @@
+target
+state
+testdata
+.env
+.git
+.gitignore
+README.md
+scripts
+*.log
+.DS_Store
+docs

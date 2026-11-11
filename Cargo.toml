@@ -1,0 +1,37 @@
+[package]
+name = "agentgod-files"
+version = "0.1.0"
+edition = "2021"
+description = "Encrypted, rate-limited self-hosted file server"
+license = "MIT"
+repository = "https://github.com/fengqshanl/rs-file-broswer"
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+argon2 = "0.5"
+axum = "0.8"
+axum-server = { version = "0.7.3", default-features = false, features = ["tls-rustls-no-provider"] }
+base64 = "0.22"
+bytes = "1"
+dashmap = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libc = "0.2"
+rand = "0.8"
+rcgen = "0.12"
+rsa = { version = "0.9", features = ["sha2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "abort"
