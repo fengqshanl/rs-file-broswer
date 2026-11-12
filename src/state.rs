@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
     config::Config, credentials::Credentials, crypto::Crypto, files::CachedListing,
-    preview::PreviewToken, rate::RateLimiter,
+    rate::RateLimiter,
 };
 
 pub struct AppState {
@@ -20,7 +20,6 @@ pub struct AppState {
     pub credentials_path: PathBuf,
     pub credentials_update: Mutex<()>,
     pub sessions: DashMap<String, Session>,
-    pub preview_tokens: DashMap<String, PreviewToken>,
     pub listings: DashMap<PathBuf, CachedListing>,
     /// Mutable in desktop local mode (switch between home, filesystem root,
     /// drives); fixed to `cfg.data_root` for the standalone server.
@@ -168,7 +167,6 @@ impl AppState {
             credentials_path,
             credentials_update: Mutex::new(()),
             sessions: DashMap::new(),
-            preview_tokens: DashMap::new(),
             listings: DashMap::new(),
             current_root: StdRwLock::new(cfg.data_root.clone()),
             uploads: DashMap::new(),

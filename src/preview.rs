@@ -1,47 +1,41 @@
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{io, sync::Arc};
 
+use aes_gcm::{
+    aead::{Aead, AeadCore, Payload},
+    Aes256Gcm, KeyInit,
+};
 use axum::{
     body::{Body, Bytes},
-    extract::{OriginalUri, Path as UrlPath, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
-    response::{IntoResponse, Response},
+    extract::{OriginalUri, State},
+    http::{header, HeaderName, HeaderValue, Method},
+    response::Response,
 };
-use futures_util::stream;
+use futures_util::stream::try_unfold;
+use rand::rngs::OsRng;
 use serde::Deserialize;
-use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncReadExt;
 
 use crate::{
-    api::{encrypted_response, read_encrypted},
+    api::read_encrypted,
     auth::AuthSession,
     crypto,
     error::{log, ApiError},
-    files::{resolve_file, rfc5987},
+    files::{resolve_file, DOWNLOAD_CHUNK},
     state::AppState,
 };
 
-pub const PREVIEW_TOKEN_TTL: Duration = Duration::from_secs(3600);
-pub const PREVIEW_CHUNK: usize = 64 * 1024;
-
-#[derive(Clone)]
-pub struct PreviewToken {
-    pub path: PathBuf,
-    pub name: String,
-    pub session: String,
-    pub content_type: &'static str,
-    pub expires_at: Instant,
-}
+pub const PREVIEW_CHUNK: usize = DOWNLOAD_CHUNK;
 
 #[derive(Deserialize)]
-struct PreviewTokenRequest {
+struct PreviewStreamRequest {
     path: String,
 }
 
-pub async fn create_token(
+/// Streams preview bytes as AES-256-GCM frames. Native `<img>/<video>/<iframe>`
+/// elements cannot decrypt application-layer frames, so the frontend fetches
+/// this endpoint with `fetch()`, authenticates with the normal bearer token and
+/// decrypts in memory before creating a short-lived blob URL.
+pub async fn stream(
     State(state): State<Arc<AppState>>,
     session: AuthSession,
     method: Method,
@@ -49,82 +43,18 @@ pub async fn create_token(
     body: Body,
 ) -> Result<Response, ApiError> {
     let aad = crypto::request_aad(&method, &uri);
-    let request: PreviewTokenRequest = read_encrypted(&session, &aad, body).await?;
-    let (path, clean, name, size) = resolve_file(&state, &request.path).await?;
+    let request: PreviewStreamRequest = read_encrypted(&session, &aad, body).await?;
+    let (path, clean, name, resolved_size) = resolve_file(&state, &request.path).await?;
 
-    let token = crypto::random_b64(32);
-    let content_type = content_type_for(&name);
-    state.preview_tokens.insert(
-        token.clone(),
-        PreviewToken {
-            path,
-            name: name.clone(),
-            session: session.token.clone(),
-            content_type,
-            expires_at: Instant::now() + PREVIEW_TOKEN_TTL,
-        },
-    );
-    log(&format!("签发预览令牌 file={clean}"));
-
-    encrypted_response(
-        &session,
-        &aad,
-        json!({
-            "url": format!("/preview/{token}"),
-            "name": name,
-            "path": clean,
-            "size": size,
-            "content_type": content_type,
-            "expires_in": PREVIEW_TOKEN_TTL.as_secs(),
-        }),
-    )
-}
-
-pub async fn serve(
-    State(state): State<Arc<AppState>>,
-    UrlPath(token): UrlPath<String>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let entry = state
-        .preview_tokens
-        .get(&token)
-        .map(|entry| entry.value().clone())
-        .ok_or_else(|| ApiError::not_found("预览链接已过期，请重新打开文件"))?;
-
-    if Instant::now() >= entry.expires_at || !state.sessions.contains_key(&entry.session) {
-        state.preview_tokens.remove(&token);
-        return Err(ApiError::not_found("预览链接已过期，请重新登录后打开文件"));
-    }
-
-    let mut file = tokio::fs::File::open(&entry.path)
+    let file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| ApiError::not_found("文件不存在或无法读取"))?;
     let size = file
         .metadata()
         .await
-        .map_err(|_| ApiError::not_found("文件不存在或无法读取"))?
-        .len();
-
-    let range_header = headers
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok());
-    let range = range_header.and_then(|value| parse_range(value, size));
-    if range_header.is_some() && range.is_none() && size > 0 {
-        let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-        response.headers_mut().insert(
-            header::CONTENT_RANGE,
-            HeaderValue::from_str(&format!("bytes */{size}"))
-                .map_err(|_| ApiError::internal("构造 Range 响应失败"))?,
-        );
-        return Ok(response);
-    }
-
-    let (status, start, end) = match range {
-        Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
-        None if size == 0 => (StatusCode::OK, 0, 0),
-        None => (StatusCode::OK, 0, size - 1),
-    };
-    let length = if size == 0 { 0 } else { end - start + 1 };
+        .map(|metadata| metadata.len())
+        .unwrap_or(resolved_size);
+    let content_type = content_type_for(&name);
 
     let permit = state
         .preview_sem
@@ -132,188 +62,102 @@ pub async fn serve(
         .acquire_owned()
         .await
         .map_err(|_| ApiError::internal("预览并发控制器已关闭"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&session.key).map_err(|_| ApiError::internal("会话密钥无效"))?;
+    // 18 random bytes encode to 24 base64 characters without padding, safe in
+    // an HTTP header. The id binds every frame to this response.
+    let stream_id = crypto::random_b64(18);
+    log(&format!("加密预览 file={clean}"));
 
-    let body = if length == 0 {
-        drop(permit);
-        Body::empty()
-    } else {
-        file.seek(std::io::SeekFrom::Start(start))
-            .await
-            .map_err(|err| ApiError::internal(err.to_string()))?;
-        let limiter = state.download_limiter.clone();
-        let stream_state = PreviewStream {
-            file,
-            remaining: length,
-            limiter,
-            _permit: permit,
-        };
-        let body_stream = stream::try_unfold(stream_state, |mut state| async move {
-            if state.remaining == 0 {
-                return Ok::<_, std::io::Error>(None);
-            }
-            let want = PREVIEW_CHUNK.min(state.remaining as usize);
-            let mut buffer = vec![0u8; want];
-            let read = state.file.read(&mut buffer).await?;
-            if read == 0 {
-                return Err(std::io::Error::other("预览读取提前结束"));
-            }
-            buffer.truncate(read);
-            state.remaining -= read as u64;
-            state.limiter.wait(read).await;
-            Ok(Some((Bytes::from(buffer), state)))
-        });
-        Body::from_stream(body_stream)
+    let stream_state = PreviewStream {
+        file,
+        cipher,
+        seq: 0,
+        stream_id: stream_id.clone(),
+        limiter: state.download_limiter.clone(),
+        _permit: permit,
     };
+    let stream = try_unfold(stream_state, |mut stream| async move {
+        let mut buffer = vec![0u8; PREVIEW_CHUNK];
+        let read = stream.file.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok::<_, io::Error>(None);
+        }
+        buffer.truncate(read);
 
-    let mut response = Response::new(body);
-    *response.status_mut() = status;
-    let response_headers = response.headers_mut();
-    let content_type = if is_textual(entry.content_type) {
-        format!("{}; charset=utf-8", entry.content_type)
-    } else {
-        entry.content_type.to_string()
-    };
-    insert(
-        response_headers,
+        stream.limiter.wait(4 + 12 + buffer.len() + 16).await;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let aad = format!("pv:{}:{}", stream.stream_id, stream.seq);
+        let ciphertext = stream
+            .cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: &buffer,
+                    aad: aad.as_bytes(),
+                },
+            )
+            .map_err(|_| io::Error::other("预览分块加密失败"))?;
+
+        let mut frame = Vec::with_capacity(4 + 12 + ciphertext.len());
+        frame.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+        frame.extend_from_slice(nonce.as_slice());
+        frame.extend_from_slice(&ciphertext);
+        stream.seq += 1;
+        Ok(Some((Bytes::from(frame), stream)))
+    });
+
+    let mut response = Response::new(Body::from_stream(stream));
+    let headers = response.headers_mut();
+    headers.insert(
         header::CONTENT_TYPE,
-        &content_type,
-        "Content-Type",
-    )?;
-    insert(
-        response_headers,
-        header::CONTENT_LENGTH,
-        &length.to_string(),
-        "Content-Length",
-    )?;
-    insert(
-        response_headers,
-        header::ACCEPT_RANGES,
-        "bytes",
-        "Accept-Ranges",
-    )?;
-    if status == StatusCode::PARTIAL_CONTENT {
-        insert(
-            response_headers,
-            header::CONTENT_RANGE,
-            &format!("bytes {start}-{end}/{size}"),
-            "Content-Range",
-        )?;
-    }
-    insert(
-        response_headers,
-        header::CACHE_CONTROL,
-        "private, no-store",
-        "Cache-Control",
-    )?;
-    insert(
-        response_headers,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
-        "nosniff",
-        "X-Content-Type-Options",
-    )?;
-    insert(
-        response_headers,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
         header::REFERRER_POLICY,
-        "no-referrer",
-        "Referrer-Policy",
-    )?;
-    insert(
-        response_headers,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-encrypted"),
+        HeaderValue::from_static("aes-256-gcm"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-stream-id"),
+        HeaderValue::from_str(&stream_id).map_err(|_| ApiError::internal("构造预览流标识失败"))?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-file-size"),
+        HeaderValue::from_str(&size.to_string())
+            .map_err(|_| ApiError::internal("构造文件大小响应头失败"))?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-chunk-size"),
+        HeaderValue::from_str(&PREVIEW_CHUNK.to_string())
+            .map_err(|_| ApiError::internal("构造分块大小响应头失败"))?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-preview-content-type"),
+        HeaderValue::from_static(content_type),
+    );
+    headers.insert(
         HeaderName::from_static("cross-origin-resource-policy"),
-        "same-origin",
-        "Cross-Origin-Resource-Policy",
-    )?;
-    insert(
-        response_headers,
-        header::X_FRAME_OPTIONS,
-        "SAMEORIGIN",
-        "X-Frame-Options",
-    )?;
-    insert(
-        response_headers,
-        header::CONTENT_DISPOSITION,
-        &format!("inline; filename*=UTF-8''{}", rfc5987(&entry.name)),
-        "Content-Disposition",
-    )?;
-
-    // Untrusted HTML/SVG/XML runs on an opaque origin: scripts may render but
-    // can never touch this app's DOM, storage, or authenticated API surface.
-    if matches!(
-        entry.content_type,
-        "text/html" | "image/svg+xml" | "application/xml"
-    ) {
-        insert(
-            response_headers,
-            HeaderName::from_static("content-security-policy"),
-            "sandbox allow-scripts allow-forms allow-popups allow-modals; default-src 'unsafe-inline' data: blob:",
-            "Content-Security-Policy",
-        )?;
-    }
-
+        HeaderValue::from_static("same-origin"),
+    );
     Ok(response)
-}
-
-fn is_textual(content_type: &str) -> bool {
-    content_type.starts_with("text/")
-        || matches!(
-            content_type,
-            "application/json" | "application/xml" | "image/svg+xml"
-        )
-}
-
-fn insert(
-    headers: &mut HeaderMap,
-    name: HeaderName,
-    value: &str,
-    label: &str,
-) -> Result<(), ApiError> {
-    let header_value = HeaderValue::from_str(value)
-        .map_err(|_| ApiError::internal(format!("构造 {label} 响应头失败")))?;
-    headers.insert(name, header_value);
-    Ok(())
 }
 
 struct PreviewStream {
     file: tokio::fs::File,
-    remaining: u64,
+    cipher: Aes256Gcm,
+    seq: u64,
+    stream_id: String,
     limiter: Arc<crate::rate::RateLimiter>,
     _permit: tokio::sync::OwnedSemaphorePermit,
-}
-
-/// Parses a single `bytes=` range. Multi-range requests are ignored and the
-/// full file is served, which browsers handle fine.
-pub fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
-    let spec = value.strip_prefix("bytes=")?.trim();
-    if spec.contains(',') || size == 0 {
-        return None;
-    }
-    let (start_raw, end_raw) = spec.split_once('-')?;
-    let start_raw = start_raw.trim();
-    let end_raw = end_raw.trim();
-
-    if start_raw.is_empty() {
-        let suffix: u64 = end_raw.parse().ok()?;
-        if suffix == 0 {
-            return None;
-        }
-        let start = size.saturating_sub(suffix);
-        return Some((start, size - 1));
-    }
-
-    let start: u64 = start_raw.parse().ok()?;
-    if start >= size {
-        return None;
-    }
-    let end = if end_raw.is_empty() {
-        size - 1
-    } else {
-        let end: u64 = end_raw.parse().ok()?;
-        if end < start {
-            return None;
-        }
-        end.min(size - 1)
-    };
-    Some((start, end))
 }
 
 pub fn content_type_for(name: &str) -> &'static str {
@@ -362,48 +206,9 @@ pub fn content_type_for(name: &str) -> &'static str {
     }
 }
 
-pub fn cleanup_expired(state: &AppState) {
-    let now = Instant::now();
-    state
-        .preview_tokens
-        .retain(|_, entry| now < entry.expires_at && state.sessions.contains_key(&entry.session));
-}
-
-pub fn revoke_session(state: &AppState, session: &str) {
-    state
-        .preview_tokens
-        .retain(|_, entry| entry.session != session);
-}
-
-pub fn revoke_other_sessions(state: &AppState, keep_session: &str) {
-    state
-        .preview_tokens
-        .retain(|_, entry| entry.session == keep_session);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn range_parsing() {
-        assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
-        assert_eq!(parse_range("bytes=900-", 1000), Some((900, 999)));
-        assert_eq!(parse_range("bytes=-100", 1000), Some((900, 999)));
-        assert_eq!(parse_range("bytes=0-0", 1000), Some((0, 0)));
-        assert_eq!(parse_range("bytes=1000-", 1000), None);
-        assert_eq!(parse_range("bytes=5-1", 1000), None);
-        assert_eq!(parse_range("bytes=0-1,5-9", 1000), None);
-        assert_eq!(parse_range("items=0-1", 1000), None);
-        assert_eq!(parse_range("bytes=0-", 0), None);
-    }
-
-    #[test]
-    fn range_serves_whole_large_file() {
-        let (start, end) = parse_range("bytes=0-", 100 * 1024 * 1024).unwrap();
-        assert_eq!(start, 0);
-        assert_eq!(end, 100 * 1024 * 1024 - 1);
-    }
 
     #[test]
     fn mime_mapping() {

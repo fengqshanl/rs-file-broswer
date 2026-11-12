@@ -269,7 +269,6 @@ pub async fn logout(
     OriginalUri(uri): OriginalUri,
 ) -> Result<Response, ApiError> {
     state.sessions.remove(&session.token);
-    crate::preview::revoke_session(&state, &session.token);
     let aad = crypto::request_aad(&method, &uri);
     let body = crypto::encrypt_envelope(&session.key, &aad, &json!({ "ok": true }))
         .map_err(|err| ApiError::internal(err.to_string()))?;
@@ -379,7 +378,6 @@ pub async fn update_credentials(
     // transfers owned by this session keep working.
     let current_token = session.token.clone();
     state.sessions.retain(|token, _| token == &current_token);
-    crate::preview::revoke_other_sessions(&state, &current_token);
     if let Some(mut active) = state.sessions.get_mut(&current_token) {
         active.user = request.new_username.clone();
     }

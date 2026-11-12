@@ -1,9 +1,9 @@
 //! Shared runtime for both desktop companions.
 //!
 //! Each app hosts a tiny loopback HTTP server. It serves the same web UI as the
-//! standalone server and routes `/api/*` and `/preview/*` either to an embedded
-//! local file service (desktop local app) or to the currently selected remote
-//! AgentGod Files server. Because the webview loads `http://127.0.0.1:<port>/`,
+//! standalone server and routes API, preview and asset requests either to an
+//! embedded local file service (desktop local app) or to the currently selected
+//! remote AgentGod Files server. Because the webview loads `http://127.0.0.1:<port>/`,
 //! the existing same-origin frontend works unchanged and streaming is preserved
 //! by proxying response bodies with backpressure.
 
@@ -51,6 +51,8 @@ const FORWARD_RESPONSE_HEADERS: &[&str] = &[
     "cache-control",
     "x-file-size",
     "x-chunk-size",
+    "x-stream-id",
+    "x-preview-content-type",
     "x-encrypted",
     "x-encrypted-end",
     "x-content-type-options",

@@ -40,8 +40,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/delete", post(files::delete))
         .route("/api/download", post(files::download))
         .route("/api/download_folder", post(files::download_folder))
-        .route("/api/preview/token", post(preview::create_token))
-        .route("/preview/{token}", get(preview::serve))
+        .route("/api/preview/stream", post(preview::stream))
         .route("/vendor/mammoth.js", get(mammoth_js))
         .route("/vendor/xlsx.js", get(xlsx_js))
         .route("/api/upload/init", post(files::upload_init))
@@ -94,7 +93,6 @@ pub fn spawn_cleanup(state: Arc<AppState>) {
                 .retain(|_, session| now < session.expires_at && now < session.hard_expires_at);
             state.login_guard.cleanup();
             files::cleanup_stale_uploads(&state).await;
-            preview::cleanup_expired(&state);
         }
     });
 }
@@ -117,17 +115,8 @@ async fn log_requests(request: Request, next: Next) -> Response {
 async fn security_headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
     let is_api = path.starts_with("/api/");
-    // Preview responses carry their own framing/CSP policy so that PDFs and
-    // sandboxed HTML can render inside the app.
-    let is_preview = path.starts_with("/preview/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    if is_preview {
-        headers
-            .entry(header::X_CONTENT_TYPE_OPTIONS)
-            .or_insert(HeaderValue::from_static("nosniff"));
-        return response;
-    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

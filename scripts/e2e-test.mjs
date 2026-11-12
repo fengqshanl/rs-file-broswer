@@ -114,6 +114,9 @@ async function uploadChunkBlob(uploadId, sequence, plaintext) {
   frame.writeUInt32BE(ciphertext.length, 0);
   frame.set(iv, 4);
   frame.set(ciphertext, 16);
+  if (plaintext.length && frame.includes(Buffer.from(plaintext))) {
+    throw new Error('upload chunk leaked plaintext on the wire');
+  }
   const response = await fetch(`${BASE_URL}${path}`, {
     method: 'PUT',
     headers: {
@@ -173,6 +176,71 @@ async function readEncryptedFrames(response, key, expectEndMarker = true) {
     }
   }
   return { data: Buffer.concat(parts), ended };
+}
+
+async function readPreviewStream(path) {
+  const endpoint = '/api/preview/stream';
+  const aad = `POST ${endpoint}`;
+  const cipher = makeCipher(currentSession.key);
+  const envelope = await cipher.encrypt(aad, { path });
+  const response = await fetch(`${BASE_URL}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${currentSession.token}`,
+    },
+    body: JSON.stringify(envelope),
+  });
+  if (!response.ok) {
+    const data = await readJson(response);
+    throw new Error(`preview failed: ${data?.error || response.status}`);
+  }
+  if (String(response.headers.get('content-type')) !== 'application/octet-stream') {
+    throw new Error('preview response is not an encrypted binary stream');
+  }
+  const streamId = response.headers.get('x-stream-id');
+  if (!streamId) throw new Error('preview response missing x-stream-id');
+  const chunkSize = Number(response.headers.get('x-chunk-size') || '65536');
+  const raw = Buffer.from(await response.arrayBuffer());
+  let offset = 0;
+  let sequence = 0;
+  const parts = [];
+  while (offset < raw.length) {
+    if (offset + 4 > raw.length) throw new Error('trailing preview frame header');
+    const length = raw.readUInt32BE(offset);
+    offset += 4;
+    if (length > chunkSize + 16 + 1024) throw new Error('preview frame too large');
+    if (offset + 12 + length > raw.length) throw new Error('truncated preview frame');
+    const iv = raw.subarray(offset, offset + 12);
+    offset += 12;
+    const ciphertext = raw.subarray(offset, offset + length);
+    offset += length;
+    let plaintext;
+    try {
+      plaintext = Buffer.from(
+        await subtle.decrypt(
+          {
+            name: 'AES-GCM',
+            iv,
+            additionalData: encoder.encode(`pv:${streamId}:${sequence}`),
+          },
+          currentSession.key,
+          ciphertext,
+        ),
+      );
+    } catch {
+      throw new Error('preview frame authentication failed');
+    }
+    parts.push(plaintext);
+    sequence += 1;
+  }
+  return {
+    raw,
+    data: Buffer.concat(parts),
+    frames: sequence,
+    contentType: String(response.headers.get('x-preview-content-type') || ''),
+    size: Number(response.headers.get('x-file-size') || '0'),
+  };
 }
 
 async function fetchPublicKey() {  const response = await fetch(`${BASE_URL}/api/pubkey`, { cache: 'no-store' });
@@ -328,6 +396,7 @@ async function main() {
   const finished = await api('/api/upload/finish', { id: uploadId });
   if (finished.size !== size) throw new Error('uploaded size mismatch');
   record('chunked encrypted upload', `${SIZE_MB} MiB in ${sequence} chunks`);
+  record('upload ciphertext on wire', 'chunk frames contain no plaintext');
 
   const listed = await api('/api/list', { path: `/${dirName}` });
   const uploaded = listed.entries.find((entry) => entry.name === fileName);
@@ -353,6 +422,12 @@ async function main() {
   const expectedSize = Number(downloadResponse.headers.get('x-file-size'));
   const chunkSize = Number(downloadResponse.headers.get('x-chunk-size'));
   if (expectedSize !== size) throw new Error('download size header mismatch');
+
+  const wireBytes = Buffer.from(await downloadResponse.clone().arrayBuffer());
+  if (wireBytes.includes(Buffer.from(original.subarray(0, 32)))) {
+    throw new Error('download leaked plaintext on the wire');
+  }
+  record('download ciphertext on wire', `${wireBytes.length} encrypted bytes`);
 
   const reader = downloadResponse.body.getReader();
   let pending = new Uint8Array(0);
@@ -540,33 +615,22 @@ async function main() {
     `${tarEntries.size} entries, end marker verified`,
   );
 
-  /* ---------- preview + HTTP Range ---------- */
+  /* ---------- encrypted preview stream ---------- */
 
-  const previewToken = await api('/api/preview/token', {
-    path: `/${nestedRoot}/docs/2026/note.txt`,
-  });
-  const previewFull = await fetch(`${BASE_URL}${previewToken.url}`);
-  if (!previewFull.ok) throw new Error(`preview failed: ${previewFull.status}`);
-  if (!previewFull.headers.get('accept-ranges')) throw new Error('preview missing Accept-Ranges');
-  if (!String(previewFull.headers.get('content-type')).startsWith('text/plain')) {
-    throw new Error('preview content type mismatch');
+  const notePreview = await readPreviewStream(`/${nestedRoot}/docs/2026/note.txt`);
+  if (notePreview.raw.includes(nestedText)) {
+    throw new Error('preview leaked plaintext on the wire');
   }
-  const previewText = await previewFull.text();
-  if (previewText !== '嵌套目录上传测试\n') throw new Error('preview content mismatch');
-
-  const rangeResponse = await fetch(`${BASE_URL}${previewToken.url}`, {
-    headers: { Range: 'bytes=0-5' },
-  });
-  if (rangeResponse.status !== 206) throw new Error('range request did not return 206');
-  if (!rangeResponse.headers.get('content-range')?.startsWith('bytes 0-5/')) {
-    throw new Error('range response Content-Range mismatch');
+  if (notePreview.data.toString('utf8') !== '嵌套目录上传测试\n') {
+    throw new Error('preview plaintext mismatch');
   }
-  const rangeBytes = new Uint8Array(await rangeResponse.arrayBuffer());
-  // '嵌' and '套' are 3 UTF-8 bytes each, so bytes 0-5 decode to "嵌套".
-  if (Buffer.from(rangeBytes).toString('utf8') !== '嵌套') {
-    throw new Error('range response bytes mismatch');
+  if (notePreview.contentType !== 'text/plain') {
+    throw new Error(`preview content type mismatch: ${notePreview.contentType}`);
   }
-  record('preview token + HTTP range', '206 Partial Content honoured');
+  record(
+    'encrypted text preview',
+    `${notePreview.frames} AES-GCM frames, no plaintext on wire`,
+  );
 
   const bigSize = 6 * 1024 * 1024;
   const bigBytes = new Uint8Array(bigSize);
@@ -587,26 +651,23 @@ async function main() {
   }
   await api('/api/upload/finish', { id: bigInit.id });
 
-  const bigToken = await api('/api/preview/token', {
-    path: `/${nestedRoot}/big-range.bin`,
-  });
-  const bigRange = await fetch(`${BASE_URL}${bigToken.url}`, {
-    headers: { Range: 'bytes=0-' },
-  });
-  if (bigRange.status !== 206) {
-    throw new Error(`large range returned ${bigRange.status}, expected 206`);
+  const bigPreview = await readPreviewStream(`/${nestedRoot}/big-range.bin`);
+  if (bigPreview.size !== bigSize || bigPreview.data.length !== bigSize) {
+    throw new Error('large encrypted preview size mismatch');
   }
-  const bigLength = Number(bigRange.headers.get('content-length'));
-  if (bigLength !== bigSize) {
-    throw new Error(`large range truncated: ${bigLength} != ${bigSize}`);
+  if (bigPreview.raw.includes(bigBytes.subarray(0, 64))) {
+    throw new Error('large preview leaked plaintext on the wire');
   }
-  const bigBody = await bigRange.arrayBuffer();
-  if (bigBody.byteLength !== bigSize) {
-    throw new Error('large range body size mismatch');
+  if (sha256(bigPreview.data) !== sha256(bigBytes)) {
+    throw new Error('large encrypted preview content mismatch');
   }
-  record('large range preview', `${bigSize} bytes in one 206 response`);
+  record(
+    'large encrypted preview',
+    `${bigSize} bytes across ${bigPreview.frames} frames, SHA-256 identical`,
+  );
 
-  const htmlBody = '<!doctype html><html><body><h1>预览测试</h1><script>document.title="x"</script></body></html>';
+  const htmlBody =
+    '<!doctype html><html><body><h1>预览测试</h1><script>document.title="x"</script></body></html>';
   const htmlBytes = encoder.encode(htmlBody);
   const htmlInit = await api('/api/upload/init', {
     dir: `/${nestedRoot}`,
@@ -615,18 +676,31 @@ async function main() {
   });
   await uploadChunkBlob(htmlInit.id, 0, htmlBytes);
   await api('/api/upload/finish', { id: htmlInit.id });
-  const htmlToken = await api('/api/preview/token', { path: `/${nestedRoot}/preview.html` });
-  const htmlResponse = await fetch(`${BASE_URL}${htmlToken.url}`);
-  const htmlCsp = htmlResponse.headers.get('content-security-policy') || '';
-  if (!htmlCsp.includes('sandbox')) {
-    throw new Error('HTML preview is not sandboxed');
+  const htmlPreview = await readPreviewStream(`/${nestedRoot}/preview.html`);
+  if (htmlPreview.contentType !== 'text/html') {
+    throw new Error('HTML preview content type mismatch');
   }
-  if ((await htmlResponse.text()) !== htmlBody) throw new Error('HTML preview body mismatch');
-  record('sandboxed HTML preview', 'CSP sandbox enforced');
+  if (htmlPreview.data.toString('utf8') !== htmlBody) {
+    throw new Error('HTML preview body mismatch');
+  }
+  if (htmlPreview.raw.includes(Buffer.from('<h1>预览测试</h1>'))) {
+    throw new Error('HTML preview leaked plaintext on the wire');
+  }
+  record('encrypted HTML preview', 'ciphertext only, frontend injects sandbox CSP');
 
-  const noTokenResponse = await fetch(`${BASE_URL}/preview/not-a-real-token`);
-  if (noTokenResponse.status !== 404) throw new Error('unknown preview token was accepted');
-  record('preview token rejection', '404 for unknown token');
+  const unauthenticated = await fetch(`${BASE_URL}/api/preview/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (unauthenticated.status !== 401) {
+    throw new Error(`unauthenticated preview returned ${unauthenticated.status}`);
+  }
+  const retiredRawRoute = await fetch(`${BASE_URL}/preview/anything`);
+  if (retiredRawRoute.status !== 404) {
+    throw new Error('legacy plaintext preview route still exists');
+  }
+  record('preview access control', '401 without session, legacy raw route removed');
 
   /* ---------- account update ---------- */
 

@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-desktop-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentgod-files",
  "anyhow",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files-local"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentgod-desktop-common",
  "tauri",

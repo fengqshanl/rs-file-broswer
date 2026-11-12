@@ -29,6 +29,10 @@ const TEXT_STREAM_BYTES = 32 * 1024 * 1024;
 const HISTORY_KEY = 'agentgod.history.v1';
 const HISTORY_LIMIT = 300;
 const OFFICE_PREVIEW_BYTES = 64 * 1024 * 1024;
+const IMAGE_PREVIEW_BYTES = 128 * 1024 * 1024;
+const PDF_PREVIEW_BYTES = 256 * 1024 * 1024;
+const MEDIA_PREVIEW_BYTES = 512 * 1024 * 1024;
+const HTML_PREVIEW_BYTES = 32 * 1024 * 1024;
 const BLOB_DOWNLOAD_LIMIT = 1024 * 1024 * 1024;
 const SHEET_MAX_ROWS = 2000;
 const SHEET_MAX_COLS = 80;
@@ -1521,6 +1525,15 @@ function openPreview(entry) {
 
     let currentEntry = entry;
     let renderGeneration = 0;
+    let objectUrls = [];
+    const trackUrl = (url) => {
+      objectUrls.push(url);
+      return url;
+    };
+    const releaseObjectUrls = () => {
+      for (const url of objectUrls) URL.revokeObjectURL(url);
+      objectUrls = [];
+    };
     const controller = {
       dialog,
       kind: initialKind,
@@ -1559,13 +1572,14 @@ function openPreview(entry) {
         startDownload(joinPath(state.cwd, currentEntry.name), currentEntry.name);
 
       const generation = ++renderGeneration;
+      releaseObjectUrls();
       content.className = 'preview-content';
       const loading = div('preview-loading');
       loading.textContent = '正在准备预览…';
       content.replaceChildren(loading);
 
       try {
-        await renderPreview({ content, entry: nextEntry, kind: nextKind });
+        await renderPreview({ content, entry: nextEntry, kind: nextKind, trackUrl });
         if (generation !== renderGeneration) return;
         controller.video = content.querySelector('video');
       } catch (error) {
@@ -1584,6 +1598,7 @@ function openPreview(entry) {
       'close',
       () => {
         if (previewController === controller) previewController = null;
+        releaseObjectUrls();
       },
       { once: true },
     );
@@ -1632,45 +1647,227 @@ function previewProgress(wrapper) {
   };
 }
 
-async function renderPreview({ content, entry, kind }) {
+function previewByteLimit(kind) {
+  switch (kind) {
+    case 'image':
+    case 'svg':
+      return IMAGE_PREVIEW_BYTES;
+    case 'pdf':
+      return PDF_PREVIEW_BYTES;
+    case 'html':
+      return HTML_PREVIEW_BYTES;
+    case 'video':
+    case 'audio':
+      return MEDIA_PREVIEW_BYTES;
+    case 'docx':
+    case 'sheet':
+      return OFFICE_PREVIEW_BYTES;
+    default:
+      return 0;
+  }
+}
+
+function previewTooLarge(content, limit, action) {
+  content.replaceChildren(
+    previewMessage(
+      '文件过大，无法在线预览',
+      `加密预览需要先在浏览器内完整接收并解密，上限为 ${formatSize(limit)}，请下载后${action}。`,
+    ),
+  );
+}
+
+const PREVIEW_HTML_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; " +
+  "media-src data: blob:; font-src data: blob:; script-src 'none'; " +
+  "connect-src 'none'; base-uri 'none'; form-action 'none';";
+
+/** Injects a restrictive CSP because a blob document no longer gets the
+ * server's response headers. Scripts and network requests stay disabled. */
+function securePreviewHtml(html) {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_HTML_CSP}">`;
+  const head = /<head\b[^>]*>/i.exec(html);
+  if (head) {
+    const at = head.index + head[0].length;
+    return html.slice(0, at) + meta + html.slice(at);
+  }
+  const htmlTag = /<html\b[^>]*>/i.exec(html);
+  if (htmlTag) {
+    const at = htmlTag.index + htmlTag[0].length;
+    return `${html.slice(0, at)}<head>${meta}</head>${html.slice(at)}`;
+  }
+  return meta + html;
+}
+
+async function requestPreviewStream(path) {
+  const endpoint = '/api/preview/stream';
+  const aad = `POST ${endpoint}`;
+  const envelope = await encryptPayload(aad, { path });
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${state.token}`,
+    },
+    body: JSON.stringify(envelope),
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    let message = null;
+    try {
+      const body = await response.json();
+      message = body && body.error;
+    } catch {
+      message = null;
+    }
+    if (response.status === 401) handleSessionLost('会话已过期，请重新登录');
+    throw new Error(message || `读取文件失败 (${response.status})`);
+  }
+  const streamId = response.headers.get('x-stream-id');
+  if (!streamId || !response.body) throw new Error('服务器响应缺少加密流信息');
+  return {
+    reader: response.body.getReader(),
+    streamId,
+    size: Number(response.headers.get('x-file-size') || 0),
+    chunkSize: Number(response.headers.get('x-chunk-size') || 65536),
+    contentType:
+      response.headers.get('x-preview-content-type') || 'application/octet-stream',
+  };
+}
+
+async function readEncryptedPreview(source, onPlaintext) {
+  if (!state.key) throw new Error('会话已失效，请重新登录');
+  const { reader, streamId, chunkSize } = source;
+  let pending = new Uint8Array(0);
+  let sequence = 0;
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pending = concatBytes(pending, value);
+      while (pending.length >= 4) {
+        const length = new DataView(
+          pending.buffer,
+          pending.byteOffset,
+          4,
+        ).getUint32(0, false);
+        if (length > chunkSize + 16 + 1024) throw new Error('预览数据校验失败');
+        if (pending.length < 16 + length) break;
+        const iv = pending.subarray(4, 16);
+        const ciphertext = pending.subarray(16, 16 + length);
+        let plaintext;
+        try {
+          plaintext = new Uint8Array(
+            await crypto.subtle.decrypt(
+              {
+                name: 'AES-GCM',
+                iv,
+                additionalData: encoder.encode(`pv:${streamId}:${sequence}`),
+              },
+              state.key,
+              ciphertext,
+            ),
+          );
+        } catch {
+          throw new Error('预览数据解密失败，连接可能已被篡改');
+        }
+        sequence += 1;
+        pending = pending.subarray(16 + length);
+        received += plaintext.length;
+        if (await onPlaintext(plaintext, received)) {
+          await reader.cancel().catch(() => {});
+          return { received, stopped: true };
+        }
+      }
+    }
+    if (pending.length !== 0) throw new Error('预览数据不完整');
+    return { received, stopped: false };
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+}
+
+async function collectPreviewChunks(source, onProgress) {
+  const parts = [];
+  const result = await readEncryptedPreview(source, (chunk, received) => {
+    parts.push(chunk);
+    if (onProgress) onProgress(received, source.size);
+    return false;
+  });
+  if (source.size > 0 && result.received !== source.size) {
+    throw new Error('预览数据不完整，请重试');
+  }
+  return { parts, total: result.received };
+}
+
+function joinChunks(parts, total) {
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.length;
+  }
+  return bytes;
+}
+
+function mediaProgress(status, received, total, label) {
+  status.hidden = false;
+  status.textContent =
+    total > 0
+      ? `${label} ${formatSize(received)} / ${formatSize(total)}`
+      : `${label} ${formatSize(received)}`;
+}
+
+async function renderPreview({ content, entry, kind, trackUrl }) {
   if (kind === 'none') {
     content.replaceChildren(
       previewMessage('暂不支持在线预览此类型', '可以下载后使用本地应用打开。'),
     );
     return;
   }
-  if ((kind === 'docx' || kind === 'sheet') && entry.size > OFFICE_PREVIEW_BYTES) {
-    content.replaceChildren(
-      previewMessage(
-        '文件过大，无法在线预览',
-        `Office 文档在线预览上限为 ${formatSize(OFFICE_PREVIEW_BYTES)}，请下载后查看。`,
-      ),
+
+  const limit = previewByteLimit(kind);
+  if (limit && entry.size > limit) {
+    previewTooLarge(
+      content,
+      limit,
+      kind === 'video' || kind === 'audio' ? '播放' : '查看',
     );
     return;
   }
 
   const path = joinPath(state.cwd, entry.name);
-  const token = await api('/api/preview/token', { path });
-  const url = token.url;
-
-  if ((kind === 'docx' || kind === 'sheet') && token.size > OFFICE_PREVIEW_BYTES) {
-    content.replaceChildren(
-      previewMessage(
-        '文件过大，无法在线预览',
-        `Office 文档在线预览上限为 ${formatSize(OFFICE_PREVIEW_BYTES)}，请下载后查看。`,
-      ),
-    );
-    return;
-  }
 
   if (kind === 'image' || kind === 'svg') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
+    const status = mediaStatus('正在接收图片…');
+    wrapper.append(status);
+    content.replaceChildren(wrapper);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > IMAGE_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, IMAGE_PREVIEW_BYTES, '查看');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      mediaProgress(status, received, size || entry.size, '正在接收图片');
+    });
+    if (!wrapper.isConnected || total === 0) {
+      if (total === 0 && wrapper.isConnected) {
+        content.classList.remove('media-mode');
+        content.replaceChildren(previewMessage('图片为空', ''));
+      }
+      return;
+    }
+    const type = source.contentType || 'application/octet-stream';
+    const url = trackUrl(URL.createObjectURL(new Blob(parts, { type })));
     const image = document.createElement('img');
     image.className = 'preview-image';
     image.alt = entry.name;
     image.decoding = 'async';
-    const status = mediaStatus('正在接收图片…');
     image.addEventListener('load', () => status.remove(), { once: true });
     image.addEventListener('error', () => {
       content.classList.remove('media-mode');
@@ -1678,23 +1875,43 @@ async function renderPreview({ content, entry, kind }) {
         previewMessage('图片加载失败', '文件可能已损坏或格式不受支持。'),
       );
     });
+    status.textContent = '正在解码图片…';
     image.src = url;
-    wrapper.append(image, status);
-    content.replaceChildren(wrapper);
+    wrapper.append(image);
     return;
   }
 
   if (kind === 'video') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
+    const status = mediaStatus('正在接收视频…');
+    wrapper.append(status);
+    content.replaceChildren(wrapper);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > MEDIA_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, MEDIA_PREVIEW_BYTES, '播放');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      mediaProgress(status, received, size || entry.size, '正在接收视频');
+    });
+    if (!wrapper.isConnected) return;
+    if (total === 0) {
+      content.classList.remove('media-mode');
+      content.replaceChildren(previewMessage('视频为空', ''));
+      return;
+    }
+    const url = trackUrl(
+      URL.createObjectURL(new Blob(parts, { type: source.contentType || 'video/mp4' })),
+    );
     const video = document.createElement('video');
     video.className = 'preview-video';
     video.controls = true;
     video.autoplay = true;
     video.playsInline = true;
     video.preload = 'metadata';
-    video.src = url;
-    const status = mediaStatus('正在连接…');
     const showStatus = (text) => {
       status.hidden = false;
       status.textContent = text;
@@ -1706,27 +1923,6 @@ async function renderPreview({ content, entry, kind }) {
     video.addEventListener('stalled', () => showStatus('正在缓冲…'));
     video.addEventListener('playing', hideStatus);
     video.addEventListener('canplay', hideStatus);
-    video.addEventListener('progress', () => {
-      if (status.hidden) return;
-      try {
-        const buffered = video.buffered;
-        if (
-          buffered.length > 0 &&
-          Number.isFinite(video.duration) &&
-          video.duration > 0
-        ) {
-          const percent = Math.min(
-            100,
-            Math.round((buffered.end(buffered.length - 1) / video.duration) * 100),
-          );
-          status.textContent = video.paused
-            ? `已缓冲 ${percent}%`
-            : `正在播放 · 已缓冲 ${percent}%`;
-        }
-      } catch {
-        /* buffered ranges can be unavailable while metadata loads */
-      }
-    });
     video.addEventListener('error', () => {
       content.classList.remove('media-mode');
       content.replaceChildren(
@@ -1736,20 +1932,41 @@ async function renderPreview({ content, entry, kind }) {
         ),
       );
     });
-    wrapper.append(video, status);
-    content.replaceChildren(wrapper);
+    status.textContent = '正在加载视频…';
+    video.src = url;
+    wrapper.append(video);
     return;
   }
 
   if (kind === 'audio') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
+    const status = mediaStatus('正在接收音频…');
+    wrapper.append(status);
+    content.replaceChildren(wrapper);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > MEDIA_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, MEDIA_PREVIEW_BYTES, '播放');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      mediaProgress(status, received, size || entry.size, '正在接收音频');
+    });
+    if (!wrapper.isConnected) return;
+    if (total === 0) {
+      content.classList.remove('media-mode');
+      content.replaceChildren(previewMessage('音频为空', ''));
+      return;
+    }
+    const url = trackUrl(
+      URL.createObjectURL(new Blob(parts, { type: source.contentType || 'audio/mpeg' })),
+    );
     const audio = document.createElement('audio');
     audio.className = 'preview-audio';
     audio.controls = true;
     audio.autoplay = true;
-    audio.src = url;
-    const status = mediaStatus('正在连接…');
     audio.addEventListener('waiting', () => {
       status.hidden = false;
       status.textContent = '正在缓冲…';
@@ -1764,42 +1981,83 @@ async function renderPreview({ content, entry, kind }) {
     audio.addEventListener('canplay', () => {
       status.hidden = true;
     });
-    wrapper.append(audio, status);
-    content.replaceChildren(wrapper);
+    status.textContent = '正在加载音频…';
+    audio.src = url;
+    wrapper.append(audio);
     return;
   }
 
   if (kind === 'pdf') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
+    const status = mediaStatus('正在接收 PDF…');
+    wrapper.append(status);
+    content.replaceChildren(wrapper);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > PDF_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, PDF_PREVIEW_BYTES, '查看');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      mediaProgress(status, received, size || entry.size, '正在接收 PDF');
+    });
+    if (!wrapper.isConnected) return;
+    if (total === 0) {
+      content.classList.remove('media-mode');
+      content.replaceChildren(previewMessage('PDF 为空', ''));
+      return;
+    }
     const frame = document.createElement('iframe');
     frame.className = 'preview-frame';
     frame.title = entry.name;
-    const status = mediaStatus('正在加载 PDF…');
+    const url = trackUrl(
+      URL.createObjectURL(new Blob(parts, { type: 'application/pdf' })),
+    );
+    status.textContent = '正在加载 PDF…';
     frame.addEventListener('load', () => status.remove(), { once: true });
     frame.src = url;
-    wrapper.append(frame, status);
-    content.replaceChildren(wrapper);
+    wrapper.append(frame);
     return;
   }
 
   if (kind === 'html') {
     content.classList.add('media-mode');
+    const note = div('preview-banner');
+    note.textContent = 'HTML 在隔离沙箱中静态渲染：脚本与外部网络请求已禁用。';
+    const frameWrap = div('preview-media-wrap');
+    const status = mediaStatus('正在接收 HTML…');
+    frameWrap.append(status);
+    const wrapper = div('preview-stack');
+    wrapper.append(note, frameWrap);
+    content.replaceChildren(wrapper);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > HTML_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, HTML_PREVIEW_BYTES, '查看');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      mediaProgress(status, received, size || entry.size, '正在接收 HTML');
+    });
+    if (!wrapper.isConnected) return;
+    const html = securePreviewHtml(
+      new TextDecoder('utf-8', { fatal: false }).decode(joinChunks(parts, total)),
+    );
     const frame = document.createElement('iframe');
     frame.className = 'preview-frame';
     frame.title = entry.name;
-    frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-modals');
+    frame.setAttribute('sandbox', '');
     frame.setAttribute('referrerpolicy', 'no-referrer');
-    const note = div('preview-banner');
-    note.textContent = 'HTML 在隔离沙箱中运行：脚本可运行，但无法访问本应用的登录状态或接口。';
-    const wrapper = div('preview-stack');
-    const frameWrap = div('preview-media-wrap');
-    const status = mediaStatus('正在加载…');
+    const url = trackUrl(
+      URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' })),
+    );
+    status.textContent = '正在加载 HTML…';
     frame.addEventListener('load', () => status.remove(), { once: true });
-    frameWrap.append(frame, status);
-    wrapper.append(note, frameWrap);
-    content.replaceChildren(wrapper);
     frame.src = url;
+    frameWrap.append(frame);
     return;
   }
 
@@ -1814,24 +2072,16 @@ async function renderPreview({ content, entry, kind }) {
     wrapper.append(banner, pre);
     content.replaceChildren(wrapper);
 
-    const response = await fetch(url, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`读取文件失败 (${response.status})`);
-    const total =
-      Number(response.headers.get('content-length')) || token.size || 0;
-    const reader = response.body.getReader();
+    const source = await requestPreviewStream(path);
+    const total = source.size || entry.size || 0;
     const textDecoder = new TextDecoder('utf-8', { fatal: false });
     let received = 0;
     let truncated = false;
     let lastPaint = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!wrapper.isConnected) {
-        await reader.cancel().catch(() => {});
-        return;
-      }
-      received += value.length;
-      textNode.appendData(textDecoder.decode(value, { stream: true }));
+    await readEncryptedPreview(source, (chunk, count) => {
+      if (!wrapper.isConnected) return true;
+      received = count;
+      textNode.appendData(textDecoder.decode(chunk, { stream: true }));
       const now = performance.now();
       if (now - lastPaint > 120) {
         lastPaint = now;
@@ -1842,10 +2092,11 @@ async function renderPreview({ content, entry, kind }) {
       }
       if (received >= TEXT_STREAM_BYTES) {
         truncated = true;
-        await reader.cancel().catch(() => {});
-        break;
+        return true;
       }
-    }
+      return false;
+    });
+    if (!wrapper.isConnected) return;
     textNode.appendData(textDecoder.decode());
     banner.textContent = truncated
       ? `文件较大，仅显示前 ${formatSize(TEXT_STREAM_BYTES)}（已接收 ${formatSize(received)}），完整内容请下载查看。`
@@ -1862,12 +2113,20 @@ async function renderPreview({ content, entry, kind }) {
     wrapper.append(documentView);
     content.replaceChildren(wrapper);
     await loadScript('/vendor/mammoth.js');
-    const buffer = await fetchStreamBytes(url, token.size, (received, total) => {
-      progress.update(received, total);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > OFFICE_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, OFFICE_PREVIEW_BYTES, '查看');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      progress.update(received, size || entry.size);
     });
     if (!wrapper.isConnected) return;
     progress.parse('正在解析文档…');
-    const result = await window.mammoth.convertToHtml({ arrayBuffer: buffer });
+    const bytes = joinChunks(parts, total);
+    const result = await window.mammoth.convertToHtml({ arrayBuffer: bytes.buffer });
     documentView.append(sanitizeHtml(result.value || ''));
     if (!documentView.textContent.trim() && !documentView.querySelector('img, table')) {
       documentView.append(previewMessage('文档没有可显示的文本内容', ''));
@@ -1881,20 +2140,28 @@ async function renderPreview({ content, entry, kind }) {
     const progress = previewProgress(wrapper);
     content.replaceChildren(wrapper);
     await loadScript('/vendor/xlsx.js');
-    const extension = fileExtension(entry.name);
-    const buffer = await fetchStreamBytes(url, token.size, (received, total) => {
-      progress.update(received, total);
+
+    const source = await requestPreviewStream(path);
+    if (source.size > OFFICE_PREVIEW_BYTES) {
+      await source.reader.cancel().catch(() => {});
+      previewTooLarge(content, OFFICE_PREVIEW_BYTES, '查看');
+      return;
+    }
+    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
+      progress.update(received, size || entry.size);
     });
     if (!wrapper.isConnected) return;
     progress.parse('正在解析表格…');
+    const bytes = joinChunks(parts, total);
+    const extension = fileExtension(entry.name);
     let workbook;
     if (extension === 'csv' || extension === 'tsv') {
-      workbook = window.XLSX.read(new TextDecoder('utf-8').decode(buffer), {
+      workbook = window.XLSX.read(new TextDecoder('utf-8').decode(bytes), {
         type: 'string',
         raw: false,
       });
     } else {
-      workbook = window.XLSX.read(buffer, { type: 'array' });
+      workbook = window.XLSX.read(bytes, { type: 'array' });
     }
     progress.remove();
     wrapper.append(renderWorkbook(workbook));
@@ -1902,35 +2169,6 @@ async function renderPreview({ content, entry, kind }) {
   }
 
   content.replaceChildren(previewMessage('暂不支持在线预览此类型', '可以下载后使用本地应用打开。'));
-}
-
-async function fetchStreamBytes(url, expectedSize, onProgress) {
-  const response = await fetch(url, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`读取文件失败 (${response.status})`);
-  const total = Number(response.headers.get('content-length')) || expectedSize || 0;
-  const reader = response.body.getReader();
-  const chunks = [];
-  let received = 0;
-  let lastPaint = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    const now = performance.now();
-    if (onProgress && now - lastPaint > 120) {
-      lastPaint = now;
-      onProgress(received, total);
-    }
-  }
-  if (onProgress) onProgress(received, total || received);
-  const buffer = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    buffer.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return buffer;
 }
 
 const ALLOWED_PREVIEW_TAGS = new Set([
