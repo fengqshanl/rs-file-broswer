@@ -49,6 +49,8 @@ jobs:
       #   2. its key ID matches the pubkey compiled into both apps
       # Point 2 is what makes the difference between "update downloads" and
       # "update installs": the updater rejects a signature from another key.
+      # Every failure path names what the secret actually contained, because
+      # the secret itself can never be inspected from the outside.
       - name: Preflight updater signing key
         if: steps.signing.outputs.enabled == 'true'
         shell: bash
@@ -56,26 +58,50 @@ jobs:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           key_path="${RUNNER_TEMP}/agentgod-updater.key"
-          node scripts/normalize-updater-key.mjs "$key_path"
 
-          npm install --global @tauri-apps/cli@2 >/dev/null
+          material_line="$(node scripts/normalize-updater-key.mjs --classify)"
+          material="${material_line%% *}"
+          if [ -n "${SIGNING_PASSWORD:-}" ]; then
+            password_state="已配置"
+          else
+            password_state="未配置"
+          fi
+          echo "::notice::签名材料类型=${material}，密码=${password_state}"
+
+          if ! node scripts/normalize-updater-key.mjs "$key_path"; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY 内容有问题（类型=${material}），见上方说明"
+            exit 1
+          fi
+
+          cli_version="$(npx --yes @tauri-apps/cli@2 --version 2>&1 | tail -n 1)"
+          echo "::notice::使用 ${cli_version}"
 
           preflight="${RUNNER_TEMP}/preflight.bin"
           printf 'agentgod updater signing preflight\n' > "$preflight"
-          if ! tauri signer sign \
+          sign_log="${RUNNER_TEMP}/updater-sign.log"
+          if ! npx --yes @tauri-apps/cli@2 signer sign \
                 --private-key-path "$key_path" \
                 --password "${SIGNING_PASSWORD:-}" \
-                "$preflight"; then
-            echo "::error::更新签名私钥无法使用。请确认 TAURI_SIGNING_PRIVATE_KEY 是 ~/.tauri/agentgod-files.key 的完整内容；若密钥设置了密码，TAURI_SIGNING_PRIVATE_KEY_PASSWORD 必须与生成时一致"
+                "$preflight" > "$sign_log" 2>&1; then
+            detail="$(grep -m1 -E 'Error|error|failed' "$sign_log" 2>/dev/null | sed 's/^[[:space:]]*//' | cut -c1-300 || true)"
+            echo "::error::更新签名私钥无法使用（材料=${material}，密码=${password_state}）：${detail:-签名器无输出}"
+            echo '----- signer output -----'
+            tail -n 20 "$sign_log" || true
             exit 1
           fi
 
           node scripts/verify-updater-signature.mjs \
-            "$preflight" "${preflight}.sig" desktop/local/tauri.conf.json
+            "$preflight" "${preflight}.sig" desktop/local/tauri.conf.json || {
+            echo "::error::私钥与 desktop/local/tauri.conf.json 的 pubkey 不匹配"
+            exit 1
+          }
           node scripts/verify-updater-signature.mjs \
-            "$preflight" "${preflight}.sig" desktop/client/tauri.conf.json
+            "$preflight" "${preflight}.sig" desktop/client/tauri.conf.json || {
+            echo "::error::私钥与 desktop/client/tauri.conf.json 的 pubkey 不匹配"
+            exit 1
+          }
 
       - name: Create or reuse release
         id: release
