@@ -91,6 +91,16 @@ jobs:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if [ -n "$SIGNING_KEY" ]; then
+            # A common mistake is pasting the public key or adding quotes.
+            # Validate the base64 payload before six platform builds start.
+            if ! node -e "
+              const raw = (process.env.SIGNING_KEY || '').replace(/\s+/g, '');
+              const decoded = Buffer.from(raw, 'base64').toString('utf8');
+              process.exit(decoded.includes('encrypted secret key') ? 0 : 1);
+            "; then
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是有效的 Tauri 更新签名私钥（应为 rsign encrypted secret key 的 base64 内容），请重新复制 ~/.tauri/agentgod-files.key 的完整内容"
+              exit 1
+            fi
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -164,6 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: desktop-v${{ needs.prepare.outputs.version }}
+          EXPECT_SIGNED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '1' || '0' }}
         run: |
           set -euo pipefail
           OUTPUT_DIR=.update-manifests \

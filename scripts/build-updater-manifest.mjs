@@ -73,11 +73,16 @@ async function github(pathname) {
   const headers = {
     'User-Agent': 'agentgod-files-release',
     Accept: 'application/vnd.github+json',
+    // GitHub's API can serve a cached asset list for up to a minute. The
+    // manifest job runs right after the uploads, so bypass that cache.
+    'Cache-Control': 'no-cache',
   };
   if (process.env.GH_TOKEN) {
     headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
   }
-  const response = await fetch(`https://api.github.com${pathname}`, { headers });
+  const separator = pathname.includes('?') ? '&' : '?';
+  const url = `https://api.github.com${pathname}${separator}ts=${Date.now()}`;
+  const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
   }
@@ -85,13 +90,25 @@ async function github(pathname) {
 }
 
 async function readSignature(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`无法读取签名文件 ${url}: HTTP ${response.status}`);
+  // A freshly uploaded asset can take a moment to become visible on the CDN.
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const response = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const signature = (await response.text()).trim();
+      if (!signature) throw new Error('签名文件为空');
+      return signature;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
+    }
   }
-  const signature = (await response.text()).trim();
-  if (!signature) throw new Error(`签名文件为空：${url}`);
-  return signature;
+  throw new Error(`无法读取签名文件 ${url}: ${lastError?.message || lastError}`);
+}
+
+export function hasSignedAssets(release) {
+  return (release.assets || []).some((asset) => asset.name.endsWith('.sig'));
 }
 
 export async function buildManifests(release, tag, outputDir) {
@@ -165,6 +182,8 @@ async function selfTest() {
   assert.equal(versionFromTag('desktop-v0.1.3'), '0.1.3');
   assert.equal(appSlug('latest-local.json'), null);
   assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
+  assert.equal(hasSignedAssets(release), true);
+  assert.equal(hasSignedAssets({ assets: [asset('AgentGod.Files.Local_0.1.3_amd64.AppImage')] }), false);
   console.log('updater manifest self-test OK');
 }
 
@@ -172,7 +191,27 @@ async function main() {
   const tag = process.env.RELEASE_TAG;
   if (!tag) throw new Error('缺少 RELEASE_TAG 环境变量');
   const outputDir = process.env.OUTPUT_DIR || process.cwd();
-  const release = await github(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`);
+  const expectSigned = process.env.EXPECT_SIGNED === '1';
+  const releasePath = `/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`;
+  let release = await github(releasePath);
+
+  // When the signing secret is configured, missing signatures mean the build
+  // silently degraded. Wait for the upload to become visible, then fail loudly
+  // instead of publishing a release without the hot-update channel.
+  if (expectSigned) {
+    for (let attempt = 0; attempt < 8 && !hasSignedAssets(release); attempt += 1) {
+      console.log(`waiting for signed assets to appear (${attempt + 1}/8)...`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      release = await github(releasePath);
+    }
+    if (!hasSignedAssets(release)) {
+      throw new Error(
+        '已配置 TAURI_SIGNING_PRIVATE_KEY，但 Release 中没有任何 .sig 更新包，' +
+          '请检查构建日志中的签名步骤',
+      );
+    }
+  }
+
   await buildManifests(release, tag, outputDir);
 }
 
