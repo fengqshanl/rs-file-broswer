@@ -28,6 +28,11 @@ pub struct Config {
     pub tls_extra_dns: Vec<String>,
     pub login_max_failures: u32,
     pub login_window: Duration,
+    /// Desktop "local" mode: no login, loopback only, root can be switched.
+    pub local_mode: bool,
+    /// The standalone server always uses TLS; desktop companions serve HTTP on
+    /// loopback and never expose it to the network.
+    pub tls_enabled: bool,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -49,6 +54,13 @@ where
             .map_err(|err| anyhow::anyhow!("环境变量 {name} 无效: {err}")),
         None => Ok(default),
     }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env_opt(name).as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on")
+    )
 }
 
 fn env_list<T>(name: &str) -> Result<Vec<T>>
@@ -81,7 +93,9 @@ impl Config {
         std::fs::create_dir_all(&tmp_raw)
             .with_context(|| format!("无法创建临时目录: {}", tmp_raw.display()))?;
         let tmp_root = std::fs::canonicalize(&tmp_raw)?;
-        if tmp_root == data_root || !tmp_root.starts_with(&data_root) {
+        let local_mode = env_flag("LOCAL_MODE");
+        let tls_enabled = !env_flag("TLS_DISABLED");
+        if !local_mode && (tmp_root == data_root || !tmp_root.starts_with(&data_root)) {
             bail!("TMP_ROOT 必须是 DATA_ROOT 内的独立子目录（保证上传完成时原子移动）");
         }
 
@@ -102,10 +116,11 @@ impl Config {
         let admin_user = env_or("ADMIN_USER", "admin");
         let admin_password = env_opt("ADMIN_PASSWORD");
         let admin_password_hash = env_opt("ADMIN_PASSWORD_HASH");
-        if admin_password.is_none() && admin_password_hash.is_none() {
+        if !local_mode && admin_password.is_none() && admin_password_hash.is_none() {
             bail!("必须设置 ADMIN_PASSWORD 或 ADMIN_PASSWORD_HASH");
         }
-        if admin_password_hash.is_none()
+        if !local_mode
+            && admin_password_hash.is_none()
             && admin_password
                 .as_deref()
                 .map(str::chars)
@@ -177,6 +192,8 @@ impl Config {
             tls_extra_dns: env_list::<String>("TLS_EXTRA_DNS")?,
             login_max_failures,
             login_window: Duration::from_secs(login_window_secs),
+            local_mode,
+            tls_enabled,
         })
     }
 }

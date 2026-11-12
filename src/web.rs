@@ -14,17 +14,21 @@ use axum::{
 };
 use tokio::time::MissedTickBehavior;
 
-use crate::{auth, error::log, files, preview, state::AppState};
+use crate::{app, auth, error::log, files, preview, state::AppState};
 
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let local_mode = state.cfg.local_mode;
+    let router = Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
         .route("/favicon.svg", get(favicon))
         .route("/healthz", get(health))
+        .route("/app/info", get(app::info))
+        .route("/app/local/root", post(app::set_root))
+        .route("/api/local-login", get(auth::local_login))
         .route("/api/pubkey", get(auth::pubkey))
         .route("/api/login", post(auth::login))
         .route("/api/logout", post(auth::logout))
@@ -44,9 +48,38 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/upload/chunk/{id}/{seq}", put(files::upload_chunk))
         .route("/api/upload/finish", post(files::upload_finish))
         .route("/api/upload/abort", post(files::upload_abort))
-        .with_state(state)
+        .with_state(state);
+    // The desktop companion is unauthenticated and exposes the local disk;
+    // refuse requests whose Host is not a loopback name to blunt DNS rebinding.
+    let router = if local_mode {
+        router.layer(middleware::from_fn(loopback_host_guard))
+    } else {
+        router
+    };
+    router
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(log_requests))
+}
+
+pub fn is_loopback_host(value: &str) -> bool {
+    let host = if let Some(rest) = value.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        value.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+async fn loopback_host_guard(request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !is_loopback_host(host) {
+        return (axum::http::StatusCode::MISDIRECTED_REQUEST, "invalid host").into_response();
+    }
+    next.run(request).await
 }
 
 pub fn spawn_cleanup(state: Arc<AppState>) {
@@ -137,7 +170,7 @@ fn asset(content: &'static str, content_type: &'static str, cache: &'static str)
     response
 }
 
-async fn index() -> Response {
+pub async fn index() -> Response {
     asset(
         include_str!("../static/index.html"),
         "text/html; charset=utf-8",
@@ -145,7 +178,7 @@ async fn index() -> Response {
     )
 }
 
-async fn app_js() -> Response {
+pub async fn app_js() -> Response {
     asset(
         include_str!("../static/app.js"),
         "application/javascript; charset=utf-8",
@@ -153,7 +186,7 @@ async fn app_js() -> Response {
     )
 }
 
-async fn style_css() -> Response {
+pub async fn style_css() -> Response {
     asset(
         include_str!("../static/style.css"),
         "text/css; charset=utf-8",
@@ -161,7 +194,7 @@ async fn style_css() -> Response {
     )
 }
 
-async fn favicon() -> Response {
+pub async fn favicon() -> Response {
     asset(
         include_str!("../static/favicon.svg"),
         "image/svg+xml",
@@ -169,7 +202,7 @@ async fn favicon() -> Response {
     )
 }
 
-async fn mammoth_js() -> Response {
+pub async fn mammoth_js() -> Response {
     asset(
         include_str!("../static/vendor/mammoth.browser.min.js"),
         "application/javascript; charset=utf-8",
@@ -177,7 +210,7 @@ async fn mammoth_js() -> Response {
     )
 }
 
-async fn xlsx_js() -> Response {
+pub async fn xlsx_js() -> Response {
     asset(
         include_str!("../static/vendor/xlsx.full.min.js"),
         "application/javascript; charset=utf-8",

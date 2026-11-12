@@ -89,6 +89,12 @@ pub fn verify_password_hash(hash: &str, password: &str) -> bool {
         .is_ok()
 }
 
+pub fn random_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    key
+}
+
 pub fn random_b64(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     OsRng.fill_bytes(&mut buf);

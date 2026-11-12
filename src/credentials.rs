@@ -17,6 +17,17 @@ pub struct Credentials {
 }
 
 impl Credentials {
+    /// Local desktop mode never authenticates, so no usable password exists.
+    pub fn local() -> (Self, PathBuf) {
+        (
+            Credentials {
+                username: "local".to_string(),
+                password_hash: "!".to_string(),
+            },
+            PathBuf::new(),
+        )
+    }
+
     /// The credentials file wins over ADMIN_USER / ADMIN_PASSWORD after first
     /// boot so that changes made in the web UI survive container restarts.
     pub fn load_or_init(cfg: &Config) -> Result<(Self, PathBuf)> {

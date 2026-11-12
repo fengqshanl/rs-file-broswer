@@ -15,8 +15,9 @@ axum-server = { version = "0.7.3", default-features = false, features = ["tls-ru
 base64 = "0.22"
 bytes = "1"
 dashmap = "6"
+dirs = "5"
+fs2 = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-libc = "0.2"
 rand = "0.8"
 rcgen = "0.12"
 rsa = { version = "0.9", features = ["sha2"] }

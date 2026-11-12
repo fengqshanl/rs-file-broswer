@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AgentGod Files Client",
+  "mainBinaryName": "agentgod-files-client",
+  "version": "0.1.0",
+  "identifier": "com.agentgod.files.client",
+  "build": {
+    "frontendDist": "../web"
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "连接远程 AgentGod Files 服务器",
+    "longDescription": "AgentGod Files 客户端：保存并切换多台远程服务器，加密登录后可浏览、上传、下载和预览远程文件。",
+    "copyright": "MIT License",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      },
+      "wix": {
+        "language": ["zh-CN", "en-US"]
+      }
+    }
+  }
+}

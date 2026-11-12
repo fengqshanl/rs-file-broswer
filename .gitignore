@@ -1,4 +1,6 @@
 /target
+/desktop/*/target
+/desktop/*/gen/schemas
 /state
 /data
 /.env

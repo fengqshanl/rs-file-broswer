@@ -1,7 +1,7 @@
 use std::{
     net::IpAddr,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{atomic::AtomicU64, Arc, RwLock as StdRwLock},
     time::{Duration, Instant},
 };
 
@@ -22,6 +22,9 @@ pub struct AppState {
     pub sessions: DashMap<String, Session>,
     pub preview_tokens: DashMap<String, PreviewToken>,
     pub listings: DashMap<PathBuf, CachedListing>,
+    /// Mutable in desktop local mode (switch between home, filesystem root,
+    /// drives); fixed to `cfg.data_root` for the standalone server.
+    current_root: StdRwLock<PathBuf>,
     pub login_guard: LoginGuard,
     pub uploads: DashMap<String, Arc<UploadSession>>,
     pub upload_limiter: Arc<RateLimiter>,
@@ -129,6 +132,18 @@ impl LoginGuard {
 }
 
 impl AppState {
+    pub fn data_root(&self) -> PathBuf {
+        self.current_root
+            .read()
+            .expect("data root lock poisoned")
+            .clone()
+    }
+
+    pub fn set_data_root(&self, root: PathBuf) {
+        *self.current_root.write().expect("data root lock poisoned") = root;
+        self.listings.clear();
+    }
+
     pub fn new(
         cfg: Arc<Config>,
         crypto: Crypto,
@@ -136,7 +151,7 @@ impl AppState {
         credentials_path: PathBuf,
     ) -> Self {
         let burst: f64 = 4.0 * 1024.0 * 1024.0;
-        Self {
+        let state = Self {
             upload_limiter: Arc::new(RateLimiter::new(
                 cfg.upload_rate_bps,
                 burst.max(cfg.upload_rate_bps),
@@ -155,10 +170,24 @@ impl AppState {
             sessions: DashMap::new(),
             preview_tokens: DashMap::new(),
             listings: DashMap::new(),
+            current_root: StdRwLock::new(cfg.data_root.clone()),
             uploads: DashMap::new(),
             login_guard: LoginGuard::new(cfg.login_max_failures, cfg.login_window),
             cfg,
             crypto,
+        };
+        if state.cfg.local_mode {
+            let now = Instant::now();
+            state.sessions.insert(
+                crate::auth::LOCAL_SESSION_TOKEN.to_string(),
+                Session {
+                    key: crate::crypto::random_key(),
+                    user: "local".to_string(),
+                    expires_at: now + Duration::from_secs(365 * 24 * 3600),
+                    hard_expires_at: now + Duration::from_secs(3650 * 24 * 3600),
+                },
+            );
         }
+        state
     }
 }

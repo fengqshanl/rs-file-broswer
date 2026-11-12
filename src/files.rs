@@ -1,8 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::CString,
     io,
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -109,7 +107,7 @@ struct UploadIdRequest {
 }
 
 #[derive(Clone, Serialize)]
-pub(crate) struct Entry {
+pub struct Entry {
     name: String,
     is_dir: bool,
     is_symlink: bool,
@@ -199,7 +197,8 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
 }
 
 fn ensure_allowed(state: &AppState, canonical: &Path) -> Result<(), ApiError> {
-    if !canonical.starts_with(&state.cfg.data_root) {
+    let root = state.data_root();
+    if !canonical.starts_with(&root) {
         return Err(ApiError::forbidden("路径越界"));
     }
     if canonical == state.cfg.tmp_root || canonical.starts_with(&state.cfg.tmp_root) {
@@ -210,10 +209,11 @@ fn ensure_allowed(state: &AppState, canonical: &Path) -> Result<(), ApiError> {
 
 async fn resolve_dir(state: &AppState, input: &str) -> Result<(PathBuf, String), ApiError> {
     let clean = clean_rel(input)?;
+    let root = state.data_root();
     let joined = if clean.is_empty() {
-        state.cfg.data_root.clone()
+        root
     } else {
-        state.cfg.data_root.join(&clean)
+        root.join(&clean)
     };
     let canonical = tokio::fs::canonicalize(&joined)
         .await
@@ -235,7 +235,7 @@ async fn ensure_dir_path(state: &AppState, clean: &str) -> Result<bool, ApiError
         return Ok(false);
     }
 
-    let mut current = state.cfg.data_root.clone();
+    let mut current = state.data_root();
     let mut created_any = false;
 
     for component in clean.split('/').filter(|part| !part.is_empty()) {
@@ -304,7 +304,7 @@ pub async fn resolve_file(
     if clean.is_empty() {
         return Err(ApiError::bad("不能下载根目录"));
     }
-    let joined = state.cfg.data_root.join(&clean);
+    let joined = state.data_root().join(&clean);
     let canonical = tokio::fs::canonicalize(&joined)
         .await
         .map_err(|_| ApiError::not_found("文件不存在"))?;
@@ -320,13 +320,7 @@ pub async fn resolve_file(
 }
 
 fn free_space(path: &Path) -> Option<u64> {
-    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) };
-    if rc != 0 {
-        return None;
-    }
-    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+    fs2::available_space(path).ok()
 }
 
 pub fn rfc5987(value: &str) -> String {
@@ -991,6 +985,21 @@ async fn remove_temp(path: &Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
 
+/// Desktop local mode keeps temp files in the app data directory, which can be
+/// on another filesystem than the selected root. Fall back to copy+remove.
+async fn move_file(source: &Path, target: &Path) -> io::Result<()> {
+    match tokio::fs::rename(source, target).await {
+        Ok(()) => Ok(()),
+        Err(rename_error) => match tokio::fs::copy(source, target).await {
+            Ok(_) => {
+                let _ = tokio::fs::remove_file(source).await;
+                Ok(())
+            }
+            Err(_) => Err(rename_error),
+        },
+    }
+}
+
 pub async fn upload_finish(
     State(state): State<Arc<AppState>>,
     session: AuthSession,
@@ -1049,7 +1058,7 @@ pub async fn upload_finish(
         remove_temp(&temp_path).await;
         return Err(ApiError::conflict("同名文件或文件夹已存在"));
     }
-    if let Err(err) = tokio::fs::rename(&temp_path, &final_path).await {
+    if let Err(err) = move_file(&temp_path, &final_path).await {
         remove_temp(&temp_path).await;
         return Err(ApiError::internal(err.to_string()));
     }

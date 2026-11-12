@@ -1,15 +1,16 @@
 # AgentGod Files
 
-一个用 Rust 编写的轻量级自托管文件服务器：单二进制、低内存占用，面向低功耗设备（ARM64 单板机、NAS、旧笔记本）设计。自带加密登录、应用层加密传输、在线预览、带宽与并发保护，用 Docker 一条命令即可部署。
+一个用 Rust 编写的轻量级自托管文件服务器：单二进制、低内存占用，面向低功耗设备（ARM64 单板机、NAS、旧笔记本）设计。自带加密登录、应用层加密传输、在线预览、带宽与并发保护，用 Docker 一条命令即可部署；同时提供 Windows / macOS / Linux 桌面应用。
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.82%2B-orange)
-![Platform](https://img.shields.io/badge/platform-linux%20%7C%20arm64%20%7C%20amd64-lightgrey)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)
 
 ## 目录
 
 - [特性](#特性)
 - [界面预览](#界面预览)
+- [桌面应用](#桌面应用windows--macos--linux)
 - [快速开始](#快速开始)
 - [配置](#配置)
 - [使用说明](#使用说明)
@@ -40,6 +41,7 @@
 - **HTTPS-only**：内置自签名证书生成，可替换为受信证书
 - **资源保护**：全局令牌桶限速、传输/预览并发上限、磁盘安全余量、容器资源限制
 - **单文件部署**：前端资源编译进二进制，运行时镜像约 15 MB，空闲内存约 1–3 MB
+- **桌面应用**：提供 Tauri 2 本机版与远程客户端，支持 Windows / macOS / Linux，多服务器配置、原生窗口与系统文件拖拽
 
 ## 界面预览
 
@@ -48,6 +50,39 @@
 ![文件列表](docs/ui-files.jpg)
 
 ![在线预览](docs/ui-preview.jpg)
+
+## 桌面应用（Windows / macOS / Linux）
+
+从 [GitHub Releases](https://github.com/fengqshanl/rs-file-broswer/releases) 下载安装包，无需 Docker、Node.js 或浏览器。
+
+| 应用 | 适用场景 | 行为 |
+| --- | --- | --- |
+| **AgentGod Files Local** | 本机文件管理 | 启动即浏览本机目录，无需登录；可在「主目录 / 根目录 / Windows 盘符」之间切换，也可添加并连接远程服务器 |
+| **AgentGod Files Client** | 远程服务器客户端 | 不访问本机文件；保存多台服务器配置，启动后选择服务器并加密登录 |
+
+安装包：
+
+- **Windows**：`*_x64-setup.exe`（推荐）或 `.msi`
+- **macOS**：通用 `.dmg`，同时支持 Intel 与 Apple Silicon
+- **Linux**：`.AppImage`（需要 FUSE）或 `.deb`
+
+桌面端复用了与服务端完全相同的界面、加密登录和传输协议。本机模式只在本机回环地址启动伴生服务，局域网不可访问；远程模式支持多服务器切换与自签名证书。
+
+安装包未做商业代码签名：macOS 首次打开请右键「打开」（或执行 `xattr -dr com.apple.quarantine`），Windows SmartScreen 选择「更多信息 → 仍要运行」。
+
+### 从源码构建桌面端
+
+```bash
+# 需要 Rust 与 Tauri 2 的系统依赖，见 https://v2.tauri.app/start/prerequisites/
+cargo install tauri-cli --version "^2"
+
+cd desktop/local && cargo tauri build
+cd desktop/client && cargo tauri build
+```
+
+安装包输出在 `desktop/<app>/target/release/bundle/`。推送 `desktop-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 Windows、macOS 通用包与 Linux 安装包并上传到 Release。
+
+服务器配置按应用分别保存在系统数据目录（macOS `~/Library/Application Support/AgentGodFiles/`、Windows `%APPDATA%\AgentGodFiles\`、Linux `~/.local/share/AgentGodFiles/`）下的 `servers-local.json` 或 `servers-client.json`。
 
 ## 快速开始
 
@@ -210,6 +245,13 @@ docker compose up -d --force-recreate
 
 > 应用层加密保护的是「浏览器 ↔ 本服务」这条会话。自签名证书需要手动信任；若用户在已被 MITM 的环境里强行信任伪造证书，应用层密钥交换无法阻止。需要严格防护时请使用受信证书。
 
+### 桌面端安全模型
+
+- 本机版与客户端都会在 `127.0.0.1` 的随机端口启动一个前端伴生服务，只监听回环地址；Tauri WebView 只加载这个地址，界面与 API 同源，无需放宽 CORS。
+- 远程请求由伴生服务转发，只透传必要请求头（`Authorization`、`Content-Type`、`Range` 等），响应体按流转发，保留 Range 和流式下载；默认严格校验服务器证书，只有显式勾选「允许自签名证书」才关闭校验。
+- 本机模式不做登录，因为访问者必须是同一台机器上的本地进程；切换根目录时会 canonicalize 并校验目录存在，文件操作仍限制在当前根目录内。远程模式沿用完整的 RSA-OAEP + AES-GCM 登录流程。
+- 伴生服务不监听局域网、不启用 CORS 通配，也不接入任何遥测或第三方服务。
+
 ### 资源保护
 
 - **全局令牌桶限速**：上传、下载（含预览）各自一个全局桶，所有连接共享，而不是每连接限速。
@@ -224,8 +266,11 @@ docker compose up -d --force-recreate
 
 ```
 src/
-  main.rs        启动、TLS 监听、优雅关闭、资源限制日志
+  main.rs        二进制入口
+  lib.rs         库入口（桌面端复用同一套服务与界面）
+  server.rs      HTTP / HTTPS 启动与优雅关闭
   config.rs      环境变量解析与校验
+  app.rs         桌面本机模式信息与根目录切换
   credentials.rs 管理员凭据持久化
   auth.rs        登录、会话提取器、登录限流、账户修改
   crypto.rs      RSA-OAEP / AES-256-GCM / Argon2 / AAD
@@ -239,7 +284,12 @@ src/
   web.rs         路由、CSP、安全响应头、静态资源
 static/          嵌入式 Web UI（原生 JS + WebCrypto，无外部依赖）
 static/vendor/   Word/Excel 本地解析库（仅预览时按需加载）
+desktop/common/  共享伴生运行时：回环前端、本机服务、远程反向代理
+desktop/local/   本机版 Tauri 2 应用
+desktop/client/  远程客户端 Tauri 2 应用
+desktop/web/     打包用占位页面（真实界面由伴生服务提供）
 scripts/         Node E2E 协议测试、Chrome UI 冒烟测试、测试视频生成
+.github/         GitHub Actions 桌面发布工作流与 Release 说明
 Dockerfile       Alpine + musl 构建
 docker-compose.yml
 ```
@@ -270,7 +320,17 @@ docker-compose.yml
 ```bash
 # Rust 单元测试
 cargo test
+
+# 桌面端共享运行层（本机 / 客户端两种模式）
+cargo run --manifest-path desktop/common/Cargo.toml --bin dev_local
+cargo run --manifest-path desktop/common/Cargo.toml --bin dev_client
+
+# Tauri 应用
+cd desktop/local && cargo tauri dev
+cd desktop/client && cargo tauri dev
 ```
+
+`dev_local` / `dev_client` 会打印一个 `http://127.0.0.1:<端口>/` 地址，可直接用 Chrome 验证桌面端界面与代理行为，无需启动 Tauri 窗口。
 
 本地启动服务（用于下面的 E2E 与 UI 测试）：
 
@@ -351,6 +411,26 @@ node scripts/ui-smoke.mjs
 
 这是预期行为：修改账户会吊销其他会话与预览令牌，当前会话保持登录。
 
+**桌面版和浏览器版有什么区别？**
+
+浏览器版需要先部署服务器，再通过 HTTPS 打开页面。桌面版分成两个应用：本机版可以直接管理这台电脑上的文件，也可以连接远程服务器；客户端只连接远程服务器。桌面版复用同一套加密协议和界面，安装后无需浏览器。
+
+**macOS 提示「应用已损坏」或「无法验证开发者」？**
+
+安装包未签名。请在 Finder 中右键应用选择「打开」，或执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"
+```
+
+**Windows 安装时出现 SmartScreen 警告？**
+
+点击「更多信息 → 仍要运行」。安装包未购买代码签名证书。
+
+**Linux AppImage 无法启动？**
+
+先安装 FUSE：Ubuntu / Debian 执行 `sudo apt install libfuse2`，或改用 `.deb` 安装。
+
 ## 已知限制
 
 - 单管理员、单租户，没有多用户与权限分组
@@ -362,6 +442,8 @@ node scripts/ui-smoke.mjs
 - 单目录最多显示 50,000 项；筛选只作用于已加载的分页内容
 - 浏览历史保存在浏览器 `localStorage`（最多 300 条），不跨浏览器同步
 - 文件在宿主机磁盘上不额外加密存储，访问控制依赖容器与宿主机文件权限
+- 桌面安装包未做商业代码签名，首次安装需要手动放行
+- 桌面本机模式按「同一台机器的本地访问即可信」设计，不设登录；多人共用电脑时请使用操作系统账户隔离
 
 ## 安全边界
 

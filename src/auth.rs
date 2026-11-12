@@ -26,6 +26,8 @@ use crate::{
 };
 
 const LOGIN_BODY_LIMIT: usize = 32 * 1024;
+
+pub const LOCAL_SESSION_TOKEN: &str = "local";
 const LOGIN_TS_SKEW_MS: i64 = 600_000;
 
 pub struct AuthSession {
@@ -59,6 +61,17 @@ impl FromRequestParts<Arc<AppState>> for AuthSession {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        if state.cfg.local_mode {
+            if let Some(session) = state.sessions.get(LOCAL_SESSION_TOKEN) {
+                return Ok(AuthSession {
+                    token: LOCAL_SESSION_TOKEN.to_string(),
+                    key: session.key,
+                    user: session.user.clone(),
+                });
+            }
+            return Err(unauthorized_response());
+        }
+
         let token = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -138,6 +151,9 @@ pub async fn login(
     ClientIp(ip): ClientIp,
     body: Body,
 ) -> Result<Response, ApiError> {
+    if state.cfg.local_mode {
+        return Err(ApiError::bad("本地模式无需登录"));
+    }
     let ip = ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
     if let Some(remaining) = state.login_guard.blocked_for(ip) {
@@ -276,6 +292,9 @@ pub async fn update_credentials(
     OriginalUri(uri): OriginalUri,
     body: Body,
 ) -> Result<Response, ApiError> {
+    if state.cfg.local_mode {
+        return Err(ApiError::bad("本地模式不支持修改账户"));
+    }
     let aad = crypto::request_aad(&method, &uri);
     let request: UpdateCredentialsRequest = api::read_encrypted(&session, &aad, body).await?;
     let ip = ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
@@ -380,4 +399,25 @@ pub async fn update_credentials(
             "password_changed": change_password,
         }),
     )
+}
+
+/// Desktop local mode hands the webview its session directly: the companion
+/// server only listens on loopback and has no password to ask for.
+pub async fn local_login(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+    if !state.cfg.local_mode {
+        return Err(ApiError::not_found("接口不存在"));
+    }
+    let Some(session) = state.sessions.get(LOCAL_SESSION_TOKEN) else {
+        return Err(ApiError::internal("本地会话未初始化"));
+    };
+    let body = json!({
+        "token": LOCAL_SESSION_TOKEN,
+        "key": STANDARD.encode(session.key),
+        "user": session.user.clone(),
+    });
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }

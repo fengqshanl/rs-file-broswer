@@ -58,6 +58,8 @@ const state = {
   autoLoadPaging: true,
   navToken: 0,
   pendingHighlight: null,
+  app: null,
+  activeTarget: null,
 };
 
 const uploadQueue = [];
@@ -363,6 +365,10 @@ function showLoginError(message) {
 }
 
 function handleSessionLost(message) {
+  if (isLocalTarget()) {
+    location.reload();
+    return;
+  }
   state.key = null;
   state.token = null;
   state.user = null;
@@ -409,8 +415,7 @@ async function onLogin(event) {
   try {
     await login(username, password);
     $('#password').value = '';
-    $('#login-view').hidden = true;
-    $('#app-view').hidden = false;
+    showAppView();
     $('#user-badge').textContent = state.user || username;
     await loadDir('/');
   } catch (error) {
@@ -422,6 +427,10 @@ async function onLogin(event) {
 }
 
 async function onLogout() {
+  if (isLocalTarget()) {
+    location.reload();
+    return;
+  }
   try {
     if (state.token) await api('/api/logout', {});
   } catch {
@@ -2318,6 +2327,337 @@ async function jumpToHistory(item) {
   await loadDir(item.parent || '/');
 }
 
+/* ---------- Desktop app mode ---------- */
+
+function isLocalTarget() {
+  return Boolean(state.activeTarget && state.activeTarget.kind === 'local');
+}
+
+function showAppView() {
+  $('#login-view').hidden = true;
+  $('#setup-view').hidden = true;
+  $('#app-view').hidden = false;
+  $('#app-bar').hidden = !state.app;
+}
+
+function showLoginView() {
+  $('#setup-view').hidden = true;
+  $('#app-view').hidden = true;
+  $('#login-view').hidden = false;
+  $('#login-servers').hidden = !state.app;
+}
+
+function showSetupView() {
+  $('#login-view').hidden = true;
+  $('#app-view').hidden = true;
+  $('#setup-view').hidden = false;
+}
+
+async function boot() {
+  if (!window.crypto || !window.crypto.subtle) {
+    showLoginError('当前页面不是安全上下文（需要 HTTPS），无法进行加密登录');
+    return;
+  }
+  let info = null;
+  try {
+    const response = await fetch('/app/info', { cache: 'no-store' });
+    if (response.ok) info = await response.json();
+  } catch {
+    info = null;
+  }
+  if (!info || !info.mode) return; // standalone server: normal login flow
+
+  state.app = info;
+  $('#app-bar').hidden = false;
+  $('#app-version').textContent = `v${info.version || ''}`;
+  $('#login-servers').hidden = false;
+  renderAppBar();
+
+  if (!info.active) {
+    showSetupView();
+    return;
+  }
+  const target =
+    (info.targets || []).find((item) => item.id === info.active) || null;
+  state.activeTarget = target;
+
+  if (target && target.kind === 'local') {
+    await enterLocalMode();
+  } else {
+    showLoginView();
+  }
+}
+
+function renderAppBar() {
+  const info = state.app;
+  if (!info) return;
+  const select = $('#target-select');
+  select.replaceChildren();
+  const targets = info.targets || [];
+  if (!targets.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '未配置服务器';
+    select.append(option);
+  }
+  for (const target of targets) {
+    const option = document.createElement('option');
+    option.value = target.id;
+    option.textContent =
+      target.kind === 'local' ? '本机' : target.name || target.url || '服务器';
+    if (target.id === info.active) option.selected = true;
+    select.append(option);
+  }
+  renderRootSelect();
+}
+
+function renderRootSelect() {
+  const info = state.app;
+  const wrap = $('#local-root-wrap');
+  if (!info || !info.local || !Array.isArray(info.local.roots)) {
+    wrap.hidden = true;
+    return;
+  }
+  const target = (info.targets || []).find((item) => item.id === info.active);
+  if (!target || target.kind !== 'local') {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  const select = $('#root-select');
+  select.replaceChildren();
+  for (const root of info.local.roots) {
+    const option = document.createElement('option');
+    option.value = root.path;
+    option.textContent = root.name;
+    if (root.path === info.local.root) option.selected = true;
+    select.append(option);
+  }
+}
+
+async function enterLocalMode() {
+  try {
+    const response = await fetch('/api/local-login', { cache: 'no-store' });
+    if (!response.ok) throw new Error('本机服务未就绪');
+    const data = await response.json();
+    state.key = await importAesKey(base64ToBytes(data.key));
+    state.token = data.token;
+    state.user = data.user || 'local';
+    state.activeTarget = (state.app.targets || []).find(
+      (item) => item.kind === 'local',
+    ) || { kind: 'local' };
+    showAppView();
+    $('#user-badge').textContent = '本机';
+    $('#btn-account').hidden = true;
+    $('#btn-logout').hidden = true;
+    await loadDir('/');
+  } catch (error) {
+    showLoginView();
+    showLoginError(error.message || '无法进入本机模式');
+  }
+}
+
+async function refreshAppInfo() {
+  try {
+    const response = await fetch('/app/info', { cache: 'no-store' });
+    if (!response.ok) return null;
+    state.app = await response.json();
+    renderAppBar();
+    return state.app;
+  } catch {
+    return null;
+  }
+}
+
+async function serversAction(payload) {
+  const response = await fetch('/app/servers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    throw new Error(data && data.error ? data.error : '操作失败');
+  }
+  return data;
+}
+
+function openServersDialog() {
+  const activeAtOpen = state.app ? state.app.active : null;
+
+  return openModal((dialog, finish) => {
+    dialog.classList.add('servers-dialog');
+    const body = div('modal-body');
+    const heading = document.createElement('h2');
+    heading.textContent = '服务器连接';
+    const hint = document.createElement('p');
+    hint.className = 'modal-text';
+    hint.textContent =
+      '可以保存多台服务器并随时切换。切换后需要重新登录对应服务器；自签名证书需勾选下方选项。';
+
+    const list = div('servers-list');
+    const form = div('server-form');
+    const nameField = labeledInput('名称', 'text', 'off');
+    const urlField = labeledInput('服务器地址', 'text', 'off');
+    urlField.input.placeholder = 'https://192.168.1.10:8090';
+    const checkRow = document.createElement('label');
+    checkRow.className = 'check';
+    const checkBox = document.createElement('input');
+    checkBox.type = 'checkbox';
+    const checkText = span('');
+    checkText.textContent = '允许自签名证书（首次连接常见）';
+    checkRow.append(checkBox, checkText);
+
+    const errorEl = div('form-error inline-error');
+    const formActions = div('form-actions');
+    const saveButton = buttonEl('添加服务器', 'btn primary');
+    const cancelEdit = buttonEl('取消编辑', 'btn ghost small');
+    cancelEdit.hidden = true;
+    formActions.append(saveButton, cancelEdit);
+    form.append(
+      nameField.field,
+      urlField.field,
+      checkRow,
+      errorEl,
+      formActions,
+    );
+
+    const footer = div('modal-actions');
+    const closeButton = buttonEl('关闭', 'btn ghost');
+    const close = () => {
+      finish(null);
+      if (state.app && state.app.active !== activeAtOpen) {
+        location.reload();
+      }
+    };
+    closeButton.addEventListener('click', close);
+    footer.append(closeButton);
+
+    body.append(heading, hint, list, form, footer);
+    dialog.append(body);
+
+    let editingId = null;
+
+    const resetForm = () => {
+      editingId = null;
+      nameField.input.value = '';
+      urlField.input.value = '';
+      checkBox.checked = false;
+      saveButton.textContent = '添加服务器';
+      cancelEdit.hidden = true;
+      errorEl.textContent = '';
+    };
+
+    const drawList = () => {
+      list.replaceChildren();
+      const remotes = (state.app && state.app.targets
+        ? state.app.targets
+        : []
+      ).filter((target) => target.kind === 'remote');
+      if (!remotes.length) {
+        const empty = div('servers-empty');
+        empty.textContent = '还没有保存的服务器，请在下方添加。';
+        list.append(empty);
+        return;
+      }
+      for (const target of remotes) {
+        const row = div('server-row');
+        const info = div('server-info');
+        const title = span('server-name');
+        title.textContent = target.name || target.url;
+        if (target.id === state.app.active) {
+          const badge = span('server-badge');
+          badge.textContent = '当前';
+          title.append(badge);
+        }
+        const meta = span('server-url');
+        meta.textContent = target.url;
+        info.append(title, meta);
+
+        const actions = div('server-actions');
+        const edit = buttonEl('编辑', 'btn ghost small');
+        edit.addEventListener('click', () => {
+          editingId = target.id;
+          nameField.input.value = target.name || '';
+          urlField.input.value = target.url || '';
+          checkBox.checked = Boolean(target.allow_invalid_certs);
+          saveButton.textContent = '保存修改';
+          cancelEdit.hidden = false;
+          errorEl.textContent = '';
+          nameField.input.focus();
+        });
+        const remove = buttonEl('删除', 'btn ghost small danger-text');
+        remove.addEventListener('click', async () => {
+          errorEl.textContent = '';
+          try {
+            await serversAction({ action: 'remove', id: target.id });
+            await refreshAppInfo();
+            drawList();
+            resetForm();
+          } catch (error) {
+            errorEl.textContent = error.message || '删除失败';
+          }
+        });
+        actions.append(edit, remove);
+        row.append(info, actions);
+        list.append(row);
+      }
+    };
+
+    const submit = async () => {
+      errorEl.textContent = '';
+      const name = nameField.input.value.trim();
+      const url = urlField.input.value.trim();
+      if (!name || !url) {
+        errorEl.textContent = '请填写名称和服务器地址';
+        return;
+      }
+      saveButton.disabled = true;
+      try {
+        const payload = {
+          name,
+          url,
+          allow_invalid_certs: checkBox.checked,
+        };
+        if (editingId) {
+          payload.action = 'update';
+          payload.id = editingId;
+        } else {
+          payload.action = 'add';
+        }
+        await serversAction(payload);
+        await refreshAppInfo();
+        drawList();
+        resetForm();
+        toast(editingId ? '服务器已更新' : '服务器已添加', 'success');
+      } catch (error) {
+        errorEl.textContent = error.message || '保存失败';
+      } finally {
+        saveButton.disabled = false;
+      }
+    };
+
+    saveButton.addEventListener('click', () => void submit());
+    cancelEdit.addEventListener('click', resetForm);
+    for (const field of [nameField, urlField]) {
+      field.input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          void submit();
+        }
+      });
+    }
+
+    drawList();
+    setTimeout(() => nameField.input.focus(), 0);
+  });
+}
+
 /* ---------- Wiring ---------- */
 
 function bindEvents() {
@@ -2325,19 +2665,63 @@ function bindEvents() {
 
   $('#btn-upload').addEventListener('click', () => $('#file-input').click());
   $('#file-input').addEventListener('change', (event) => {
-    const files = event.target.files;
+    // FileList is live: snapshot it before clearing the input.
+    const files = Array.from(event.target.files || []);
     event.target.value = '';
     enqueueUploads(files, state.cwd);
   });
   $('#btn-upload-folder').addEventListener('click', () => $('#dir-input').click());
   $('#dir-input').addEventListener('change', (event) => {
-    const files = event.target.files;
+    const files = Array.from(event.target.files || []);
     event.target.value = '';
-    if (files && files.length) enqueueUploads(files, state.cwd);
+    if (files.length) enqueueUploads(files, state.cwd);
   });
   $('#btn-mkdir').addEventListener('click', createFolder);
   $('#btn-refresh').addEventListener('click', () => loadDir(state.cwd));
   $('#btn-history').addEventListener('click', openHistoryDialog);
+  $('#btn-servers').addEventListener('click', openServersDialog);
+  $('#setup-add').addEventListener('click', openServersDialog);
+  $('#login-servers').addEventListener('click', openServersDialog);
+  $('#target-select').addEventListener('change', async (event) => {
+    const id = event.target.value;
+    if (!id) return;
+    try {
+      const response = await fetch('/app/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      if (!response.ok) throw new Error('切换连接失败');
+      location.reload();
+    } catch (error) {
+      toast(error.message || '切换连接失败', 'error');
+      renderAppBar();
+    }
+  });
+  $('#root-select').addEventListener('change', async (event) => {
+    const path = event.target.value;
+    try {
+      const response = await fetch('/app/local/root', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        throw new Error(data && data.error ? data.error : '切换目录失败');
+      }
+      await refreshAppInfo();
+      await loadDir('/');
+    } catch (error) {
+      toast(error.message || '切换目录失败', 'error');
+      renderAppBar();
+    }
+  });
   if ('IntersectionObserver' in window) {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -2405,7 +2789,5 @@ function hasFileDrag(event) {
 document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   document.addEventListener('keydown', handlePreviewKeys);
-  if (!window.crypto || !window.crypto.subtle) {
-    showLoginError('当前页面不是安全上下文（需要 HTTPS），无法进行加密登录');
-  }
+  void boot();
 });

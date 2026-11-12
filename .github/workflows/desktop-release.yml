@@ -1,0 +1,89 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read desktop version
+        id: version
+        run: |
+          version="$(node -p "require('./desktop/local/tauri.conf.json').version")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="desktop-v${VERSION}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "AgentGod Files 桌面版 v${VERSION}" \
+              --notes-file .github/desktop-release-notes.md
+          fi
+          release_id="$(gh release view "$tag" --json databaseId --jq .databaseId)"
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [local, client]
+        platform: [macos-latest, ubuntu-22.04, windows-latest]
+        include:
+          - platform: macos-latest
+            args: "--target universal-apple-darwin --bundles dmg"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          - platform: ubuntu-22.04
+            args: "--bundles deb,appimage"
+            rust_targets: ""
+          - platform: windows-latest
+            args: "--bundles nsis,msi"
+            rust_targets: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/${{ matrix.app }}
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop/${{ matrix.app }}
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          retryAttempts: 3
+          args: ${{ matrix.args }}
