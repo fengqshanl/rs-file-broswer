@@ -28,8 +28,11 @@ const PLATFORM_RULES = [
 
 export function appSlug(name) {
   const lower = name.toLowerCase();
-  if (lower.startsWith('agentgod.files.local_')) return 'local';
-  if (lower.startsWith('agentgod.files.client_')) return 'client';
+  // tauri-cli names updater bundles without a version suffix (e.g.
+  // `AgentGod.Files.Local.app.tar.gz`), while tauri-action renames the
+  // installers it uploads. Accept both shapes.
+  if (lower.startsWith('agentgod.files.local')) return 'local';
+  if (lower.startsWith('agentgod.files.client')) return 'client';
   return null;
 }
 
@@ -181,6 +184,8 @@ async function selfTest() {
   assert.match(specs.local['darwin-aarch64'].url, /universal\.app\.tar\.gz$/);
   assert.equal(versionFromTag('desktop-v0.1.3'), '0.1.3');
   assert.equal(appSlug('latest-local.json'), null);
+  assert.equal(appSlug('AgentGod.Files.Local_universal.app.tar.gz'), 'local');
+  assert.equal(appSlug('AgentGod.Files.Client.app.tar.gz'), 'client');
   assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
   assert.equal(hasSignedAssets(release), true);
   assert.equal(hasSignedAssets({ assets: [asset('AgentGod.Files.Local_0.1.3_amd64.AppImage')] }), false);

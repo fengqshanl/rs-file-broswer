@@ -48,16 +48,18 @@ jobs:
         app: [local, client]
         platform: [macos-latest, ubuntu-22.04, windows-latest]
         include:
+          # `updater` must be listed explicitly: tauri-cli does not add it
+          # automatically, so without it no signed updater bundle is produced.
           - platform: macos-latest
-            args: "--target universal-apple-darwin --bundles dmg"
+            args: "--target universal-apple-darwin --bundles dmg,updater"
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
             updater_platform: macos
           - platform: ubuntu-22.04
-            args: "--bundles deb,appimage"
+            args: "--bundles deb,appimage,updater"
             rust_targets: ""
             updater_platform: linux
           - platform: windows-latest
-            args: "--bundles nsis,msi"
+            args: "--bundles nsis,msi,updater"
             rust_targets: ""
             updater_platform: windows
     runs-on: ${{ matrix.platform }}
@@ -107,6 +109,23 @@ jobs:
             echo "::notice::未配置 TAURI_SIGNING_PRIVATE_KEY，本次发布不含应用内热更新包"
           fi
 
+      # tauri-cli reads the raw base64 payload from the environment. A secret
+      # pasted with trailing newlines, or an empty password variable, can make
+      # the bundler fail on Windows/Linux. Normalize once for all later steps.
+      - name: Normalize updater signing env
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          key="$(node -e "process.stdout.write((process.env.SIGNING_KEY || '').replace(/\s+/g, ''))")"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
+          if [ -n "${SIGNING_PASSWORD:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_PASSWORD" >> "$GITHUB_ENV"
+          fi
+
       - name: Enable signed updater artifacts
         if: steps.signing.outputs.enabled == 'true'
         shell: bash
@@ -117,8 +136,7 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Signing variables come from $GITHUB_ENV (normalized above).
         with:
           projectPath: desktop/${{ matrix.app }}
           releaseId: ${{ needs.prepare.outputs.release_id }}
@@ -139,23 +157,37 @@ jobs:
           APP: ${{ matrix.app }}
         run: |
           set -euo pipefail
-          root="desktop/$APP/target"
-          bundle=""
-          for preferred in "*-setup.exe" "*.app.tar.gz" "*.AppImage" "*.msi"; do
-            while IFS= read -r sig; do
-              candidate="${sig%.sig}"
-              if [[ "$candidate" == $preferred ]]; then
-                bundle="$candidate"
-                break 2
-              fi
-            done < <(find "$root" -type f -name '*.sig' 2>/dev/null | sort)
-          done
-          if [ -z "$bundle" ]; then
-            echo "::warning::未找到带签名的更新包，跳过上传"
-            exit 0
+          root="${GITHUB_WORKSPACE:-.}"
+          sigs=()
+          while IFS= read -r sig; do
+            [ -z "$sig" ] || sigs+=("$sig")
+          done < <(find "$root" -type f -name '*.sig' 2>/dev/null | sort)
+          count=${#sigs[@]}
+          echo "::notice::found $count signature file(s)"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::签名密钥已生效但没有产出任何 .sig 更新包；请确认 --bundles 包含 updater"
+            exit 1
           fi
-          gh release upload "$TAG" "$bundle" "$bundle.sig" --clobber
-          echo "uploaded $(basename "$bundle") and its signature"
+          uploaded=0
+          shown=0
+          for sig in "${sigs[@]}"; do
+            if [ "$shown" -lt 10 ]; then
+              echo "::notice::sig: ${sig#"$root"/}"
+              shown=$((shown + 1))
+            fi
+            bundle="${sig%.sig}"
+            case "$bundle" in
+              *-setup.exe|*.app.tar.gz|*.AppImage|*.msi) ;;
+              *) continue ;;
+            esac
+            gh release upload "$TAG" "$bundle" "$sig" --clobber
+            echo "uploaded $(basename "$bundle") and its signature"
+            uploaded=$((uploaded + 1))
+          done
+          if [ "$uploaded" -eq 0 ]; then
+            echo "::error::找到了 .sig 但没有可安装的更新包（setup.exe / app.tar.gz / AppImage / msi）"
+            exit 1
+          fi
 
   manifest:
     needs: [prepare, build]
