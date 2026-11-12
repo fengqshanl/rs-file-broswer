@@ -1842,3 +1842,216 @@ progress::-moz-progress-bar {
 .danger-text {
   color: var(--danger);
 }
+
+/* ---------- Workspace tabs (desktop) ---------- */
+
+.workspace-bar {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  padding: 8px clamp(12px, 2.4vw, 24px);
+  border-bottom: 1px solid var(--line);
+  background: rgba(7, 11, 20, 0.92);
+  backdrop-filter: blur(18px);
+}
+
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  max-width: 240px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.workspace-tab:hover {
+  color: var(--text);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.workspace-tab.active {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: rgba(15, 23, 42, 0.92);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.workspace-tab .tab-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.workspace-tab.local .tab-dot {
+  background: var(--accent);
+}
+
+.workspace-tab.remote .tab-dot {
+  background: var(--blue);
+}
+
+.workspace-tab.remote.locked .tab-dot {
+  background: var(--faint);
+}
+
+.workspace-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.workspace-bar .btn {
+  height: 34px;
+}
+
+.has-workspace .login-view,
+.has-workspace .app-view {
+  min-height: calc(100vh - 54px);
+}
+
+.has-workspace .login-view {
+  padding-top: clamp(20px, 4vh, 40px);
+}
+
+.has-workspace .topbar {
+  top: 54px;
+}
+
+.app-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.file-row.selected {
+  background: rgba(94, 234, 212, 0.07);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* ---------- Add-server overlay (no native dialog: WKWebView safe) ---------- */
+
+.server-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.server-overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 14, 0.74);
+  backdrop-filter: blur(8px);
+}
+
+.server-panel {
+  position: relative;
+  width: min(680px, 100%);
+  max-height: min(84vh, 780px);
+  overflow: auto;
+  padding: 26px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(19, 29, 50, 0.98), rgba(10, 17, 31, 0.98));
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.server-panel .modal-body {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.server-panel h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.server-form .form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.server-form .form-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.server-form .form-row .field.protocol {
+  flex: 0 0 124px;
+}
+
+.server-panel .panel-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 760px) {
+  .workspace-bar {
+    flex-wrap: wrap;
+  }
+
+  .workspace-tabs {
+    order: 2;
+    flex-basis: 100%;
+  }
+
+  .workspace-actions {
+    margin-left: auto;
+  }
+
+  .has-workspace .topbar {
+    top: 96px;
+  }
+
+  .server-form .form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .server-form .form-row .field.protocol {
+    flex-basis: auto;
+  }
+}

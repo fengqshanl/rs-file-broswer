@@ -686,7 +686,8 @@ async function main() {
       for (const payload of attempts) {
         try {
           await api('/api/account/update', payload);
-          state.user = ${JSON.stringify(ADMIN_USER)};
+          const tab = activeTab();
+          if (tab.session) tab.session.user = ${JSON.stringify(ADMIN_USER)};
           document.querySelector('#user-badge').textContent = ${JSON.stringify(ADMIN_USER)};
           return true;
         } catch {

@@ -21,6 +21,10 @@ const ICONS = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>',
   close:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>',
+  copy:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
+  cut:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="7" r="2.5"/><circle cx="6" cy="17" r="2.5"/><path d="m8 8.5 11 5.5"/><path d="m8 15.5 11-5.5"/></svg>',
 };
 
 const ARCHIVE_END_MARKER = 'AGF_TAR_END_v1';
@@ -50,21 +54,90 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 const SHEET_EXTENSIONS = new Set(['xlsx', 'xlsm', 'xls', 'csv', 'tsv']);
 
+function emptyList() {
+  return { offset: 0, total: 0, hasMore: false, loading: false };
+}
+
+function makeTab(target) {
+  return {
+    id: target.id,
+    target,
+    session: null,
+    cwd: '/',
+    entries: [],
+    filter: '',
+    list: emptyList(),
+    navToken: 0,
+    pendingHighlight: null,
+    selectedPath: null,
+    freeSpace: null,
+    loaded: false,
+    needsRefresh: false,
+  };
+}
+
 const state = {
-  key: null,
-  token: null,
-  user: null,
-  cwd: '/',
-  entries: [],
-  filter: '',
-  list: { offset: 0, total: 0, hasMore: false, loading: false },
+  app: null,
+  tabs: new Map(),
+  activeTabId: null,
+  standaloneTab: null,
+  clipboard: null,
   pageSize: LIST_PAGE_SIZE,
   autoLoadPaging: true,
-  navToken: 0,
-  pendingHighlight: null,
-  app: null,
-  activeTarget: null,
 };
+
+state.standaloneTab = makeTab({ id: 'standalone', kind: 'standalone', name: '服务器' });
+
+function activeTab() {
+  return state.tabs.get(state.activeTabId) || state.standaloneTab;
+}
+
+function getTab(id) {
+  return state.tabs.get(id) || null;
+}
+
+function targetLabel(target) {
+  if (!target) return '服务器';
+  if (target.kind === 'local') return '本机';
+  return target.name || target.url || '服务器';
+}
+
+function targetHeaders(tab) {
+  if (!state.app || !tab || tab.target.kind === 'standalone') return {};
+  return { 'X-AgentGod-Target': tab.id };
+}
+
+for (const field of [
+  'cwd',
+  'entries',
+  'filter',
+  'list',
+  'navToken',
+  'pendingHighlight',
+  'selectedPath',
+]) {
+  Object.defineProperty(state, field, {
+    get() {
+      const tab = activeTab();
+      return field === 'cwd'
+        ? tab.cwd || '/'
+        : field === 'entries' || field === 'list'
+          ? tab[field] || (field === 'list' ? emptyList() : [])
+          : tab[field];
+    },
+    set(value) {
+      const tab = activeTab();
+      if (tab) tab[field] = value;
+    },
+  });
+}
+
+Object.defineProperties(state, {
+  key: { get: () => activeTab().session?.key || null },
+  token: { get: () => activeTab().session?.token || null },
+  user: { get: () => activeTab().session?.user || null },
+  activeTarget: { get: () => activeTab().target },
+});
 
 const uploadQueue = [];
 let uploadRunning = false;
@@ -268,29 +341,34 @@ async function decryptWithKey(key, aad, envelope) {
   return JSON.parse(decoder.decode(plaintext));
 }
 
-async function encryptPayload(aad, value) {
-  if (!state.key) throw new Error('会话已失效，请重新登录');
-  return encryptWithKey(state.key, aad, value);
+async function encryptPayload(aad, value, tab = activeTab()) {
+  const key = tab.session?.key;
+  if (!key) throw new Error('会话已失效，请重新登录');
+  return encryptWithKey(key, aad, value);
 }
 
-async function decryptPayload(aad, envelope) {
-  if (!state.key) throw new Error('会话已失效，请重新登录');
+async function decryptPayload(aad, envelope, tab = activeTab()) {
+  const key = tab.session?.key;
+  if (!key) throw new Error('会话已失效，请重新登录');
   if (!envelope || !envelope.iv || !envelope.ct) {
     throw new Error('服务器响应格式异常');
   }
-  return decryptWithKey(state.key, aad, envelope);
+  return decryptWithKey(key, aad, envelope);
 }
 
 /* ---------- API ---------- */
 
-async function api(path, payload = {}, method = 'POST') {
+async function api(path, payload = {}, method = 'POST', tab = activeTab()) {
+  const session = tab.session;
+  if (!session) throw new Error('会话已失效，请重新登录');
   const aad = `${method} ${path}`;
-  const envelope = await encryptPayload(aad, payload);
+  const envelope = await encryptWithKey(session.key, aad, payload);
   const response = await fetch(path, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${state.token}`,
+      Authorization: `Bearer ${session.token}`,
+      ...targetHeaders(tab),
     },
     body: JSON.stringify(envelope),
   });
@@ -301,15 +379,18 @@ async function api(path, payload = {}, method = 'POST') {
     data = null;
   }
   if (!response.ok) {
-    if (response.status === 401) handleSessionLost('会话已过期，请重新登录');
+    if (response.status === 401) handleSessionLost('会话已过期，请重新登录', tab);
     throw new Error(data && data.error ? data.error : `请求失败 (${response.status})`);
   }
-  return decryptPayload(aad, data);
+  return decryptWithKey(session.key, aad, data);
 }
 
-async function login(username, password) {
+async function login(tab, username, password) {
   ensureCrypto();
-  const keyResponse = await fetch('/api/pubkey', { cache: 'no-store' });
+  const keyResponse = await fetch('/api/pubkey', {
+    cache: 'no-store',
+    headers: targetHeaders(tab),
+  });
   if (!keyResponse.ok) throw new Error('无法获取服务器公钥');
   const keyInfo = await keyResponse.json();
   const publicKey = await crypto.subtle.importKey(
@@ -339,7 +420,7 @@ async function login(username, password) {
 
   const response = await fetch('/api/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...targetHeaders(tab) },
     body: JSON.stringify({
       ek: bytesToBase64(wrappedKey),
       iv: bytesToBase64(iv),
@@ -357,9 +438,53 @@ async function login(username, password) {
   }
 
   const result = await decryptWithKey(sessionKey, 'login-resp', data);
-  state.key = sessionKey;
-  state.token = result.token;
-  state.user = result.user;
+  tab.session = {
+    key: sessionKey,
+    token: result.token,
+    user: result.user,
+  };
+}
+
+let loginTab = null;
+
+function clearTabSession(tab) {
+  tab.session = null;
+  tab.cwd = '/';
+  tab.entries = [];
+  tab.filter = '';
+  tab.list = emptyList();
+  tab.navToken += 1;
+  tab.pendingHighlight = null;
+  tab.selectedPath = null;
+  tab.freeSpace = null;
+  tab.loaded = false;
+  tab.needsRefresh = false;
+  for (let index = uploadQueue.length - 1; index >= 0; index -= 1) {
+    if (uploadQueue[index].tab === tab) uploadQueue.splice(index, 1);
+  }
+  if (state.clipboard?.tabId === tab.id) {
+    state.clipboard = null;
+    updatePasteButton();
+  }
+}
+
+function handleSessionLost(message, tab = activeTab()) {
+  const wasActive = tab === activeTab();
+  clearTabSession(tab);
+  if (!wasActive) {
+    renderTabs();
+    updatePasteButton();
+    return;
+  }
+  if (tab.target.kind === 'local') {
+    void enterLocalTab(tab).catch((error) => {
+      showTabLogin(tab, error.message || '本机服务未就绪');
+    });
+    return;
+  }
+  showTabLogin(tab, message);
+  renderTabs();
+  updatePasteButton();
 }
 
 /* ---------- Session / views ---------- */
@@ -368,60 +493,37 @@ function showLoginError(message) {
   $('#login-error').textContent = message || '';
 }
 
-function handleSessionLost(message) {
-  if (isLocalTarget()) {
-    location.reload();
-    return;
-  }
-  state.key = null;
-  state.token = null;
-  state.user = null;
-  state.entries = [];
-  state.filter = '';
-  state.cwd = '/';
-  state.list = { offset: 0, total: 0, hasMore: false, loading: false };
-  state.pageSize = LIST_PAGE_SIZE;
-  state.navToken += 1;
-  state.pendingHighlight = null;
-  uploadQueue.length = 0;
-  $('#app-view').hidden = true;
-  $('#login-view').hidden = false;
-  $('#upload-panel').hidden = true;
-  $('#upload-list').replaceChildren();
-  $('#file-list').replaceChildren();
-  $('#list-skeleton').hidden = true;
-  $('#list-footer').replaceChildren();
-  $('#list-footer').hidden = true;
-  $('#dir-summary').textContent = '';
-  $('#free-space').textContent = '';
-  uploadQueue.length = 0;
-  $('#password').value = '';
-  const dialog = $('#modal');
-  if (dialog.open) dialog.close();
-  if (message) showLoginError(message);
-  setTimeout(() => {
-    if (!$('#username').value) $('#username').focus();
-  }, 30);
-}
-
 async function onLogin(event) {
   event.preventDefault();
   showLoginError('');
+  const tab = loginTab || activeTab();
+  const button = $('#login-btn');
+  if (tab.target.kind === 'local') {
+    button.disabled = true;
+    button.textContent = '正在连接本机…';
+    try {
+      await enterLocalTab(tab);
+    } catch (error) {
+      showLoginError(error.message || '本机服务不可用');
+    } finally {
+      button.disabled = false;
+      button.textContent = '重新连接本机';
+    }
+    return;
+  }
   const username = $('#username').value.trim();
   const password = $('#password').value;
   if (!username || !password) {
     showLoginError('请输入用户名和密码');
     return;
   }
-  const button = $('#login-btn');
   button.disabled = true;
   button.textContent = '正在加密登录…';
   try {
-    await login(username, password);
+    await login(tab, username, password);
     $('#password').value = '';
-    showAppView();
-    $('#user-badge').textContent = state.user || username;
-    await loadDir('/');
+    loginTab = null;
+    await activateTab(tab.id);
   } catch (error) {
     showLoginError(error.message || '登录失败');
   } finally {
@@ -431,50 +533,68 @@ async function onLogin(event) {
 }
 
 async function onLogout() {
-  if (isLocalTarget()) {
-    location.reload();
-    return;
-  }
+  const tab = activeTab();
+  if (!tab.session || tab.target.kind === 'local') return;
   try {
-    if (state.token) await api('/api/logout', {});
+    await api('/api/logout', {}, 'POST', tab);
   } catch {
-    /* the local session is discarded regardless */
+    /* the session is discarded regardless */
   }
-  handleSessionLost('');
-  showLoginError('');
+  clearTabSession(tab);
+  showTabLogin(tab, '');
+  renderTabs();
+  updatePasteButton();
   toast('已安全退出', 'info');
 }
 
 /* ---------- Listing ---------- */
 
 async function loadDir(path, options = {}) {
-  if (!state.key) return;
+  const tab = options.tab || activeTab();
+  if (!tab.session) return;
   const target = normalizeRelPath(path) || '/';
-  state.cwd = target;
-  state.entries = [];
-  state.filter = '';
-  $('#filter').value = '';
-  state.list = { offset: 0, total: 0, hasMore: false, loading: false };
-  state.navToken = (state.navToken || 0) + 1;
-  const token = state.navToken;
-  renderBreadcrumbs();
-  showListSkeleton(true);
-  $('#dir-summary').textContent = '正在加载…';
+  tab.cwd = target;
+  tab.entries = [];
+  tab.filter = '';
+  tab.list = emptyList();
+  tab.navToken += 1;
+  tab.loaded = false;
+  tab.needsRefresh = false;
+  tab.selectedPath = null;
+  tab.selectedEntry = null;
+  const token = tab.navToken;
+  const isActive = tab === activeTab();
+
+  if (isActive) {
+    $('#filter').value = '';
+    renderBreadcrumbs();
+    showListSkeleton(true);
+    $('#dir-summary').textContent = '正在加载…';
+  }
 
   try {
-    const data = await api('/api/list', {
-      path: target,
-      offset: 0,
-      limit: state.pageSize,
-    });
-    if (token !== state.navToken) return;
-    state.cwd = data.path || target;
-    state.entries = Array.isArray(data.entries) ? data.entries : [];
-    state.list.offset = state.entries.length;
-    state.list.total = Number(data.total) || state.entries.length;
-    state.list.hasMore = Boolean(data.has_more);
+    const data = await api(
+      '/api/list',
+      {
+        path: target,
+        offset: 0,
+        limit: state.pageSize,
+      },
+      'POST',
+      tab,
+    );
+    if (token !== tab.navToken) return;
+    tab.cwd = data.path || target;
+    tab.entries = Array.isArray(data.entries) ? data.entries : [];
+    tab.list.offset = tab.entries.length;
+    tab.list.total = Number(data.total) || tab.entries.length;
+    tab.list.hasMore = Boolean(data.has_more);
+    tab.freeSpace =
+      typeof data.free_space === 'number' ? data.free_space : null;
+    tab.loaded = true;
+    if (!isActive || tab !== activeTab()) return;
     $('#free-space').textContent =
-      typeof data.free_space === 'number' ? `剩余 ${formatSize(data.free_space)}` : '';
+      typeof tab.freeSpace === 'number' ? `剩余 ${formatSize(tab.freeSpace)}` : '';
     renderBreadcrumbs();
     showListSkeleton(false);
     renderFiles();
@@ -482,15 +602,17 @@ async function loadDir(path, options = {}) {
       toast('目录项目超过 50000 个，仅显示前 50000 项', 'error');
     }
     if (!options.skipHistory) {
-      recordHistory('dir', state.cwd, basenameOf(state.cwd), parentOf(state.cwd));
+      recordHistory('dir', tab.cwd, basenameOf(tab.cwd), parentOf(tab.cwd), tab);
     }
-    if (state.pendingHighlight) {
-      const pending = state.pendingHighlight;
-      state.pendingHighlight = null;
+    if (tab.pendingHighlight) {
+      const pending = tab.pendingHighlight;
+      tab.pendingHighlight = null;
       await highlightEntry(pending);
     }
   } catch (error) {
-    if (token !== state.navToken) return;
+    if (token !== tab.navToken) return;
+    tab.needsRefresh = true;
+    if (!isActive || tab !== activeTab()) return;
     showListSkeleton(false);
     $('#dir-summary').textContent = '加载失败';
     renderFiles();
@@ -562,7 +684,7 @@ function renderFiles() {
   }
 
   for (const entry of visible) {
-    list.append(renderRow(entry));
+    list.append(renderRow(entry, activeTab()));
   }
   updateListSummary();
   renderListFooter();
@@ -622,7 +744,7 @@ function appendRows(fromIndex) {
   const list = $('#file-list');
   const visible = visibleEntries();
   for (let index = fromIndex; index < visible.length; index += 1) {
-    list.append(renderRow(visible[index]));
+    list.append(renderRow(visible[index], activeTab()));
   }
   const hasEntries = visible.length > 0;
   $('.list-head').hidden = !hasEntries;
@@ -632,33 +754,40 @@ function appendRows(fromIndex) {
   renderListFooter();
 }
 
-async function loadMore() {
-  if (!state.key || state.list.loading || !state.list.hasMore) return;
-  const token = state.navToken;
-  state.list.loading = true;
-  renderListFooter();
+async function loadMore(tab = activeTab()) {
+  if (!tab.session || tab.list.loading || !tab.list.hasMore) return;
+  const token = tab.navToken;
+  tab.list.loading = true;
+  const isActive = tab === activeTab();
+  if (isActive) renderListFooter();
   try {
-    const data = await api('/api/list', {
-      path: state.cwd,
-      offset: state.list.offset,
-      limit: state.pageSize,
-    });
-    if (token !== state.navToken) return;
-    const before = state.entries.length;
+    const data = await api(
+      '/api/list',
+      {
+        path: tab.cwd,
+        offset: tab.list.offset,
+        limit: state.pageSize,
+      },
+      'POST',
+      tab,
+    );
+    if (token !== tab.navToken) return;
+    const before = tab.entries.length;
     const entries = Array.isArray(data.entries) ? data.entries : [];
-    state.entries.push(...entries);
-    state.list.offset = state.entries.length;
-    state.list.total = Number(data.total) || state.list.total;
-    state.list.hasMore = Boolean(data.has_more);
+    tab.entries.push(...entries);
+    tab.list.offset = tab.entries.length;
+    tab.list.total = Number(data.total) || tab.list.total;
+    tab.list.hasMore = Boolean(data.has_more);
+    if (!isActive || tab !== activeTab()) return;
     appendRows(before);
   } catch (error) {
-    if (token === state.navToken) {
+    if (token === tab.navToken && tab === activeTab()) {
       toast(error.message || '加载更多失败', 'error');
     }
   } finally {
-    if (token === state.navToken) {
-      state.list.loading = false;
-      renderListFooter();
+    if (token === tab.navToken) {
+      tab.list.loading = false;
+      if (tab === activeTab()) renderListFooter();
     }
   }
 }
@@ -690,9 +819,16 @@ function flashRow(row) {
   setTimeout(() => row.classList.remove('highlight'), 3200);
 }
 
-function renderRow(entry) {
+function renderRow(entry, tab = activeTab()) {
   const row = div('file-row');
   row.setAttribute('role', 'listitem');
+  const fullPath = joinPath(tab.cwd, entry.name);
+  row.dataset.path = fullPath;
+  if (tab.selectedPath === fullPath) row.classList.add('selected');
+  row.addEventListener('click', (event) => {
+    if (event.target.closest('button, a, input, .previewable')) return;
+    selectRow(row, entry, tab);
+  });
 
   const nameCell = div('cell name-cell');
   const icon = span('file-icon ' + (entry.is_dir ? 'is-dir' : 'is-file'));
@@ -703,7 +839,7 @@ function renderRow(entry) {
     const nameButton = buttonEl(entry.name, 'name-btn');
     nameButton.title = entry.name;
     nameButton.addEventListener('click', () =>
-      loadDir(joinPath(state.cwd, entry.name)),
+      loadDir(joinPath(tab.cwd, entry.name), { tab }),
     );
     nameCell.append(nameButton);
   } else {
@@ -712,7 +848,7 @@ function renderRow(entry) {
     name.title = entry.name;
     if (previewKindOf(entry.name) !== 'none') {
       name.classList.add('previewable');
-      name.addEventListener('click', () => openPreview(entry));
+      name.addEventListener('click', () => openPreview(entry, tab));
     }
     nameCell.append(name);
   }
@@ -729,36 +865,48 @@ function renderRow(entry) {
   timeCell.textContent = formatDate(entry.modified);
 
   const actions = div('cell actions');
-  const fullPath = joinPath(state.cwd, entry.name);
-  row.dataset.path = fullPath;
   if (entry.is_dir) {
     actions.append(
       actionButton('download', '下载文件夹 (.tar)', () =>
-        startFolderDownload(fullPath, entry.name),
+        startFolderDownload(fullPath, entry.name, tab),
       ),
     );
   } else {
     if (previewKindOf(entry.name) !== 'none') {
       actions.append(
-        actionButton('eye', '预览', () => openPreview(entry)),
+        actionButton('eye', '预览', () => openPreview(entry, tab)),
       );
     }
     actions.append(
-      actionButton('download', '下载', () => startDownload(fullPath, entry.name)),
+      actionButton('download', '下载', () =>
+        startDownload(fullPath, entry.name, tab),
+      ),
     );
   }
   actions.append(
-    actionButton('edit', '重命名', () => renameEntry(entry)),
-    actionButton('trash', '删除', () => deleteEntry(entry), true),
+    actionButton('copy', '复制', () => copyEntry(entry, false, tab)),
+    actionButton('cut', '剪切', () => copyEntry(entry, true, tab)),
+    actionButton('edit', '重命名', () => renameEntry(entry, tab)),
+    actionButton('trash', '删除', () => deleteEntry(entry, tab), true),
   );
 
   row.append(nameCell, sizeCell, timeCell, actions);
   return row;
 }
 
+function selectRow(row, entry, tab) {
+  for (const other of document.querySelectorAll('#file-list .file-row.selected')) {
+    other.classList.remove('selected');
+  }
+  row.classList.add('selected');
+  tab.selectedPath = row.dataset.path;
+  tab.selectedEntry = entry;
+}
+
 /* ---------- File operations ---------- */
 
-async function renameEntry(entry) {
+async function renameEntry(entry, tab = activeTab()) {
+  const cwd = tab.cwd;
   const newName = await askText({
     title: '重命名',
     label: '新的名称',
@@ -767,18 +915,24 @@ async function renameEntry(entry) {
   });
   if (!newName || newName === entry.name) return;
   try {
-    await api('/api/rename', {
-      path: joinPath(state.cwd, entry.name),
-      new_name: newName,
-    });
+    await api(
+      '/api/rename',
+      {
+        path: joinPath(cwd, entry.name),
+        new_name: newName,
+      },
+      'POST',
+      tab,
+    );
     toast('已重命名', 'success');
-    await loadDir(state.cwd);
+    await loadDir(cwd, { tab });
   } catch (error) {
     toast(error.message || '重命名失败', 'error');
   }
 }
 
-async function deleteEntry(entry) {
+async function deleteEntry(entry, tab = activeTab()) {
+  const cwd = tab.cwd;
   const detail = entry.is_dir
     ? '该文件夹及其中的全部内容都会被删除，此操作不可恢复。'
     : '此操作不可恢复。';
@@ -788,15 +942,21 @@ async function deleteEntry(entry) {
   });
   if (!confirmed) return;
   try {
-    await api('/api/delete', { path: joinPath(state.cwd, entry.name) });
+    await api('/api/delete', { path: joinPath(cwd, entry.name) }, 'POST', tab);
+    if (tab.selectedPath === joinPath(cwd, entry.name)) {
+      tab.selectedPath = null;
+      tab.selectedEntry = null;
+    }
     toast('已删除', 'success');
-    await loadDir(state.cwd);
+    await loadDir(cwd, { tab });
   } catch (error) {
     toast(error.message || '删除失败', 'error');
   }
 }
 
 async function createFolder() {
+  const tab = activeTab();
+  const cwd = tab.cwd;
   const name = await askText({
     title: '新建文件夹',
     label: '文件夹名称',
@@ -805,11 +965,513 @@ async function createFolder() {
   });
   if (!name) return;
   try {
-    await api('/api/mkdir', { path: joinPath(state.cwd, name) });
+    await api('/api/mkdir', { path: joinPath(cwd, name) }, 'POST', tab);
     toast('文件夹已创建', 'success');
-    await loadDir(state.cwd);
+    await loadDir(cwd, { tab });
   } catch (error) {
     toast(error.message || '创建文件夹失败', 'error');
+  }
+}
+
+/* ---------- Cross-tab copy / paste ---------- */
+
+const COPY_CHUNK = 2 * 1024 * 1024;
+
+function updatePasteButton() {
+  const button = $('#btn-paste');
+  if (!button) return;
+  const clipboard = state.clipboard;
+  const tab = activeTab();
+  button.disabled = !clipboard || !tab.session;
+  const label = button.querySelector('.btn-label');
+  if (label) label.textContent = clipboard?.cut ? '移动' : '粘贴';
+  button.title = clipboard
+    ? `${clipboard.cut ? '移动' : '复制'}「${clipboard.name}」到当前目录`
+    : '先复制或剪切一个文件/文件夹';
+}
+
+function copyEntry(entry, cut = false, tab = activeTab()) {
+  if (!tab.session) {
+    toast('请先登录当前标签', 'error');
+    return;
+  }
+  state.clipboard = {
+    tabId: tab.id,
+    path: joinPath(tab.cwd, entry.name),
+    name: entry.name,
+    isDir: entry.is_dir,
+    cut: Boolean(cut),
+  };
+  updatePasteButton();
+  toast(
+    cut
+      ? `已剪切「${entry.name}」，切换到目标标签后点击“移动”`
+      : `已复制「${entry.name}」，切换到目标标签后点击“粘贴”`,
+    'success',
+  );
+}
+
+function addTransferItem(label, total, detail) {
+  $('#upload-panel').hidden = false;
+  const wrapper = div('upload-item');
+  const head = div('upload-item-head');
+  const title = document.createElement('strong');
+  title.textContent = label;
+  title.title = label;
+  const meta = span('upload-meta');
+  meta.textContent = detail;
+  head.append(title, meta);
+  const bar = document.createElement('progress');
+  bar.max = 100;
+  bar.value = 0;
+  const status = span('upload-status');
+  status.textContent = '正在准备…';
+  wrapper.append(head, bar, status);
+  $('#upload-list').append(wrapper);
+  wrapper.scrollIntoView({ block: 'nearest' });
+  return {
+    update(received, size, text) {
+      bar.value = size > 0 ? Math.min(100, (received / size) * 100) : 0;
+      status.textContent =
+        text ||
+        (size > 0
+          ? `${formatSize(received)} / ${formatSize(size)}`
+          : formatSize(received));
+    },
+    done(text) {
+      bar.value = 100;
+      status.textContent = text || '已完成';
+      wrapper.classList.add('done');
+    },
+    fail(text) {
+      status.textContent = `失败 · ${text}`;
+      wrapper.classList.add('failed');
+    },
+  };
+}
+
+async function listAllEntries(tab, path) {
+  const entries = [];
+  let offset = 0;
+  while (true) {
+    const data = await api(
+      '/api/list',
+      { path, offset, limit: 1000 },
+      'POST',
+      tab,
+    );
+    const batch = Array.isArray(data.entries) ? data.entries : [];
+    entries.push(...batch);
+    if (!data.has_more || !batch.length) break;
+    offset += batch.length;
+  }
+  return entries;
+}
+
+function uniqueName(name, isDir, names) {
+  const taken = new Set(names || []);
+  if (!taken.has(name)) return name;
+  const dot = isDir ? -1 : name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : '';
+  let candidate = `${stem} (副本)${extension}`;
+  if (!taken.has(candidate)) return candidate;
+  for (let index = 2; ; index += 1) {
+    candidate = `${stem} (${index})${extension}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+async function ensureDirsInTab(tab, paths) {
+  const batchSize = 500;
+  for (let index = 0; index < paths.length; index += batchSize) {
+    await api(
+      '/api/ensure_dirs',
+      { paths: paths.slice(index, index + batchSize) },
+      'POST',
+      tab,
+    );
+  }
+}
+
+async function openEncryptedDownload(tab, path) {
+  const session = tab.session;
+  if (!session) throw new Error('源标签会话已失效');
+  const endpoint = '/api/download';
+  const aad = `POST ${endpoint}`;
+  const envelope = await encryptWithKey(session.key, aad, { path });
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.token}`,
+      ...targetHeaders(tab),
+    },
+    body: JSON.stringify(envelope),
+  });
+  if (!response.ok) {
+    let message = null;
+    try {
+      const body = await response.json();
+      message = body && body.error;
+    } catch {
+      message = null;
+    }
+    if (response.status === 401) handleSessionLost('会话已过期，请重新登录', tab);
+    throw new Error(message || `读取文件失败 (${response.status})`);
+  }
+  return {
+    reader: response.body.getReader(),
+    total: Number(response.headers.get('x-file-size') || 0),
+    chunkSize: Number(response.headers.get('x-chunk-size') || 65536),
+    key: session.key,
+  };
+}
+
+async function readDownloadFrames(download, onPlaintext) {
+  const { reader, chunkSize, key } = download;
+  let pending = new Uint8Array(0);
+  let sequence = 0;
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pending = concatBytes(pending, value);
+      while (pending.length >= 4) {
+        const length = new DataView(
+          pending.buffer,
+          pending.byteOffset,
+          4,
+        ).getUint32(0, false);
+        if (length > chunkSize + 16 + 1024) throw new Error('下载分块大小异常');
+        if (pending.length < 16 + length) break;
+        const iv = pending.subarray(4, 16);
+        const ciphertext = pending.subarray(16, 16 + length);
+        let plaintext;
+        try {
+          plaintext = new Uint8Array(
+            await crypto.subtle.decrypt(
+              {
+                name: 'AES-GCM',
+                iv,
+                additionalData: encoder.encode(`dl:${sequence}`),
+              },
+              key,
+              ciphertext,
+            ),
+          );
+        } catch {
+          throw new Error('下载数据解密失败，连接可能已被篡改');
+        }
+        sequence += 1;
+        pending = pending.subarray(16 + length);
+        received += plaintext.length;
+        await onPlaintext(plaintext, received);
+      }
+    }
+    if (pending.length !== 0) throw new Error('下载数据不完整');
+    if (download.total > 0 && received !== download.total) {
+      throw new Error('文件大小校验失败');
+    }
+    return received;
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+}
+
+async function uploadChunkToTab(tab, uploadId, sequence, plaintext) {
+  const session = tab.session;
+  if (!session) throw new Error('目标标签会话已失效');
+  const path = `/api/upload/chunk/${encodeURIComponent(uploadId)}/${sequence}`;
+  const aad = `PUT ${path}`;
+  const iv = randomBytes(12);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: encoder.encode(aad) },
+      session.key,
+      plaintext,
+    ),
+  );
+  const response = await fetch(path, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      Authorization: `Bearer ${session.token}`,
+      ...targetHeaders(tab),
+    },
+    body: makeFrame(iv, ciphertext),
+  });
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    if (response.status === 401) handleSessionLost('会话已过期，请重新登录', tab);
+    throw new Error(data && data.error ? data.error : `写入失败 (${response.status})`);
+  }
+  await decryptWithKey(session.key, aad, data);
+}
+
+async function copyFileAcrossTabs(
+  sourceTab,
+  sourcePath,
+  destTab,
+  destDir,
+  destName,
+  onProgress,
+) {
+  const download = await openEncryptedDownload(sourceTab, sourcePath);
+  const init = await api(
+    '/api/upload/init',
+    { dir: destDir, name: destName, size: download.total },
+    'POST',
+    destTab,
+  );
+  let buffer = new Uint8Array(0);
+  let sequence = 0;
+  let uploadId = init.id;
+  const flush = async () => {
+    while (buffer.length > 0) {
+      const take = Math.min(COPY_CHUNK, buffer.length);
+      await uploadChunkToTab(destTab, uploadId, sequence, buffer.subarray(0, take));
+      sequence += 1;
+      buffer = buffer.subarray(take);
+    }
+  };
+  try {
+    await readDownloadFrames(download, async (plaintext, received) => {
+      buffer = concatBytes(buffer, plaintext);
+      while (buffer.length >= COPY_CHUNK) {
+        await uploadChunkToTab(
+          destTab,
+          uploadId,
+          sequence,
+          buffer.subarray(0, COPY_CHUNK),
+        );
+        sequence += 1;
+        buffer = buffer.subarray(COPY_CHUNK);
+      }
+      if (onProgress) onProgress(received, download.total);
+    });
+    await flush();
+    const result = await api('/api/upload/finish', { id: uploadId }, 'POST', destTab);
+    uploadId = null;
+    return result;
+  } catch (error) {
+    if (uploadId && destTab.session) {
+      await api('/api/upload/abort', { id: uploadId }, 'POST', destTab).catch(
+        () => {},
+      );
+    }
+    throw error;
+  }
+}
+
+async function collectTree(tab, rootPath, onProgress) {
+  const files = [];
+  const dirs = [];
+  const queue = [{ path: rootPath, relative: '' }];
+  let scanned = 0;
+  while (queue.length) {
+    const current = queue.shift();
+    let offset = 0;
+    while (true) {
+      const data = await api(
+        '/api/list',
+        { path: current.path, offset, limit: 1000 },
+        'POST',
+        tab,
+      );
+      const batch = Array.isArray(data.entries) ? data.entries : [];
+      for (const entry of batch) {
+        const relative = current.relative
+          ? `${current.relative}/${entry.name}`
+          : entry.name;
+        if (entry.is_dir && !entry.is_symlink) {
+          dirs.push(relative);
+          queue.push({ path: joinPath(current.path, entry.name), relative });
+        } else if (!entry.is_symlink) {
+          files.push({
+            relative,
+            path: joinPath(current.path, entry.name),
+            size: Number(entry.size) || 0,
+          });
+        }
+      }
+      scanned += batch.length;
+      if (onProgress) onProgress(scanned);
+      if (!data.has_more || !batch.length) break;
+      offset += batch.length;
+    }
+  }
+  return { files, dirs };
+}
+
+function refreshTab(tab) {
+  if (tab === activeTab()) {
+    void loadDir(tab.cwd, { tab, skipHistory: true });
+  } else {
+    tab.needsRefresh = true;
+  }
+}
+
+async function pasteClipboard() {
+  const clipboard = state.clipboard;
+  if (!clipboard) return;
+  const sourceTab =
+    clipboard.tabId === 'standalone'
+      ? state.standaloneTab
+      : getTab(clipboard.tabId);
+  const destTab = activeTab();
+  if (!sourceTab || !sourceTab.session) {
+    toast('源标签已失效，请重新复制', 'error');
+    state.clipboard = null;
+    updatePasteButton();
+    return;
+  }
+  if (!destTab.session) {
+    toast('请先登录目标标签', 'error');
+    return;
+  }
+
+  const sourcePath = normalizeRelPath(clipboard.path);
+  const destPath = normalizeRelPath(destTab.cwd);
+  if (sourceTab.id === destTab.id && clipboard.isDir) {
+    if (
+      destPath === sourcePath ||
+      destPath.startsWith(`${sourcePath}/`)
+    ) {
+      toast('不能把文件夹复制到自身内部', 'error');
+      return;
+    }
+  }
+  if (
+    sourceTab.id === destTab.id &&
+    clipboard.cut &&
+    parentOf(clipboard.path) === destTab.cwd
+  ) {
+    toast('源文件夹和目标文件夹相同', 'info');
+    return;
+  }
+
+  const progress = addTransferItem(
+    `${clipboard.cut ? '移动' : '复制'}「${clipboard.name}」`,
+    0,
+    `${targetLabel(sourceTab.target)} → ${targetLabel(destTab.target)}`,
+  );
+  try {
+    const existing = (await listAllEntries(destTab, destTab.cwd)).map(
+      (entry) => entry.name,
+    );
+    const destName = uniqueName(clipboard.name, clipboard.isDir, existing);
+
+    if (clipboard.isDir) {
+      progress.update(0, 0, '正在扫描文件夹…');
+      const tree = await collectTree(sourceTab, clipboard.path, (scanned) => {
+        progress.update(0, 0, `正在扫描 · ${scanned} 项`);
+      });
+      const destRoot = joinPath(destTab.cwd, destName);
+      const allDirs = [
+        destRoot,
+        ...tree.dirs.map((relative) => joinPath(destRoot, relative)),
+      ];
+      await ensureDirsInTab(destTab, allDirs);
+      const totalBytes = tree.files.reduce((sum, file) => sum + file.size, 0);
+      let copied = 0;
+      for (const file of tree.files) {
+        const relativeDir = dirnameOf(file.relative);
+        const destDir = relativeDir
+          ? joinPath(destRoot, relativeDir)
+          : destRoot;
+        const name = file.relative.slice(file.relative.lastIndexOf('/') + 1);
+        progress.update(
+          copied,
+          totalBytes,
+          `${file.relative} · ${formatSize(copied)} / ${formatSize(totalBytes)}`,
+        );
+        await copyFileAcrossTabs(
+          sourceTab,
+          file.path,
+          destTab,
+          destDir,
+          name,
+          (received) => {
+            const overall = Math.min(totalBytes, copied + received);
+            progress.update(
+              overall,
+              totalBytes,
+              `${file.relative} · ${formatSize(overall)} / ${formatSize(totalBytes)}`,
+            );
+          },
+        );
+        copied += file.size;
+      }
+      progress.done(
+        `已${clipboard.cut ? '移动' : '复制'} ${tree.files.length} 个文件`,
+      );
+    } else {
+      await copyFileAcrossTabs(
+        sourceTab,
+        clipboard.path,
+        destTab,
+        destTab.cwd,
+        destName,
+        (received, total) => progress.update(received, total),
+      );
+      progress.done(`已${clipboard.cut ? '移动' : '复制'} ${destName}`);
+    }
+
+    if (clipboard.cut) {
+      await api(
+        '/api/delete',
+        { path: clipboard.path },
+        'POST',
+        sourceTab,
+      );
+      state.clipboard = null;
+      updatePasteButton();
+      refreshTab(sourceTab);
+    }
+    refreshTab(destTab);
+    toast(clipboard.cut ? '移动完成' : '粘贴完成', 'success');
+  } catch (error) {
+    const message = error.message || '粘贴失败';
+    progress.fail(message);
+    toast(message, 'error');
+  }
+}
+
+function handleFileShortcuts(event) {
+  if (event.defaultPrevented) return;
+  if (!(event.metaKey || event.ctrlKey)) return;
+  if (event.altKey || event.shiftKey) return;
+  const target = event.target;
+  const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+  if (
+    tag === 'input' ||
+    tag === 'textarea' ||
+    tag === 'select' ||
+    (target && target.isContentEditable)
+  ) {
+    return;
+  }
+  const modal = $('#modal');
+  if (modal && modal.open) return;
+  const overlay = $('#server-overlay');
+  if (overlay && !overlay.hidden) return;
+  const key = event.key.toLowerCase();
+  if ((key === 'c' || key === 'x') && activeTab().selectedEntry) {
+    event.preventDefault();
+    copyEntry(activeTab().selectedEntry, key === 'x');
+    return;
+  }
+  if (key === 'v' && state.clipboard) {
+    event.preventDefault();
+    void pasteClipboard();
   }
 }
 
@@ -829,25 +1491,27 @@ async function chooseSaveTarget(suggestedName) {
   }
 }
 
-async function startDownload(path, name) {
-  recordHistory('file', path, name, parentOf(path));
+async function startDownload(path, name, tab = activeTab()) {
+  recordHistory('file', path, name, parentOf(path), tab);
   await streamEncryptedDownload({
     endpoint: '/api/download',
     payload: { path },
     suggestedName: name,
     expectEndMarker: false,
     title: `下载 ${name}`,
+    tab,
   });
 }
 
-async function startFolderDownload(path, name) {
-  recordHistory('dir', path, name, parentOf(path));
+async function startFolderDownload(path, name, tab = activeTab()) {
+  recordHistory('dir', path, name, parentOf(path), tab);
   await streamEncryptedDownload({
     endpoint: '/api/download_folder',
     payload: { path },
     suggestedName: `${name}.tar`,
     expectEndMarker: true,
     title: `打包 ${name}`,
+    tab,
   });
 }
 
@@ -857,6 +1521,7 @@ async function streamEncryptedDownload({
   suggestedName,
   expectEndMarker,
   title,
+  tab = activeTab(),
 }) {
   let target;
   try {
@@ -867,14 +1532,21 @@ async function streamEncryptedDownload({
   }
 
   const progress = progressToast(title);
+  const session = tab.session;
+  if (!session) {
+    progress.fail('会话已失效，请重新登录');
+    toast('会话已失效，请重新登录', 'error');
+    return;
+  }
   try {
     const aad = `POST ${endpoint}`;
-    const envelope = await encryptPayload(aad, payload);
+    const envelope = await encryptWithKey(session.key, aad, payload);
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${state.token}`,
+        Authorization: `Bearer ${session.token}`,
+        ...targetHeaders(tab),
       },
       body: JSON.stringify(envelope),
     });
@@ -886,7 +1558,7 @@ async function streamEncryptedDownload({
       } catch {
         message = null;
       }
-      if (response.status === 401) handleSessionLost('会话已过期，请重新登录');
+      if (response.status === 401) handleSessionLost('会话已过期，请重新登录', tab);
       throw new Error(message || `下载失败 (${response.status})`);
     }
 
@@ -925,7 +1597,7 @@ async function streamEncryptedDownload({
                 iv,
                 additionalData: encoder.encode(`dl:${sequence}`),
               },
-              state.key,
+              session.key,
               ciphertext,
             ),
           );
@@ -1019,9 +1691,9 @@ function toUploadItems(input) {
   });
 }
 
-function enqueueUploads(input, dir, directories = []) {
+function enqueueUploads(input, dir, directories = [], tab = activeTab()) {
   const items = toUploadItems(input);
-  const base = dir || state.cwd;
+  const base = dir || tab.cwd;
   const directorySet = new Set(
     (directories || []).map((relative) => normalizeRelPath(relative)).filter(Boolean),
   );
@@ -1036,7 +1708,7 @@ function enqueueUploads(input, dir, directories = []) {
   if (!items.length && !directorySet.size) return;
 
   if (directorySet.size) {
-    void ensureDirectories(base, [...directorySet]);
+    void ensureDirectories(base, [...directorySet], tab);
   }
 
   for (const item of items) {
@@ -1045,17 +1717,23 @@ function enqueueUploads(input, dir, directories = []) {
       file: item.file,
       dir: parent ? joinPath(base, parent) : base,
       display: item.relative,
+      tab,
     });
   }
   $('#upload-panel').hidden = false;
   void pumpUploads();
 }
 
-async function ensureDirectories(base, relatives) {
+async function ensureDirectories(base, relatives, tab = activeTab()) {
   try {
-    await api('/api/ensure_dirs', {
-      paths: relatives.map((relative) => joinPath(base, relative)),
-    });
+    await api(
+      '/api/ensure_dirs',
+      {
+        paths: relatives.map((relative) => joinPath(base, relative)),
+      },
+      'POST',
+      tab,
+    );
   } catch {
     // Folder creation also happens lazily in upload_init; a batch failure here
     // is not fatal, individual uploads will surface the real error.
@@ -1109,22 +1787,32 @@ async function pumpUploads() {
   try {
     while (uploadQueue.length) {
       const item = uploadQueue.shift();
-      await uploadFile(item.file, item.dir, item.display);
+      await uploadFile(item.file, item.dir, item.display, item.tab);
     }
   } finally {
     uploadRunning = false;
   }
 }
 
-async function uploadFile(file, dir, display) {
+async function uploadFile(file, dir, display, tab = activeTab()) {
   const item = addUploadItem(display || file.name, file.size, dir);
+  const session = tab.session;
   let uploadId = null;
+  if (!session) {
+    item.fail('会话已失效，请重新登录');
+    return;
+  }
   try {
-    const init = await api('/api/upload/init', {
-      dir,
-      name: file.name,
-      size: file.size,
-    });
+    const init = await api(
+      '/api/upload/init',
+      {
+        dir,
+        name: file.name,
+        size: file.size,
+      },
+      'POST',
+      tab,
+    );
     uploadId = init.id;
 
     const chunkSize = 2 * 1024 * 1024;
@@ -1139,7 +1827,7 @@ async function uploadFile(file, dir, display) {
       const ciphertext = new Uint8Array(
         await crypto.subtle.encrypt(
           { name: 'AES-GCM', iv, additionalData: encoder.encode(aad) },
-          state.key,
+          session.key,
           plaintext,
         ),
       );
@@ -1148,7 +1836,8 @@ async function uploadFile(file, dir, display) {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/octet-stream',
-          Authorization: `Bearer ${state.token}`,
+          Authorization: `Bearer ${session.token}`,
+          ...targetHeaders(tab),
         },
         body: frame,
       });
@@ -1159,10 +1848,10 @@ async function uploadFile(file, dir, display) {
         data = null;
       }
       if (!response.ok) {
-        if (response.status === 401) handleSessionLost('会话已过期，请重新登录');
+        if (response.status === 401) handleSessionLost('会话已过期，请重新登录', tab);
         throw new Error(data && data.error ? data.error : `上传失败 (${response.status})`);
       }
-      await decryptPayload(aad, data);
+      await decryptWithKey(session.key, aad, data);
 
       offset = end;
       sequence += 1;
@@ -1172,20 +1861,22 @@ async function uploadFile(file, dir, display) {
       );
     }
 
-    const result = await api('/api/upload/finish', { id: uploadId });
+    const result = await api('/api/upload/finish', { id: uploadId }, 'POST', tab);
     uploadId = null;
     item.done(result.path || file.name);
     toast(`已上传：${display || file.name}`, 'success');
-    if (dir === state.cwd || dir.startsWith(`${state.cwd === '/' ? '' : state.cwd}/`)) {
-      await loadDir(state.cwd);
+    if (tab === activeTab() && (dir === tab.cwd || dir.startsWith(`${tab.cwd === '/' ? '' : tab.cwd}/`))) {
+      await loadDir(tab.cwd, { tab });
+    } else {
+      tab.needsRefresh = true;
     }
   } catch (error) {
     const message = error.message || '上传失败';
     item.fail(message);
     toast(message, 'error');
-    if (uploadId && state.token) {
+    if (uploadId && tab.session) {
       try {
-        await api('/api/upload/abort', { id: uploadId });
+        await api('/api/upload/abort', { id: uploadId }, 'POST', tab);
       } catch {
         /* best effort cleanup */
       }
@@ -1490,8 +2181,8 @@ function handlePreviewKeys(event) {
   }
 }
 
-function openPreview(entry) {
-  recordHistory('file', joinPath(state.cwd, entry.name), entry.name, state.cwd);
+function openPreview(entry, tab = activeTab()) {
+  recordHistory('file', joinPath(tab.cwd, entry.name), entry.name, tab.cwd, tab);
   const initialKind = previewKindOf(entry.name);
   const isImage = initialKind === 'image' || initialKind === 'svg';
   let images = isImage ? visibleImageEntries() : [];
@@ -1569,7 +2260,7 @@ function openPreview(entry) {
 
       updateHeader(nextEntry, nextKind);
       downloadButton.onclick = () =>
-        startDownload(joinPath(state.cwd, currentEntry.name), currentEntry.name);
+        startDownload(joinPath(tab.cwd, currentEntry.name), currentEntry.name, tab);
 
       const generation = ++renderGeneration;
       releaseObjectUrls();
@@ -1579,7 +2270,7 @@ function openPreview(entry) {
       content.replaceChildren(loading);
 
       try {
-        await renderPreview({ content, entry: nextEntry, kind: nextKind, trackUrl });
+        await renderPreview({ content, entry: nextEntry, kind: nextKind, trackUrl, tab });
         if (generation !== renderGeneration) return;
         controller.video = content.querySelector('video');
       } catch (error) {
@@ -1698,15 +2389,18 @@ function securePreviewHtml(html) {
   return meta + html;
 }
 
-async function requestPreviewStream(path) {
+async function requestPreviewStream(path, tab = activeTab()) {
   const endpoint = '/api/preview/stream';
+  const session = tab.session;
+  if (!session) throw new Error('会话已失效，请重新登录');
   const aad = `POST ${endpoint}`;
-  const envelope = await encryptPayload(aad, { path });
+  const envelope = await encryptWithKey(session.key, aad, { path });
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${state.token}`,
+      Authorization: `Bearer ${session.token}`,
+      ...targetHeaders(tab),
     },
     body: JSON.stringify(envelope),
     cache: 'no-store',
@@ -1719,7 +2413,7 @@ async function requestPreviewStream(path) {
     } catch {
       message = null;
     }
-    if (response.status === 401) handleSessionLost('会话已过期，请重新登录');
+    if (response.status === 401) handleSessionLost('会话已过期，请重新登录', tab);
     throw new Error(message || `读取文件失败 (${response.status})`);
   }
   const streamId = response.headers.get('x-stream-id');
@@ -1727,6 +2421,7 @@ async function requestPreviewStream(path) {
   return {
     reader: response.body.getReader(),
     streamId,
+    key: session.key,
     size: Number(response.headers.get('x-file-size') || 0),
     chunkSize: Number(response.headers.get('x-chunk-size') || 65536),
     contentType:
@@ -1735,7 +2430,7 @@ async function requestPreviewStream(path) {
 }
 
 async function readEncryptedPreview(source, onPlaintext) {
-  if (!state.key) throw new Error('会话已失效，请重新登录');
+  if (!source.key) throw new Error('会话已失效，请重新登录');
   const { reader, streamId, chunkSize } = source;
   let pending = new Uint8Array(0);
   let sequence = 0;
@@ -1764,7 +2459,7 @@ async function readEncryptedPreview(source, onPlaintext) {
                 iv,
                 additionalData: encoder.encode(`pv:${streamId}:${sequence}`),
               },
-              state.key,
+              source.key,
               ciphertext,
             ),
           );
@@ -1819,7 +2514,7 @@ function mediaProgress(status, received, total, label) {
       : `${label} ${formatSize(received)}`;
 }
 
-async function renderPreview({ content, entry, kind, trackUrl }) {
+async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab() }) {
   if (kind === 'none') {
     content.replaceChildren(
       previewMessage('暂不支持在线预览此类型', '可以下载后使用本地应用打开。'),
@@ -1837,7 +2532,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     return;
   }
 
-  const path = joinPath(state.cwd, entry.name);
+  const path = joinPath(tab.cwd, entry.name);
 
   if (kind === 'image' || kind === 'svg') {
     content.classList.add('media-mode');
@@ -1846,7 +2541,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > IMAGE_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, IMAGE_PREVIEW_BYTES, '查看');
@@ -1888,7 +2583,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > MEDIA_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, MEDIA_PREVIEW_BYTES, '播放');
@@ -1945,7 +2640,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > MEDIA_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, MEDIA_PREVIEW_BYTES, '播放');
@@ -1994,7 +2689,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > PDF_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, PDF_PREVIEW_BYTES, '查看');
@@ -2033,7 +2728,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     wrapper.append(note, frameWrap);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > HTML_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, HTML_PREVIEW_BYTES, '查看');
@@ -2072,7 +2767,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     wrapper.append(banner, pre);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     const total = source.size || entry.size || 0;
     const textDecoder = new TextDecoder('utf-8', { fatal: false });
     let received = 0;
@@ -2114,7 +2809,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     content.replaceChildren(wrapper);
     await loadScript('/vendor/mammoth.js');
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > OFFICE_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, OFFICE_PREVIEW_BYTES, '查看');
@@ -2141,7 +2836,7 @@ async function renderPreview({ content, entry, kind, trackUrl }) {
     content.replaceChildren(wrapper);
     await loadScript('/vendor/xlsx.js');
 
-    const source = await requestPreviewStream(path);
+    const source = await requestPreviewStream(path, tab);
     if (source.size > OFFICE_PREVIEW_BYTES) {
       await source.reader.cancel().catch(() => {});
       previewTooLarge(content, OFFICE_PREVIEW_BYTES, '查看');
@@ -2384,7 +3079,8 @@ function openAccountDialog() {
           new_username: usernameValue,
           new_password: passwordValue,
         });
-        state.user = result.user;
+        const tab = activeTab();
+        if (tab.session) tab.session.user = result.user;
         $('#user-badge').textContent = result.user;
         if (result.password_changed) {
           toast('用户名和密码已更新', 'success');
@@ -2482,7 +3178,7 @@ function writeHistory(items) {
   }
 }
 
-function recordHistory(type, path, name, parent) {
+function recordHistory(type, path, name, parent, tab = activeTab()) {
   const clean = normalizeRelPath(path);
   if (!clean && type !== 'dir') return;
   const entry = {
@@ -2490,10 +3186,17 @@ function recordHistory(type, path, name, parent) {
     path: clean ? `/${clean}` : '/',
     name: name || basenameOf(path),
     parent: parent || parentOf(path),
+    target: tab.id,
+    targetName: targetLabel(tab.target),
     at: Date.now(),
   };
   const items = readHistory().filter(
-    (item) => !(item.type === entry.type && item.path === entry.path),
+    (item) =>
+      !(
+        item.type === entry.type &&
+        item.path === entry.path &&
+        (item.target || '') === entry.target
+      ),
   );
   items.unshift(entry);
   writeHistory(items);
@@ -2531,9 +3234,9 @@ function openHistoryDialog() {
         const title = span('history-name');
         title.textContent = item.name;
         const meta = span('history-meta');
-        meta.textContent = `${item.type === 'dir' ? '文件夹' : '文件'} · ${
-          item.parent === '/' ? '根目录' : item.parent
-        }`;
+        meta.textContent = `${item.type === 'dir' ? '文件夹' : '文件'}${
+          item.targetName ? ` · ${item.targetName}` : ''
+        } · ${item.parent === '/' ? '根目录' : item.parent}`;
         info.append(title, meta);
         const time = span('history-time');
         time.textContent = relativeTime(item.at);
@@ -2557,18 +3260,32 @@ function openHistoryDialog() {
 }
 
 async function jumpToHistory(item) {
+  let tab = activeTab();
+  if (item.target && item.target !== 'standalone') {
+    tab = getTab(item.target);
+    if (!tab) {
+      toast('目标服务器已删除，无法跳转', 'error');
+      return;
+    }
+    await activateTab(tab.id);
+    tab = activeTab();
+    if (!tab.session) {
+      toast('请先登录该服务器后再跳转', 'info');
+      return;
+    }
+  }
   if (item.type === 'dir') {
-    await loadDir(item.path);
+    await loadDir(item.path, { tab });
     return;
   }
-  state.pendingHighlight = item.path;
-  await loadDir(item.parent || '/');
+  tab.pendingHighlight = item.path;
+  await loadDir(item.parent || '/', { tab });
 }
 
-/* ---------- Desktop app mode ---------- */
+/* ---------- Desktop workspace: local + server tabs ---------- */
 
 function isLocalTarget() {
-  return Boolean(state.activeTarget && state.activeTarget.kind === 'local');
+  return activeTab().target.kind === 'local';
 }
 
 function showAppView() {
@@ -2582,13 +3299,153 @@ function showLoginView() {
   $('#setup-view').hidden = true;
   $('#app-view').hidden = true;
   $('#login-view').hidden = false;
-  $('#login-servers').hidden = !state.app;
+  $('#login-servers').hidden = true;
+  $('#login-desc').textContent = '登录后即可安全地浏览、上传与下载文件。';
+  for (const field of document.querySelectorAll('#login-form .field')) field.hidden = false;
+  $('#login-btn').textContent = '加密登录';
+  loginTab = activeTab();
 }
 
-function showSetupView() {
-  $('#login-view').hidden = true;
+function showTabLogin(tab, message = '') {
+  loginTab = tab;
+  const local = tab.target.kind === 'local';
+  $('#setup-view').hidden = true;
   $('#app-view').hidden = true;
-  $('#setup-view').hidden = false;
+  $('#login-view').hidden = false;
+  $('#login-servers').hidden = true;
+  $('#login-desc').textContent = local
+    ? '本机文件服务未就绪。点击下方按钮重新连接本机。'
+    : tab.target.kind === 'standalone'
+      ? '登录后即可安全地浏览、上传与下载文件。'
+      : `登录 ${targetLabel(tab.target)}，文件会显示在当前标签中。`;
+  for (const field of document.querySelectorAll('#login-form .field')) field.hidden = local;
+  $('#login-btn').textContent = local ? '重新连接本机' : '加密登录';
+  $('#username').value = '';
+  $('#password').value = '';
+  showLoginError(message || '');
+  if (!local) setTimeout(() => $('#username').focus(), 30);
+}
+
+function ensureTab(target) {
+  let tab = state.tabs.get(target.id);
+  if (!tab) {
+    tab = makeTab(target);
+    state.tabs.set(target.id, tab);
+  } else {
+    tab.target = target;
+  }
+  return tab;
+}
+
+function syncTabs(info) {
+  const ids = new Set((info.targets || []).map((target) => target.id));
+  for (const id of [...state.tabs.keys()]) {
+    if (!ids.has(id)) state.tabs.delete(id);
+  }
+  for (const target of info.targets || []) ensureTab(target);
+  if (state.activeTabId && !state.tabs.has(state.activeTabId)) {
+    state.activeTabId = null;
+  }
+}
+
+function renderTabs() {
+  const bar = $('#workspace-bar');
+  if (!state.app) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  const container = $('#tabs');
+  container.replaceChildren();
+  for (const target of state.app.targets || []) {
+    const tab = ensureTab(target);
+    const active = target.id === state.activeTabId;
+    const button = buttonEl(
+      '',
+      `workspace-tab ${target.kind === 'local' ? 'local' : 'remote'}${
+        tab.session ? '' : ' locked'
+      }${active ? ' active' : ''}`,
+    );
+    button.dataset.tabId = target.id;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    const dot = span('tab-dot');
+    const label = span('workspace-tab-label');
+    label.textContent = targetLabel(target);
+    button.append(dot, label);
+    button.title =
+      target.kind === 'local'
+        ? '本机文件系统'
+        : `${target.url || ''}${tab.session ? '' : '（未登录）'}`;
+    button.addEventListener('click', () => void activateTab(target.id));
+    container.append(button);
+  }
+  updatePasteButton();
+}
+
+async function activateTab(id, options = {}) {
+  let tab = getTab(id);
+  if (!tab && id === 'standalone') tab = state.standaloneTab;
+  if (!tab) return;
+  state.activeTabId = state.tabs.has(id) ? id : null;
+  loginTab = tab.session ? null : tab;
+  renderTabs();
+  renderRootSelect();
+  updatePasteButton();
+  if (!tab.session) {
+    showTabLogin(tab);
+    return;
+  }
+  showAppView();
+  updateTabChrome(tab);
+  if (options.reload || !tab.loaded || tab.needsRefresh) {
+    await loadDir(tab.cwd, { tab, skipHistory: true });
+  } else {
+    renderTabContent(tab);
+  }
+}
+
+function updateTabChrome(tab) {
+  const local = tab.target.kind === 'local';
+  $('#user-badge').textContent = local
+    ? '本机'
+    : tab.session?.user || targetLabel(tab.target);
+  $('#btn-account').hidden = local || !tab.session;
+  $('#btn-logout').hidden = local || !tab.session;
+  $('#session-note').textContent = local
+    ? '本机文件通过回环服务访问，不上传任何数据'
+    : '会话密钥仅保存在本页内存，刷新后需重新登录';
+  $('#local-root-wrap').hidden = !local;
+  $('#app-bar').hidden = !state.app;
+  renderRootSelect();
+}
+
+function renderTabContent(tab) {
+  $('#filter').value = tab.filter || '';
+  renderBreadcrumbs();
+  showListSkeleton(false);
+  renderFiles();
+  $('#free-space').textContent =
+    typeof tab.freeSpace === 'number' ? `剩余 ${formatSize(tab.freeSpace)}` : '';
+}
+
+async function enterLocalTab(tab) {
+  const response = await fetch('/api/local-login', {
+    cache: 'no-store',
+    headers: targetHeaders(tab),
+  });
+  if (!response.ok) throw new Error('本机服务未就绪');
+  const data = await response.json();
+  tab.session = {
+    key: await importAesKey(base64ToBytes(data.key)),
+    token: data.token,
+    user: data.user || 'local',
+  };
+  if (tab === activeTab()) {
+    showAppView();
+    updateTabChrome(tab);
+    await loadDir(tab.cwd || '/', { tab, skipHistory: true });
+  }
 }
 
 async function boot() {
@@ -2603,61 +3460,48 @@ async function boot() {
   } catch {
     info = null;
   }
-  if (!info || !info.mode) return; // standalone server: normal login flow
+  if (!info || !info.mode) {
+    renderTabs();
+    return; // standalone server: normal login flow
+  }
 
   state.app = info;
-  $('#app-bar').hidden = false;
+  document.body.classList.add('has-workspace');
+  $('#workspace-bar').hidden = false;
   $('#app-version').textContent = `v${info.version || ''}`;
-  $('#login-servers').hidden = false;
-  renderAppBar();
-
-  if (!info.active) {
-    showSetupView();
+  syncTabs(info);
+  renderTabs();
+  const localTarget = (info.targets || []).find((target) => target.kind === 'local');
+  const initial = localTarget || (info.targets || [])[0];
+  if (!initial) {
+    showTabLogin(state.standaloneTab, '尚未配置任何文件位置');
     return;
   }
-  const target =
-    (info.targets || []).find((item) => item.id === info.active) || null;
-  state.activeTarget = target;
-
-  if (target && target.kind === 'local') {
-    await enterLocalMode();
-  } else {
-    showLoginView();
-  }
-}
-
-function renderAppBar() {
-  const info = state.app;
-  if (!info) return;
-  const select = $('#target-select');
-  select.replaceChildren();
-  const targets = info.targets || [];
-  if (!targets.length) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = '未配置服务器';
-    select.append(option);
-  }
-  for (const target of targets) {
-    const option = document.createElement('option');
-    option.value = target.id;
-    option.textContent =
-      target.kind === 'local' ? '本机' : target.name || target.url || '服务器';
-    if (target.id === info.active) option.selected = true;
-    select.append(option);
-  }
+  state.activeTabId = initial.id;
+  const tab = ensureTab(initial);
+  renderTabs();
   renderRootSelect();
+  if (tab.target.kind === 'local') {
+    try {
+      await enterLocalTab(tab);
+    } catch (error) {
+      showTabLogin(tab, error.message || '无法进入本机模式');
+    }
+  } else {
+    showTabLogin(tab);
+  }
 }
 
 function renderRootSelect() {
   const info = state.app;
   const wrap = $('#local-root-wrap');
-  if (!info || !info.local || !Array.isArray(info.local.roots)) {
-    wrap.hidden = true;
-    return;
-  }
-  const target = (info.targets || []).find((item) => item.id === info.active);
-  if (!target || target.kind !== 'local') {
+  const tab = activeTab();
+  if (
+    !info ||
+    !info.local ||
+    tab.target.kind !== 'local' ||
+    !Array.isArray(info.local.roots)
+  ) {
     wrap.hidden = true;
     return;
   }
@@ -2673,34 +3517,14 @@ function renderRootSelect() {
   }
 }
 
-async function enterLocalMode() {
-  try {
-    const response = await fetch('/api/local-login', { cache: 'no-store' });
-    if (!response.ok) throw new Error('本机服务未就绪');
-    const data = await response.json();
-    state.key = await importAesKey(base64ToBytes(data.key));
-    state.token = data.token;
-    state.user = data.user || 'local';
-    state.activeTarget = (state.app.targets || []).find(
-      (item) => item.kind === 'local',
-    ) || { kind: 'local' };
-    showAppView();
-    $('#user-badge').textContent = '本机';
-    $('#btn-account').hidden = true;
-    $('#btn-logout').hidden = true;
-    await loadDir('/');
-  } catch (error) {
-    showLoginView();
-    showLoginError(error.message || '无法进入本机模式');
-  }
-}
-
 async function refreshAppInfo() {
   try {
     const response = await fetch('/app/info', { cache: 'no-store' });
     if (!response.ok) return null;
     state.app = await response.json();
-    renderAppBar();
+    syncTabs(state.app);
+    renderTabs();
+    renderRootSelect();
     return state.app;
   } catch {
     return null;
@@ -2725,175 +3549,215 @@ async function serversAction(payload) {
   return data;
 }
 
+/* ---------- Add / manage servers (custom overlay, WKWebView safe) ---------- */
+
+let serverPanelEditing = null;
+
+function closeServerPanel() {
+  const overlay = $('#server-overlay');
+  if (overlay) overlay.hidden = true;
+  const panel = $('#server-panel');
+  if (panel) panel.replaceChildren();
+  serverPanelEditing = null;
+}
+
 function openServersDialog() {
-  const activeAtOpen = state.app ? state.app.active : null;
+  if (!state.app) return;
+  const overlay = $('#server-overlay');
+  const panel = $('#server-panel');
+  overlay.hidden = false;
 
-  return openModal((dialog, finish) => {
-    dialog.classList.add('servers-dialog');
-    const body = div('modal-body');
-    const heading = document.createElement('h2');
-    heading.textContent = '服务器连接';
-    const hint = document.createElement('p');
-    hint.className = 'modal-text';
-    hint.textContent =
-      '可以保存多台服务器并随时切换。切换后需要重新登录对应服务器；自签名证书需勾选下方选项。';
+  const body = div('modal-body');
+  const heading = document.createElement('h2');
+  heading.textContent = '服务器连接';
+  const hint = document.createElement('p');
+  hint.className = 'modal-text';
+  hint.textContent =
+    '本机文件默认显示在第一个标签。这里可以添加 AgentGod Files 服务器（HTTPS / HTTP），添加后会生成独立标签，可同时登录多台服务器。';
 
-    const list = div('servers-list');
-    const form = div('server-form');
-    const nameField = labeledInput('名称', 'text', 'off');
-    const urlField = labeledInput('服务器地址', 'text', 'off');
-    urlField.input.placeholder = 'https://192.168.1.10:8090';
-    const checkRow = document.createElement('label');
-    checkRow.className = 'check';
-    const checkBox = document.createElement('input');
-    checkBox.type = 'checkbox';
-    const checkText = span('');
-    checkText.textContent = '允许自签名证书（首次连接常见）';
-    checkRow.append(checkBox, checkText);
+  const close = buttonEl('', 'btn ghost icon-only panel-close');
+  close.innerHTML = ICONS.close;
+  close.title = '关闭';
+  close.setAttribute('aria-label', '关闭');
+  close.addEventListener('click', closeServerPanel);
 
-    const errorEl = div('form-error inline-error');
-    const formActions = div('form-actions');
-    const saveButton = buttonEl('添加服务器', 'btn primary');
-    const cancelEdit = buttonEl('取消编辑', 'btn ghost small');
+  const list = div('servers-list');
+  const form = div('server-form');
+
+  const nameField = labeledInput('名称', 'text', 'off');
+  const protocolField = document.createElement('label');
+  protocolField.className = 'field protocol';
+  const protocolLabel = document.createElement('span');
+  protocolLabel.textContent = '协议';
+  const protocolSelect = document.createElement('select');
+  protocolSelect.className = 'app-select';
+  protocolSelect.innerHTML =
+    '<option value="https">HTTPS</option><option value="http">HTTP</option>';
+  protocolField.append(protocolLabel, protocolSelect);
+  const urlField = labeledInput('服务器地址', 'text', 'off');
+  urlField.input.placeholder = '192.168.1.10:8090 或完整 URL';
+  const formRow = div('form-row');
+  formRow.append(protocolField, urlField.field);
+
+  const checkRow = document.createElement('label');
+  checkRow.className = 'check';
+  const checkBox = document.createElement('input');
+  checkBox.type = 'checkbox';
+  const checkText = span('');
+  checkText.textContent = '允许自签名证书（首次连接常见）';
+  checkRow.append(checkBox, checkText);
+
+  const errorEl = div('form-error inline-error');
+  const formActions = div('form-actions');
+  const saveButton = buttonEl('添加服务器', 'btn primary');
+  const cancelEdit = buttonEl('取消编辑', 'btn ghost small');
+  cancelEdit.hidden = true;
+  formActions.append(saveButton, cancelEdit);
+  form.append(nameField.field, formRow, checkRow, errorEl, formActions);
+
+  const footer = div('modal-actions');
+  const done = buttonEl('关闭', 'btn ghost');
+  done.addEventListener('click', closeServerPanel);
+  footer.append(done);
+
+  body.append(heading, hint, close, list, form, footer);
+  panel.replaceChildren(body);
+
+  const resetForm = () => {
+    serverPanelEditing = null;
+    nameField.input.value = '';
+    urlField.input.value = '';
+    protocolSelect.value = 'https';
+    checkBox.checked = false;
+    saveButton.textContent = '添加服务器';
     cancelEdit.hidden = true;
-    formActions.append(saveButton, cancelEdit);
-    form.append(
-      nameField.field,
-      urlField.field,
-      checkRow,
-      errorEl,
-      formActions,
+    errorEl.textContent = '';
+  };
+
+  const drawList = () => {
+    list.replaceChildren();
+    const remotes = (state.app.targets || []).filter(
+      (target) => target.kind === 'remote',
     );
-
-    const footer = div('modal-actions');
-    const closeButton = buttonEl('关闭', 'btn ghost');
-    const close = () => {
-      finish(null);
-      if (state.app && state.app.active !== activeAtOpen) {
-        location.reload();
+    if (!remotes.length) {
+      const empty = div('servers-empty');
+      empty.textContent = '还没有保存的服务器，请在下方添加。';
+      list.append(empty);
+      return;
+    }
+    for (const target of remotes) {
+      const row = div('server-row');
+      const info = div('server-info');
+      const title = span('server-name');
+      title.textContent = target.name || target.url;
+      if (target.id === state.activeTabId) {
+        const badge = span('server-badge');
+        badge.textContent = '当前';
+        title.append(badge);
       }
-    };
-    closeButton.addEventListener('click', close);
-    footer.append(closeButton);
+      const meta = span('server-url');
+      meta.textContent = target.url;
+      info.append(title, meta);
 
-    body.append(heading, hint, list, form, footer);
-    dialog.append(body);
-
-    let editingId = null;
-
-    const resetForm = () => {
-      editingId = null;
-      nameField.input.value = '';
-      urlField.input.value = '';
-      checkBox.checked = false;
-      saveButton.textContent = '添加服务器';
-      cancelEdit.hidden = true;
-      errorEl.textContent = '';
-    };
-
-    const drawList = () => {
-      list.replaceChildren();
-      const remotes = (state.app && state.app.targets
-        ? state.app.targets
-        : []
-      ).filter((target) => target.kind === 'remote');
-      if (!remotes.length) {
-        const empty = div('servers-empty');
-        empty.textContent = '还没有保存的服务器，请在下方添加。';
-        list.append(empty);
-        return;
-      }
-      for (const target of remotes) {
-        const row = div('server-row');
-        const info = div('server-info');
-        const title = span('server-name');
-        title.textContent = target.name || target.url;
-        if (target.id === state.app.active) {
-          const badge = span('server-badge');
-          badge.textContent = '当前';
-          title.append(badge);
-        }
-        const meta = span('server-url');
-        meta.textContent = target.url;
-        info.append(title, meta);
-
-        const actions = div('server-actions');
-        const edit = buttonEl('编辑', 'btn ghost small');
-        edit.addEventListener('click', () => {
-          editingId = target.id;
-          nameField.input.value = target.name || '';
-          urlField.input.value = target.url || '';
-          checkBox.checked = Boolean(target.allow_invalid_certs);
-          saveButton.textContent = '保存修改';
-          cancelEdit.hidden = false;
-          errorEl.textContent = '';
-          nameField.input.focus();
-        });
-        const remove = buttonEl('删除', 'btn ghost small danger-text');
-        remove.addEventListener('click', async () => {
-          errorEl.textContent = '';
-          try {
-            await serversAction({ action: 'remove', id: target.id });
-            await refreshAppInfo();
-            drawList();
-            resetForm();
-          } catch (error) {
-            errorEl.textContent = error.message || '删除失败';
+      const actions = div('server-actions');
+      const edit = buttonEl('编辑', 'btn ghost small');
+      edit.addEventListener('click', () => {
+        serverPanelEditing = target.id;
+        nameField.input.value = target.name || '';
+        urlField.input.value = target.url || '';
+        protocolSelect.value = String(target.url || '').startsWith('http://')
+          ? 'http'
+          : 'https';
+        checkBox.checked = Boolean(target.allow_invalid_certs);
+        saveButton.textContent = '保存修改';
+        cancelEdit.hidden = false;
+        errorEl.textContent = '';
+        nameField.input.focus();
+      });
+      const remove = buttonEl('删除', 'btn ghost small danger-text');
+      remove.addEventListener('click', async () => {
+        errorEl.textContent = '';
+        try {
+          await serversAction({ action: 'remove', id: target.id });
+          const wasActive = state.activeTabId === target.id;
+          state.tabs.delete(target.id);
+          if (wasActive) state.activeTabId = null;
+          await refreshAppInfo();
+          drawList();
+          resetForm();
+          if (wasActive) {
+            const local = (state.app.targets || []).find(
+              (item) => item.kind === 'local',
+            );
+            if (local) await activateTab(local.id);
           }
-        });
-        actions.append(edit, remove);
-        row.append(info, actions);
-        list.append(row);
-      }
-    };
-
-    const submit = async () => {
-      errorEl.textContent = '';
-      const name = nameField.input.value.trim();
-      const url = urlField.input.value.trim();
-      if (!name || !url) {
-        errorEl.textContent = '请填写名称和服务器地址';
-        return;
-      }
-      saveButton.disabled = true;
-      try {
-        const payload = {
-          name,
-          url,
-          allow_invalid_certs: checkBox.checked,
-        };
-        if (editingId) {
-          payload.action = 'update';
-          payload.id = editingId;
-        } else {
-          payload.action = 'add';
-        }
-        await serversAction(payload);
-        await refreshAppInfo();
-        drawList();
-        resetForm();
-        toast(editingId ? '服务器已更新' : '服务器已添加', 'success');
-      } catch (error) {
-        errorEl.textContent = error.message || '保存失败';
-      } finally {
-        saveButton.disabled = false;
-      }
-    };
-
-    saveButton.addEventListener('click', () => void submit());
-    cancelEdit.addEventListener('click', resetForm);
-    for (const field of [nameField, urlField]) {
-      field.input.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          void submit();
+        } catch (error) {
+          errorEl.textContent = error.message || '删除失败';
         }
       });
+      actions.append(edit, remove);
+      row.append(info, actions);
+      list.append(row);
     }
+  };
 
-    drawList();
-    setTimeout(() => nameField.input.focus(), 0);
-  });
+  const submit = async () => {
+    errorEl.textContent = '';
+    const name = nameField.input.value.trim();
+    let url = urlField.input.value.trim();
+    if (!name || !url) {
+      errorEl.textContent = '请填写名称和服务器地址';
+      return;
+    }
+    if (!url.includes('://')) url = `${protocolSelect.value}://${url}`;
+    saveButton.disabled = true;
+    try {
+      const payload = {
+        name,
+        url,
+        allow_invalid_certs: checkBox.checked,
+      };
+      let id = serverPanelEditing;
+      if (id) {
+        payload.action = 'update';
+        payload.id = id;
+      } else {
+        payload.action = 'add';
+      }
+      const result = await serversAction(payload);
+      if (!id) id = result.id;
+      await refreshAppInfo();
+      const tab = getTab(id);
+      if (tab) {
+        tab.session = null;
+        tab.loaded = false;
+        tab.needsRefresh = false;
+      }
+      resetForm();
+      drawList();
+      closeServerPanel();
+      renderTabs();
+      if (id) await activateTab(id);
+    } catch (error) {
+      errorEl.textContent = error.message || '保存失败';
+    } finally {
+      saveButton.disabled = false;
+    }
+  };
+
+  saveButton.addEventListener('click', () => void submit());
+  cancelEdit.addEventListener('click', resetForm);
+  for (const field of [nameField, urlField]) {
+    field.input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        void submit();
+      }
+    });
+  }
+
+  drawList();
+  setTimeout(() => nameField.input.focus(), 30);
 }
 
 /* ---------- Wiring ---------- */
@@ -2917,27 +3781,22 @@ function bindEvents() {
   $('#btn-mkdir').addEventListener('click', createFolder);
   $('#btn-refresh').addEventListener('click', () => loadDir(state.cwd));
   $('#btn-history').addEventListener('click', openHistoryDialog);
+  $('#btn-add-server').addEventListener('click', openServersDialog);
   $('#btn-servers').addEventListener('click', openServersDialog);
   $('#setup-add').addEventListener('click', openServersDialog);
   $('#login-servers').addEventListener('click', openServersDialog);
-  $('#target-select').addEventListener('change', async (event) => {
-    const id = event.target.value;
-    if (!id) return;
-    try {
-      const response = await fetch('/app/active', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-      });
-      if (!response.ok) throw new Error('切换连接失败');
-      location.reload();
-    } catch (error) {
-      toast(error.message || '切换连接失败', 'error');
-      renderAppBar();
-    }
+  $('#btn-paste').addEventListener('click', () => void pasteClipboard());
+  $('#server-overlay').addEventListener('click', (event) => {
+    if (event.target.closest('[data-server-close]')) closeServerPanel();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    const overlay = $('#server-overlay');
+    if (overlay && !overlay.hidden) closeServerPanel();
   });
   $('#root-select').addEventListener('change', async (event) => {
     const path = event.target.value;
+    const tab = activeTab();
     try {
       const response = await fetch('/app/local/root', {
         method: 'POST',
@@ -2954,10 +3813,17 @@ function bindEvents() {
         throw new Error(data && data.error ? data.error : '切换目录失败');
       }
       await refreshAppInfo();
-      await loadDir('/');
+      if (tab.target.kind === 'local') {
+        tab.cwd = '/';
+        tab.entries = [];
+        tab.list = emptyList();
+        tab.loaded = false;
+        tab.needsRefresh = true;
+        await loadDir('/', { tab, skipHistory: true });
+      }
     } catch (error) {
       toast(error.message || '切换目录失败', 'error');
-      renderAppBar();
+      renderRootSelect();
     }
   });
   if ('IntersectionObserver' in window) {
@@ -3027,5 +3893,6 @@ function hasFileDrag(event) {
 document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   document.addEventListener('keydown', handlePreviewKeys);
+  document.addEventListener('keydown', handleFileShortcuts);
   void boot();
 });

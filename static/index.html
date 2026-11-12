@@ -10,6 +10,20 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
+  <div id="workspace-bar" class="workspace-bar" hidden>
+    <div id="tabs" class="workspace-tabs" role="tablist" aria-label="连接目标"></div>
+    <div class="workspace-actions">
+      <button id="btn-add-server" class="btn primary small" type="button">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14"/><path d="M5 12h14"/>
+          </svg>
+        </span>
+        添加服务器
+      </button>
+    </div>
+  </div>
+
   <section id="login-view" class="login-view">
     <div class="login-bg" aria-hidden="true"></div>
     <form id="login-form" class="login-card" autocomplete="on" novalidate>
@@ -26,7 +40,7 @@
         </div>
       </div>
 
-      <p class="login-desc">登录后即可安全地浏览、上传与下载文件。</p>
+      <p class="login-desc" id="login-desc">登录后即可安全地浏览、上传与下载文件。</p>
 
       <label class="field">
         <span>用户名</span>
@@ -114,6 +128,14 @@
           </span>
           <span class="btn-label">新建文件夹</span>
         </button>
+        <button id="btn-paste" class="btn" type="button" title="粘贴到当前目录" disabled>
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="7" y="5" width="10" height="4" rx="1.5"/><path d="M8 7H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/>
+            </svg>
+          </span>
+          <span class="btn-label">粘贴</span>
+        </button>
         <button id="btn-history" class="btn icon-only" type="button" title="浏览历史" aria-label="浏览历史">
           <span class="icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -142,15 +164,15 @@
 
     <div id="app-bar" class="app-bar" hidden>
       <div class="app-connection">
-        <span class="app-label">连接</span>
-        <select id="target-select" class="app-select" aria-label="选择连接目标"></select>
-        <button id="btn-servers" class="btn ghost small" type="button">管理服务器</button>
         <span id="local-root-wrap" class="app-root" hidden>
-          <span class="app-label">位置</span>
+          <span class="app-label">本机位置</span>
           <select id="root-select" class="app-select" aria-label="选择本机目录"></select>
         </span>
       </div>
-      <span id="app-version" class="app-version"></span>
+      <div class="app-bar-right">
+        <button id="btn-servers" class="btn ghost small" type="button">管理服务器</button>
+        <span id="app-version" class="app-version"></span>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -228,5 +250,10 @@
     <input id="dir-input" type="file" webkitdirectory multiple hidden>
     <dialog id="modal" class="modal"></dialog>
   </section>
+
+  <div id="server-overlay" class="server-overlay" hidden>
+    <div class="server-overlay-backdrop" data-server-close></div>
+    <div id="server-panel" class="server-panel" role="dialog" aria-modal="true" aria-label="服务器连接"></div>
+  </div>
 </body>
 </html>

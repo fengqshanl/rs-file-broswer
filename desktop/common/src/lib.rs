@@ -141,13 +141,10 @@ pub async fn start(mode: AppMode) -> anyhow::Result<Runtime> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("无法创建数据目录: {}", data_dir.display()))?;
 
-    let local = match mode {
-        AppMode::Local => {
-            let cfg = local_config(&data_dir)?;
-            Some(start_http(Arc::new(cfg)).await?)
-        }
-        AppMode::Client => None,
-    };
+    // Both desktop shells are local-first: the machine's filesystem is always
+    // available, and remote servers are additional workspace tabs.
+    let cfg = local_config(&data_dir)?;
+    let local = Some(start_http(Arc::new(cfg)).await?);
     let local_url = local
         .as_ref()
         .map(|server| format!("http://{}", server.addr));
@@ -296,6 +293,27 @@ fn pick_active(config: &ServersConfig, local_url: Option<&str>) -> Option<(Strin
 fn resolve_active(front: &FrontState) -> Option<(String, String, bool)> {
     let config = front.config.read().expect("config lock").clone();
     pick_active(&config, front.local_url.as_deref())
+}
+
+fn resolve_target(front: &FrontState, id: &str) -> Option<(String, String, bool)> {
+    if id == "local" {
+        return front
+            .local_url
+            .as_ref()
+            .map(|url| ("local".to_string(), url.clone(), false));
+    }
+    let config = front.config.read().expect("config lock");
+    config
+        .servers
+        .iter()
+        .find(|server| server.id == id)
+        .map(|server| {
+            (
+                server.id.clone(),
+                server.url.clone(),
+                server.allow_invalid_certs,
+            )
+        })
 }
 
 pub fn router(front: Arc<FrontState>) -> Router {
@@ -603,7 +621,25 @@ async fn local_set_root(State(front): State<Arc<FrontState>>, body: Bytes) -> Re
 }
 
 async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Response {
-    let Some((target_id, base_url, allow_invalid_certs)) = resolve_active(&front) else {
+    let requested = request
+        .headers()
+        .get("x-agentgod-target")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let target = match requested {
+        Some(id) => match resolve_target(&front, &id) {
+            Some(target) => Some(target),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "连接目标不存在，请刷新服务器列表" })),
+                )
+                    .into_response()
+            }
+        },
+        None => resolve_active(&front),
+    };
+    let Some((target_id, base_url, allow_invalid_certs)) = target else {
         return (
             StatusCode::CONFLICT,
             Json(json!({ "error": "尚未配置服务器，请先在连接设置中添加" })),
