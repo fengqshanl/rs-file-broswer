@@ -134,9 +134,7 @@ for (const field of [
 
 Object.defineProperties(state, {
   key: { get: () => activeTab().session?.key || null },
-  token: { get: () => activeTab().session?.token || null },
   user: { get: () => activeTab().session?.user || null },
-  activeTarget: { get: () => activeTab().target },
 });
 
 const uploadQueue = [];
@@ -339,21 +337,6 @@ async function decryptWithKey(key, aad, envelope) {
     base64ToBytes(envelope.ct),
   );
   return JSON.parse(decoder.decode(plaintext));
-}
-
-async function encryptPayload(aad, value, tab = activeTab()) {
-  const key = tab.session?.key;
-  if (!key) throw new Error('会话已失效，请重新登录');
-  return encryptWithKey(key, aad, value);
-}
-
-async function decryptPayload(aad, envelope, tab = activeTab()) {
-  const key = tab.session?.key;
-  if (!key) throw new Error('会话已失效，请重新登录');
-  if (!envelope || !envelope.iv || !envelope.ct) {
-    throw new Error('服务器响应格式异常');
-  }
-  return decryptWithKey(key, aad, envelope);
 }
 
 /* ---------- API ---------- */
@@ -3284,35 +3267,17 @@ async function jumpToHistory(item) {
 
 /* ---------- Desktop workspace: local + server tabs ---------- */
 
-function isLocalTarget() {
-  return activeTab().target.kind === 'local';
-}
-
 function showAppView() {
   $('#login-view').hidden = true;
-  $('#setup-view').hidden = true;
   $('#app-view').hidden = false;
   $('#app-bar').hidden = !state.app;
-}
-
-function showLoginView() {
-  $('#setup-view').hidden = true;
-  $('#app-view').hidden = true;
-  $('#login-view').hidden = false;
-  $('#login-servers').hidden = true;
-  $('#login-desc').textContent = '登录后即可安全地浏览、上传与下载文件。';
-  for (const field of document.querySelectorAll('#login-form .field')) field.hidden = false;
-  $('#login-btn').textContent = '加密登录';
-  loginTab = activeTab();
 }
 
 function showTabLogin(tab, message = '') {
   loginTab = tab;
   const local = tab.target.kind === 'local';
-  $('#setup-view').hidden = true;
   $('#app-view').hidden = true;
   $('#login-view').hidden = false;
-  $('#login-servers').hidden = true;
   $('#login-desc').textContent = local
     ? '本机文件服务未就绪。点击下方按钮重新连接本机。'
     : tab.target.kind === 'standalone'
@@ -3783,8 +3748,6 @@ function bindEvents() {
   $('#btn-history').addEventListener('click', openHistoryDialog);
   $('#btn-add-server').addEventListener('click', openServersDialog);
   $('#btn-servers').addEventListener('click', openServersDialog);
-  $('#setup-add').addEventListener('click', openServersDialog);
-  $('#login-servers').addEventListener('click', openServersDialog);
   $('#btn-paste').addEventListener('click', () => void pasteClipboard());
   $('#server-overlay').addEventListener('click', (event) => {
     if (event.target.closest('[data-server-close]')) closeServerPanel();

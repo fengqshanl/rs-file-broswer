@@ -325,7 +325,6 @@ pub fn router(front: Arc<FrontState>) -> Router {
         .route("/vendor/mammoth.js", get(agentgod_files::web::mammoth_js))
         .route("/vendor/xlsx.js", get(agentgod_files::web::xlsx_js))
         .route("/app/info", get(app_info))
-        .route("/app/active", post(set_active))
         .route("/app/servers", post(servers_action))
         .route("/app/local/root", post(local_set_root))
         .fallback(proxy)
@@ -444,31 +443,6 @@ async fn fetch_local_info(local_url: &str) -> Value {
         Ok(response) => response.json::<Value>().await.unwrap_or(Value::Null),
         Err(_) => Value::Null,
     }
-}
-
-#[derive(Deserialize)]
-struct ActiveBody {
-    id: String,
-}
-
-async fn set_active(
-    State(front): State<Arc<FrontState>>,
-    Json(body): Json<ActiveBody>,
-) -> Response {
-    let mut config = front.config.write().expect("config lock");
-    let valid = (front.local_url.is_some() && body.id == "local")
-        || config.servers.iter().any(|server| server.id == body.id);
-    if !valid {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "目标不存在" })),
-        )
-            .into_response();
-    }
-    config.active = Some(body.id.clone());
-    drop(config);
-    front.save();
-    Json(json!({ "ok": true, "active": body.id })).into_response()
 }
 
 #[derive(Deserialize)]

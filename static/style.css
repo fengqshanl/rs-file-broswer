@@ -1739,16 +1739,6 @@ progress::-moz-progress-bar {
   white-space: nowrap;
 }
 
-.login-servers {
-  display: inline-block;
-  margin-top: 12px;
-  font-size: 12px;
-}
-
-.modal.servers-dialog {
-  width: min(620px, calc(100vw - 32px));
-}
-
 .servers-list {
   display: flex;
   flex-direction: column;
