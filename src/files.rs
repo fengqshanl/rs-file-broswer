@@ -40,7 +40,9 @@ pub const DOWNLOAD_CHUNK: usize = 64 * 1024;
 pub const UPLOAD_CHUNK_MAX: usize = 4 * 1024 * 1024;
 const CHUNK_BODY_LIMIT: usize = 4 + 12 + UPLOAD_CHUNK_MAX + 16 + 64;
 const MAX_LIST_ENTRIES: usize = 50_000;
-const MAX_ENSURE_DIRS: usize = 20_000;
+// Must fit inside the 128 KiB encrypted request body; clients split larger
+// trees into ENSURE_DIRS_BATCH-sized requests.
+const MAX_ENSURE_DIRS: usize = 1_024;
 /// A scan stays valid for this long, so paging through a large folder costs
 /// one directory walk instead of one per page.
 const LISTING_TTL: Duration = Duration::from_secs(15);

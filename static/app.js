@@ -28,7 +28,8 @@ const ICONS = {
 };
 
 const ARCHIVE_END_MARKER = 'AGF_TAR_END_v1';
-const LIST_PAGE_SIZE = Math.max(1, Number(window.AGENTGOD_PAGE_SIZE) || 300);
+const LIST_PAGE_SIZE = 300;
+const ENSURE_DIRS_BATCH = 100;
 const TEXT_STREAM_BYTES = 32 * 1024 * 1024;
 const HISTORY_KEY = 'agentgod.history.v1';
 const HISTORY_LIMIT = 300;
@@ -370,6 +371,14 @@ async function api(path, payload = {}, method = 'POST', tab = activeTab()) {
 
 async function login(tab, username, password) {
   ensureCrypto();
+  const challengeResponse = await fetch('/api/challenge', {
+    cache: 'no-store',
+    headers: targetHeaders(tab),
+  });
+  if (!challengeResponse.ok) throw new Error('无法获取登录凭证，请确认服务端已升级');
+  const challengeInfo = await challengeResponse.json();
+  if (!challengeInfo || !challengeInfo.challenge) throw new Error('登录凭证无效');
+
   const keyResponse = await fetch('/api/pubkey', {
     cache: 'no-store',
     headers: targetHeaders(tab),
@@ -388,7 +397,12 @@ async function login(tab, username, password) {
   const sessionKey = await importAesKey(rawKey);
   const iv = randomBytes(12);
   const payload = encoder.encode(
-    JSON.stringify({ username, password, ts: Date.now() }),
+    JSON.stringify({
+      username,
+      password,
+      ts: Date.now(),
+      challenge: challengeInfo.challenge,
+    }),
   );
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv, additionalData: encoder.encode('login') },
@@ -1066,11 +1080,13 @@ function uniqueName(name, isDir, names) {
 }
 
 async function ensureDirsInTab(tab, paths) {
-  const batchSize = 500;
-  for (let index = 0; index < paths.length; index += batchSize) {
+  // Every request is an AES-GCM envelope capped at 128 KiB server-side.
+  // Small batches keep long nested paths below that limit instead of silently
+  // losing the whole directory tree on a 413.
+  for (let index = 0; index < paths.length; index += ENSURE_DIRS_BATCH) {
     await api(
       '/api/ensure_dirs',
-      { paths: paths.slice(index, index + batchSize) },
+      { paths: paths.slice(index, index + ENSURE_DIRS_BATCH) },
       'POST',
       tab,
     );
@@ -1709,17 +1725,15 @@ function enqueueUploads(input, dir, directories = [], tab = activeTab()) {
 
 async function ensureDirectories(base, relatives, tab = activeTab()) {
   try {
-    await api(
-      '/api/ensure_dirs',
-      {
-        paths: relatives.map((relative) => joinPath(base, relative)),
-      },
-      'POST',
+    await ensureDirsInTab(
       tab,
+      relatives.map((relative) => joinPath(base, relative)),
     );
-  } catch {
-    // Folder creation also happens lazily in upload_init; a batch failure here
-    // is not fatal, individual uploads will surface the real error.
+  } catch (error) {
+    // upload_init also creates parent folders lazily, so a failure here does
+    // not abort the queue. It is no longer swallowed: surface it so a missing
+    // empty directory is not mistaken for a successful upload.
+    toast(`创建目录失败：${error?.message || error}`, 'error');
   }
 }
 

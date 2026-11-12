@@ -29,6 +29,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/app/info", get(app::info))
         .route("/app/local/root", post(app::set_root))
         .route("/api/local-login", get(auth::local_login))
+        .route("/api/challenge", get(auth::challenge))
         .route("/api/pubkey", get(auth::pubkey))
         .route("/api/login", post(auth::login))
         .route("/api/logout", post(auth::logout))
@@ -91,7 +92,15 @@ pub fn spawn_cleanup(state: Arc<AppState>) {
             state
                 .sessions
                 .retain(|_, session| now < session.expires_at && now < session.hard_expires_at);
+            for session in state.sessions.iter() {
+                session
+                    .replay
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .prune();
+            }
             state.login_guard.cleanup();
+            state.login_challenges.cleanup();
             files::cleanup_stale_uploads(&state).await;
         }
     });

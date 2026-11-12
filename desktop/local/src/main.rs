@@ -1,16 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Arc;
+
 use agentgod_desktop_common::{start, AppMode};
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let runtime = tauri::async_runtime::block_on(start(AppMode::Local))?;
             let url: tauri::Url = runtime.url.parse()?;
-            // Both loopback services live as long as the process; keep the
-            // runtime alive even though nothing else references it.
-            Box::leak(Box::new(runtime));
+            // Keep both loopback services alive for the app lifetime. Tauri
+            // owns the state now instead of leaking a Box into the heap.
+            app.manage(Arc::new(runtime));
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("AgentGod Files · 本机")
                 .inner_size(1280.0, 820.0)

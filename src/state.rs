@@ -1,7 +1,8 @@
 use std::{
+    collections::{HashSet, VecDeque},
     net::IpAddr,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc, RwLock as StdRwLock},
+    sync::{atomic::AtomicU64, Arc, Mutex as StdMutex, RwLock as StdRwLock},
     time::{Duration, Instant},
 };
 
@@ -25,6 +26,7 @@ pub struct AppState {
     /// drives); fixed to `cfg.data_root` for the standalone server.
     current_root: StdRwLock<PathBuf>,
     pub login_guard: LoginGuard,
+    pub login_challenges: LoginChallenges,
     pub uploads: DashMap<String, Arc<UploadSession>>,
     pub upload_limiter: Arc<RateLimiter>,
     pub download_limiter: Arc<RateLimiter>,
@@ -39,6 +41,123 @@ pub struct Session {
     pub user: String,
     pub expires_at: Instant,
     pub hard_expires_at: Instant,
+    /// Nonces of already accepted API envelopes. Shared with `AuthSession`
+    /// clones so every handler sees the same replay window.
+    pub replay: Arc<StdMutex<ReplayWindow>>,
+}
+
+/// Bounded set of AES-GCM nonces already accepted for one session.
+///
+/// AAD binds a ciphertext to its endpoint, but not to a point in time: without
+/// this window an intercepted envelope could be POSTed again while the session
+/// is still alive. Every envelope already carries a fresh random 12-byte
+/// nonce, so rejecting a repeat needs no protocol change on the client side.
+pub struct ReplayWindow {
+    seen: HashSet<[u8; 12]>,
+    order: VecDeque<([u8; 12], Instant)>,
+    ttl: Duration,
+    capacity: usize,
+}
+
+impl ReplayWindow {
+    const CAPACITY: usize = 8_192;
+
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            seen: HashSet::new(),
+            order: VecDeque::new(),
+            ttl,
+            capacity: Self::CAPACITY,
+        }
+    }
+
+    /// Records `nonce` and returns false when it was already used.
+    pub fn accept(&mut self, nonce: [u8; 12]) -> bool {
+        self.prune_expired();
+        // Check before evicting: otherwise a repeat of the oldest nonce could
+        // be evicted first and then look fresh again.
+        if self.seen.contains(&nonce) {
+            return false;
+        }
+        while self.order.len() >= self.capacity {
+            let Some((old, _)) = self.order.pop_front() else {
+                break;
+            };
+            self.seen.remove(&old);
+        }
+        self.seen.insert(nonce);
+        self.order.push_back((nonce, Instant::now()));
+        true
+    }
+
+    pub fn prune(&mut self) {
+        self.prune_expired();
+    }
+
+    fn prune_expired(&mut self) {
+        let now = Instant::now();
+        while let Some((_, inserted)) = self.order.front() {
+            if now.duration_since(*inserted) <= self.ttl {
+                break;
+            }
+            let Some((old, _)) = self.order.pop_front() else {
+                break;
+            };
+            self.seen.remove(&old);
+        }
+    }
+}
+
+/// One-shot login challenges. A captured login envelope can only be replayed
+/// if its challenge is still unused, which makes the request single-use.
+pub struct LoginChallenges {
+    inner: DashMap<String, Instant>,
+    ttl: Duration,
+    capacity: usize,
+}
+
+impl LoginChallenges {
+    const CAPACITY: usize = 4_096;
+
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            inner: DashMap::new(),
+            ttl,
+            capacity: Self::CAPACITY,
+        }
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Returns None when too many challenges are outstanding (flood guard).
+    pub fn issue(&self) -> Option<String> {
+        self.prune();
+        if self.inner.len() >= self.capacity {
+            return None;
+        }
+        let value = crate::crypto::random_b64(32);
+        self.inner.insert(value.clone(), Instant::now());
+        Some(value)
+    }
+
+    pub fn consume(&self, value: &str) -> bool {
+        let Some((_, issued)) = self.inner.remove(value) else {
+            return false;
+        };
+        Instant::now().duration_since(issued) <= self.ttl
+    }
+
+    pub fn cleanup(&self) {
+        self.prune();
+    }
+
+    fn prune(&self) {
+        let now = Instant::now();
+        self.inner
+            .retain(|_, issued| now.duration_since(*issued) <= self.ttl);
+    }
 }
 
 pub struct UploadSession {
@@ -171,6 +290,7 @@ impl AppState {
             current_root: StdRwLock::new(cfg.data_root.clone()),
             uploads: DashMap::new(),
             login_guard: LoginGuard::new(cfg.login_max_failures, cfg.login_window),
+            login_challenges: LoginChallenges::new(Duration::from_secs(120)),
             cfg,
             crypto,
         };
@@ -183,9 +303,49 @@ impl AppState {
                     user: "local".to_string(),
                     expires_at: now + Duration::from_secs(365 * 24 * 3600),
                     hard_expires_at: now + Duration::from_secs(3650 * 24 * 3600),
+                    replay: Arc::new(StdMutex::new(ReplayWindow::new(state.cfg.session_max_ttl))),
                 },
             );
         }
         state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_window_rejects_a_reused_nonce() {
+        let mut window = ReplayWindow::new(Duration::from_secs(60));
+        assert!(window.accept([1u8; 12]));
+        assert!(!window.accept([1u8; 12]));
+        assert!(window.accept([2u8; 12]));
+        window.prune();
+        assert!(!window.accept([1u8; 12]));
+    }
+
+    #[test]
+    fn replay_window_evicts_the_oldest_nonce_when_full() {
+        let mut window = ReplayWindow::new(Duration::from_secs(60));
+        window.capacity = 2;
+        assert!(window.accept([1u8; 12]));
+        assert!(window.accept([2u8; 12]));
+        assert!(!window.accept([1u8; 12]));
+        assert!(!window.accept([2u8; 12]));
+        assert!(window.accept([3u8; 12]));
+        assert!(!window.accept([2u8; 12]));
+        // A bounded window can only remember the most recent nonces.
+        assert!(window.accept([1u8; 12]));
+    }
+
+    #[test]
+    fn login_challenges_are_single_use() {
+        let challenges = LoginChallenges::new(Duration::from_secs(120));
+        let value = challenges.issue().expect("challenge issued");
+        assert!(!challenges.consume("unknown"));
+        assert!(challenges.consume(&value));
+        assert!(!challenges.consume(&value));
+        challenges.cleanup();
     }
 }

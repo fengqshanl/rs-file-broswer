@@ -37,7 +37,7 @@
 - **浏览历史**：自动记录访问过的文件夹与打开的文件，点击记录可跳回对应目录并高亮目标文件
 - **大目录分页**：目录扫描一次并缓存，前端按页加载（滚动到底自动续载），加载期间显示骨架屏
 - **账户管理**：登录后可修改用户名和密码，其他会话立即失效
-- **加密登录**：RSA-OAEP 包装随机会话密钥，Argon2id 校验密码
+- **加密登录**：RSA-OAEP 包装随机会话密钥，一次性 challenge + 强制时间戳防重放，Argon2id 校验密码
 - **加密传输**：API、上传、下载与预览全程 AES-256-GCM，AEAD 附加数据绑定方法与 URI/流序号，防重放
 - **HTTPS-only**：内置自签名证书生成，可替换为受信证书
 - **资源保护**：全局令牌桶限速、传输/预览并发上限、磁盘安全余量、容器资源限制
@@ -124,9 +124,10 @@ docker compose logs -f
 | --- | --- |
 | `state/rsa_private.pem` | 登录用 RSA 私钥（0600） |
 | `state/tls/cert.pem` / `state/tls/key.pem` | 自签名 TLS 证书与私钥 |
+| `state/tls/self-signed.json` | 自签名证书到期时间（用于自动轮换，0600） |
 | `state/credentials.json` | 管理员凭据哈希（0600，首次登录前创建） |
 
-自签名证书首次访问会提示不安全，选择「高级 → 继续前往」即可。浏览器的 WebCrypto 要求安全上下文，因此服务只提供 HTTPS，不提供明文 HTTP。
+自签名证书首次访问会提示不安全，选择「高级 → 继续前往」即可。浏览器的 WebCrypto 要求安全上下文，因此独立服务端只提供 HTTPS。自签名证书有效期 365 天，到期前 30 天会在启动时自动重新签发（浏览器需重新信任一次）；运维自行放置的受信证书不会被覆盖。仅在回环代理或可信内网调试时可用 `TLS_DISABLED=1` 关闭 TLS，但此时浏览器 WebCrypto 不可用。
 
 ### Docker 单容器
 
@@ -166,7 +167,7 @@ cargo run --release
 
 ## 配置
 
-所有配置通过环境变量提供。Docker Compose 会从 `.env` 读取同名变量。
+所有配置通过环境变量提供。Docker Compose 会从 `.env` 读取同名变量；其中 `LISTEN_IP`、`HOST_PORT`、`FILES_DIR`、`TZ` 只由 Compose 使用（端口映射、目录挂载与容器时区），其余会原样传给容器内的服务进程。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -193,6 +194,21 @@ cargo run --release
 | `LOGIN_WINDOW_SECS` | `600` | 登录失败计数与封禁窗口（秒） |
 | `TZ` | `Asia/Shanghai` | 容器时区 |
 
+### 源码直跑 / 自建镜像的环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DATA_ROOT` | `/data/files` | 对外提供的数据目录；Compose 中由 `FILES_DIR` 挂载到该路径 |
+| `TMP_ROOT` | `DATA_ROOT/.agentgod-tmp` | 上传临时目录，**必须是 `DATA_ROOT` 内的独立子目录**，否则启动报错（保证上传完成后可原子重命名） |
+| `STATE_DIR` | `/data/state` | RSA 私钥、凭据哈希与 TLS 目录；Compose 中挂载 `./state` |
+| `TLS_DIR` | `STATE_DIR/tls` | 证书、私钥与自签名元数据目录 |
+| `BIND` | `0.0.0.0` | 容器内监听地址；宿主机绑定由 `LISTEN_IP` 控制 |
+| `PORT` | `8090` | 监听端口 |
+| `LOCAL_MODE` | `0` | 桌面本机模式：免登录、忽略 Bearer、仅接受回环 Host。由桌面伴生服务设置，**不要在独立服务端开启** |
+| `TLS_DISABLED` | `0` | 关闭 TLS 并改用明文 HTTP；仅限回环代理或可信内网调试，浏览器 WebCrypto 此时不可用 |
+| `ADMIN_USER` / `ADMIN_PASSWORD` / `ADMIN_PASSWORD_HASH` | 同上表 | 凭据初始化 |
+| 限速、并发、会话、登录防护等变量 | 同上表 | 同名直接传入容器 |
+
 构建参数（可选，用于选择基础镜像）：
 
 ```bash
@@ -206,7 +222,7 @@ docker build \
 
 ### 使用受信证书
 
-把证书与私钥放到 `state/tls/cert.pem` 和 `state/tls/key.pem`，然后重启容器。证书需覆盖你实际访问的域名或 IP，此后浏览器不再提示自签名警告。
+把证书与私钥放到 `state/tls/cert.pem` 和 `state/tls/key.pem`，然后重启容器。证书需覆盖你实际访问的域名或 IP，此后浏览器不再提示自签名警告。没有 `self-signed.json` 元数据且证书主题不是本项目生成的文件会被原样保留，自动轮换不会覆盖运维提供的证书。
 
 ### 重置管理员凭据
 
@@ -235,8 +251,8 @@ docker compose up -d --force-recreate
 ### 传输与登录
 
 1. **TLS 1.2 / 1.3**：服务只监听 HTTPS，浏览器必须处于安全上下文才能使用 WebCrypto。
-2. **登录（非对称）**：浏览器拉取 RSA 公钥，生成随机 AES-256 会话密钥并用 `RSA-OAEP-SHA256` 包装；用户名、密码、客户端时间戳以 AES-256-GCM 加密后发送；服务器解密后用 Argon2id 校验密码并签发随机会话令牌。
-3. **数据（对称）**：所有 API 请求/响应 JSON 使用 AES-256-GCM，AAD 绑定 `方法 + URI`，密文不能跨接口重放。
+2. **登录（非对称 + 一次性）**：浏览器先取 `GET /api/challenge` 拿到 120 秒有效的一次性随机值，再拉取 RSA 公钥、生成随机 AES-256 会话密钥并用 `RSA-OAEP-SHA256` 包装；用户名、密码、客户端时间戳与 challenge 以 AES-256-GCM 加密后发送。服务器强制校验时间戳（±10 分钟）、在密码校验前原子消费 challenge，然后用 Argon2id 校验密码并签发随机会话令牌；截获的登录密文第二次提交会被拒绝。
+3. **数据（对称 + 防重放）**：所有 API 请求/响应 JSON 使用 AES-256-GCM，AAD 绑定 `方法 + URI`，密文不能跨接口重放；服务端另外按会话记录最近 8,192 个请求 nonce（覆盖会话绝对有效期），同一密文第二次送达直接以 409 拒绝。客户端重试必须重新生成信封，不得重发原密文。
 4. **上传**：按 2 MiB 分块加密，服务器校验分块序号、声明大小与 GCM 标签，完成后在同一文件系统内原子重命名。
 5. **下载与预览**：64 KiB 流式加密帧 `[u32 长度][12B nonce][密文+tag]`；下载每帧 AAD 含序号，预览每帧 AAD 绑定随机流 ID 与序号；文件夹归档额外带结束标记，客户端校验完整性。
 6. **密码存储**：Argon2id（默认参数），也可直接提供 `ADMIN_PASSWORD_HASH`。
@@ -311,8 +327,9 @@ docker-compose.yml
 
 | 步骤 | 内容 |
 | --- | --- |
+| `GET /api/challenge` | 返回 120 秒有效的一次性登录 challenge 与 `expires_in`（`no-store`） |
 | `GET /api/pubkey` | 返回 RSA 公钥 PEM |
-| `POST /api/login` | `{ek, iv, ct}`：RSA-OAEP 包装的会话密钥 + AES-GCM 加密的 `{username,password,ts}` |
+| `POST /api/login` | `{ek, iv, ct}`：RSA-OAEP 包装的会话密钥 + AES-GCM 加密的 `{username,password,ts,challenge}`；`ts` 必填，challenge 在校验前被消费 |
 | 登录响应 | AES-GCM 加密的 `{token,expires_in,user}`，AAD = `login-resp` |
 | 其他 API | `Authorization: Bearer <token>` + `{iv,ct}`，AAD = `<METHOD> <URI>` |
 | `POST /api/list` | 加密 `{path, offset, limit}` → 当前页目录项、`total`、`has_more`、剩余空间（扫描结果服务端缓存 15 秒） |
@@ -361,7 +378,7 @@ UPLOAD_RATE_MBPS=0 DOWNLOAD_RATE_MBPS=0 \
 cargo run
 ```
 
-端到端协议测试（登录失败、加密 API、路径穿越、分块上传密文、嵌套目录、流式下载哈希、文件夹 tar、加密预览帧与明文泄漏检查、账户修改与他人会话吊销等）：
+端到端协议测试（登录失败、一次性 challenge 与时间戳校验、登录密文与 API 密文重放拒绝、加密 API、路径穿越、分块上传密文、嵌套目录、流式下载哈希、文件夹 tar、加密预览帧与明文泄漏检查、账户修改与他人会话吊销等）：
 
 ```bash
 BASE_URL=https://127.0.0.1:18443 \
@@ -417,7 +434,7 @@ node scripts/ui-tabs.mjs
 
 **用 `http://` 访问报 `curl: (1) Received HTTP/0.9` 或浏览器直接报错？**
 
-服务只提供 HTTPS。请使用 `https://`，自签名证书需要加 `-k`（curl）或手动信任（浏览器）。
+独立服务端默认只提供 HTTPS。请使用 `https://`，自签名证书需要加 `-k`（curl）或手动信任（浏览器）。仅在显式设置 `TLS_DISABLED=1` 时才会启用明文 HTTP，且此时浏览器 WebCrypto 不可用。
 
 **页面登录后刷新就需要重新登录？**
 
@@ -446,6 +463,10 @@ node scripts/ui-tabs.mjs
 **为什么视频/PDF 预览要等一会儿才能播放，且不能像以前一样边下边播？**
 
 因为预览内容也走 AES-256-GCM 应用层加密，浏览器原生媒体元素无法直接解密分块响应。文本仍支持边解密边查看；图片、PDF、Office 与音视频会显示接收进度，音视频完整解密后即可正常播放和拖动。超过预览大小上限的文件请下载后查看。
+
+**升级到 0.1.2 需要注意什么？**
+
+0.1.2 起登录必须先调用 `GET /api/challenge`，并把一次性 challenge 放进加密登录载荷；时间戳也变为必填。**这是一次不兼容的协议变更**：0.1.1 及更早的桌面客户端无法登录 0.1.2 服务端，0.1.2 桌面客户端也无法登录旧版服务端，请同步升级服务端与桌面端；浏览器端强制刷新页面即可（静态资源为 `no-cache`）。此外会话内重复的加密请求会被拒绝，自定义客户端重试时须重新生成信封。旧版本生成的自签名证书会在升级后首次启动时重新签发一次，浏览器需要重新信任。
 
 **升级到 0.1.1 需要注意什么？**
 
@@ -487,6 +508,8 @@ xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"
 - 单目录最多显示 50,000 项；筛选只作用于已加载的分页内容
 - 浏览历史保存在浏览器 `localStorage`（最多 300 条），不跨浏览器同步
 - 文件在宿主机磁盘上不额外加密存储，访问控制依赖容器与宿主机文件权限
+- 符号链接按保守策略处理：列表会解析指向并拒绝越出数据根目录的目标，删除只删除链接本身，文件夹打包跳过全部符号链接，避免把链接目标带出根目录
+- 自签名证书有效期 365 天、到期前 30 天自动轮换；运维自行放置的受信证书不会被覆盖
 - 桌面客户端目前只支持连接同版本 AgentGod Files 服务端（HTTPS / HTTP），不支持 SFTP、WebDAV、SMB、FTP
 - 桌面安装包未做商业代码签名，首次安装需要手动放行
 - 桌面本机标签按「同一台机器的本地访问即可信」设计，不设登录；多人共用电脑时请使用操作系统账户隔离

@@ -124,18 +124,26 @@ pub fn encrypt_envelope<T: Serialize>(
     }))
 }
 
+/// Extracts the 12-byte AES-GCM nonce from an envelope. Exposed so the API
+/// layer can register the nonce in the session replay window before decoding.
+pub fn envelope_nonce(envelope: &Envelope) -> Result<[u8; 12]> {
+    let iv = B64
+        .decode(envelope.iv.as_bytes())
+        .context("iv 不是合法 base64")?;
+    iv.try_into()
+        .map_err(|_| anyhow::anyhow!("加密负载格式错误"))
+}
+
 pub fn decrypt_envelope<T: DeserializeOwned>(
     key: &[u8; 32],
     aad: &str,
     envelope: &Envelope,
 ) -> Result<T> {
-    let iv = B64
-        .decode(envelope.iv.as_bytes())
-        .context("iv 不是合法 base64")?;
+    let iv = envelope_nonce(envelope)?;
     let ciphertext = B64
         .decode(envelope.ct.as_bytes())
         .context("ct 不是合法 base64")?;
-    if iv.len() != 12 || ciphertext.len() < 16 {
+    if ciphertext.len() < 16 {
         bail!("加密负载格式错误");
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("无效的会话密钥"))?;

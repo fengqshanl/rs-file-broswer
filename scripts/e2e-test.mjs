@@ -244,11 +244,29 @@ async function readPreviewStream(path) {
   };
 }
 
-async function fetchPublicKey() {  const response = await fetch(`${BASE_URL}/api/pubkey`, { cache: 'no-store' });
+async function fetchPublicKey() {
+  const response = await fetch(`${BASE_URL}/api/pubkey`, { cache: 'no-store' });
   if (!response.ok) throw new Error(`pubkey HTTP ${response.status}`);
   const data = await readJson(response);
   if (!data || !data.public_key) throw new Error('pubkey response missing key');
   return data.public_key;
+}
+
+async function fetchChallenge() {
+  const response = await fetch(`${BASE_URL}/api/challenge`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`challenge HTTP ${response.status}`);
+  const data = await readJson(response);
+  if (!data || !data.challenge) throw new Error('challenge response missing value');
+  return data.challenge;
+}
+
+async function postLogin(body) {
+  const response = await fetch(`${BASE_URL}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+  return { response, data: await readJson(response) };
 }
 
 function makeCipher(key) {
@@ -277,7 +295,7 @@ function makeCipher(key) {
   };
 }
 
-async function login(username, password, expectFailure = false) {
+async function login(username, password, expectFailure = false, options = {}) {
   const publicPem = await fetchPublicKey();
   const publicKey = await subtle.importKey(
     'spki',
@@ -292,30 +310,35 @@ async function login(username, password, expectFailure = false) {
     'decrypt',
   ]);
   const iv = randomBytes(12);
+  const challenge = options.skipChallenge
+    ? ''
+    : (options.challenge ?? await fetchChallenge());
+  const payload = {
+    username,
+    password,
+    ts: options.ts ?? Date.now(),
+  };
+  if (challenge) payload.challenge = challenge;
   const ciphertext = await subtle.encrypt(
     { name: 'AES-GCM', iv, additionalData: encoder.encode('login') },
     key,
-    encoder.encode(JSON.stringify({ username, password, ts: Date.now() })),
+    encoder.encode(JSON.stringify(payload)),
   );
   const wrapped = await subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawKey);
-  const response = await fetch(`${BASE_URL}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ek: b64(wrapped),
-      iv: b64(iv),
-      ct: b64(ciphertext),
-    }),
+  const body = JSON.stringify({
+    ek: b64(wrapped),
+    iv: b64(iv),
+    ct: b64(ciphertext),
   });
-  const data = await readJson(response);
+  const { response, data } = await postLogin(body);
   if (expectFailure) {
-    if (response.ok) throw new Error('wrong password was accepted');
-    return { rejected: true, error: data?.error };
+    if (response.ok) throw new Error('login request was unexpectedly accepted');
+    return { rejected: true, error: data?.error, body };
   }
   if (!response.ok) throw new Error(`login failed: ${data?.error || response.status}`);
   const result = await makeCipher(key).decrypt('login-resp', data);
   if (!result.token) throw new Error('login response missing token');
-  return { ...result, key };
+  return { ...result, key, body };
 }
 
 async function main() {
@@ -337,9 +360,7 @@ async function main() {
   const cipher = makeCipher(session.key);
   record('encrypted login', `user=${session.user}`);
 
-  async function api(path, payload = {}, method = 'POST') {
-    const aad = `${method} ${path}`;
-    const envelope = await cipher.encrypt(aad, payload);
+  async function postEncrypted(path, envelope, method = 'POST') {
     const response = await fetch(`${BASE_URL}${path}`, {
       method,
       headers: {
@@ -348,12 +369,46 @@ async function main() {
       },
       body: JSON.stringify(envelope),
     });
-    const data = await readJson(response);
+    return { response, data: await readJson(response) };
+  }
+
+  async function api(path, payload = {}, method = 'POST') {
+    const aad = `${method} ${path}`;
+    const envelope = await cipher.encrypt(aad, payload);
+    const { response, data } = await postEncrypted(path, envelope, method);
     if (!response.ok) {
       throw new Error(`${method} ${path} failed: ${data?.error || response.status}`);
     }
     return cipher.decrypt(aad, data);
   }
+
+  /* ---------- replay / freshness hardening ---------- */
+  const replayedLogin = await postLogin(session.body);
+  if (replayedLogin.response.ok) {
+    throw new Error('captured login envelope was accepted a second time');
+  }
+  record('login replay rejected', replayedLogin.data?.error || 'HTTP error');
+
+  const stale = await login(ADMIN_USER, ADMIN_PASSWORD, true, {
+    ts: Date.now() - 3_600_000,
+  });
+  record('stale login timestamp rejected', stale.error || 'HTTP error');
+
+  const noChallenge = await login(ADMIN_USER, ADMIN_PASSWORD, true, {
+    skipChallenge: true,
+  });
+  record('missing login challenge rejected', noChallenge.error || 'HTTP error');
+
+  const listAad = 'POST /api/list';
+  const listEnvelope = await cipher.encrypt(listAad, { path: '' });
+  const acceptedList = await postEncrypted('/api/list', listEnvelope);
+  if (!acceptedList.response.ok) throw new Error('initial list request failed');
+  await cipher.decrypt(listAad, acceptedList.data);
+  const duplicateList = await postEncrypted('/api/list', listEnvelope);
+  if (duplicateList.response.ok) {
+    throw new Error('API envelope replay was accepted');
+  }
+  record('api replay rejected', duplicateList.data?.error || 'HTTP error');
 
   let traversalRejected = false;
   try {

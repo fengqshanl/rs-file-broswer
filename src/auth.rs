@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,7 +22,7 @@ use crate::{
     credentials::{self, Credentials},
     crypto::{self, Envelope},
     error::{log, ApiError},
-    state::{AppState, Session},
+    state::{AppState, ReplayWindow, Session},
 };
 
 const LOGIN_BODY_LIMIT: usize = 32 * 1024;
@@ -34,6 +34,7 @@ pub struct AuthSession {
     pub token: String,
     pub key: [u8; 32],
     pub user: String,
+    pub replay: Arc<StdMutex<ReplayWindow>>,
 }
 
 pub struct ClientIp(pub Option<IpAddr>);
@@ -67,6 +68,7 @@ impl FromRequestParts<Arc<AppState>> for AuthSession {
                     token: LOCAL_SESSION_TOKEN.to_string(),
                     key: session.key,
                     user: session.user.clone(),
+                    replay: session.replay.clone(),
                 });
             }
             return Err(unauthorized_response());
@@ -86,7 +88,7 @@ impl FromRequestParts<Arc<AppState>> for AuthSession {
         };
 
         let now = Instant::now();
-        let (key, user) = {
+        let (key, user, replay) = {
             let Some(mut session) = state.sessions.get_mut(&token) else {
                 return Err(unauthorized_response());
             };
@@ -96,10 +98,20 @@ impl FromRequestParts<Arc<AppState>> for AuthSession {
                 return Err(unauthorized_response());
             }
             session.expires_at = (now + state.cfg.session_ttl).min(session.hard_expires_at);
-            (session.key, session.user.clone())
+            session
+                .replay
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .prune();
+            (session.key, session.user.clone(), session.replay.clone())
         };
 
-        Ok(AuthSession { token, key, user })
+        Ok(AuthSession {
+            token,
+            key,
+            user,
+            replay,
+        })
     }
 }
 
@@ -122,8 +134,11 @@ struct LoginBody {
 struct LoginPayload {
     username: String,
     password: String,
-    #[serde(default)]
+    /// Required. Without it a captured login envelope could be replayed for
+    /// the whole (10 minute) clock-skew window.
     ts: i64,
+    #[serde(default)]
+    challenge: String,
 }
 
 #[derive(Serialize)]
@@ -131,6 +146,30 @@ struct LoginResponse {
     token: String,
     expires_in: u64,
     user: String,
+}
+
+/// Hands out a short-lived, single-use value that must be inside the encrypted
+/// login payload. This makes a captured login envelope unusable after its
+/// first delivery, even if the attacker replays it within the clock window.
+pub async fn challenge(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+    if state.cfg.local_mode {
+        return Err(ApiError::not_found("接口不存在"));
+    }
+    let Some(value) = state.login_challenges.issue() else {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "登录请求过于频繁，请稍后重试",
+        ));
+    };
+    let mut response = Json(json!({
+        "challenge": value,
+        "expires_in": state.login_challenges.ttl().as_secs(),
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 pub async fn pubkey(State(state): State<Arc<AppState>>) -> Response {
@@ -192,14 +231,20 @@ pub async fn login(
     let payload: LoginPayload = crypto::decrypt_envelope(&session_key, "login", &envelope)
         .map_err(|_| ApiError::bad("登录请求无效"))?;
 
-    if payload.ts != 0 {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as i64)
-            .unwrap_or(0);
-        if (now_ms - payload.ts).abs() > LOGIN_TS_SKEW_MS {
-            return Err(ApiError::bad("客户端时间偏差过大，请校准设备时间后重试"));
-        }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    // saturating_sub keeps a hostile i64 timestamp from overflowing the skew.
+    let skew = now_ms.saturating_sub(payload.ts);
+    if !(-LOGIN_TS_SKEW_MS..=LOGIN_TS_SKEW_MS).contains(&skew) {
+        return Err(ApiError::bad("客户端时间偏差过大，请校准设备时间后重试"));
+    }
+
+    // Consume before password verification: every attempt, successful or not,
+    // burns its challenge so the same envelope can never be submitted twice.
+    if payload.challenge.is_empty() || !state.login_challenges.consume(&payload.challenge) {
+        return Err(ApiError::bad("登录凭证已失效，请重新登录"));
     }
 
     let LoginPayload {
@@ -247,6 +292,7 @@ pub async fn login(
             user: stored_username.clone(),
             expires_at,
             hard_expires_at: now + state.cfg.session_max_ttl,
+            replay: Arc::new(StdMutex::new(ReplayWindow::new(state.cfg.session_max_ttl))),
         },
     );
 
