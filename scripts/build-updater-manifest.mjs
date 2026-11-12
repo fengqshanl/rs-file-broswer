@@ -4,9 +4,10 @@
 // Both apps are published into ONE GitHub Release, so they cannot share a
 // single `latest.json`. This script reads the release assets, pairs each signed
 // updater bundle with its `.sig`, and writes `latest-local.json` and
-// `latest-client.json` into OUTPUT_DIR. When no signed artifacts are present
-// (e.g. the signing secret has not been configured yet) it writes nothing, and
-// the apps simply fall back to the "download matching installer" channel.
+// `latest-client.json` into OUTPUT_DIR. Only macOS updater bundles are
+// considered. When no signed macOS artifacts are present (e.g. the signing
+// secret has not been configured yet) it writes nothing, and the apps simply
+// fall back to the "download matching .dmg" channel.
 
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -16,14 +17,14 @@ import { pathToFileURL } from 'node:url';
 const REPO = 'fengqshanl/rs-file-broswer';
 const APPS = ['local', 'client'];
 
-// Order matters: the first matching bundle wins for a platform.
+// Only macOS installers are published for now. Add a rule here when another
+// platform is re-enabled in the release workflow. Order matters: the first
+// matching bundle wins for a platform.
 const PLATFORM_RULES = [
-  { keys: ['windows-x86_64'], patterns: [/-setup\.exe$/i, /\.msi$/i] },
   {
     keys: ['darwin-x86_64', 'darwin-aarch64'],
     patterns: [/\.app\.tar\.gz$/i],
   },
-  { keys: ['linux-x86_64'], patterns: [/\.AppImage$/i] },
 ];
 
 export function appSlug(name) {
@@ -110,8 +111,10 @@ async function readSignature(url) {
   throw new Error(`无法读取签名文件 ${url}: ${lastError?.message || lastError}`);
 }
 
+/** Only a signed bundle for a currently published platform counts. */
 export function hasSignedAssets(release) {
-  return (release.assets || []).some((asset) => asset.name.endsWith('.sig'));
+  const specs = buildManifestSpecs(release);
+  return Object.values(specs).some((targets) => Object.keys(targets).length > 0);
 }
 
 export async function buildManifests(release, tag, outputDir) {
@@ -159,37 +162,50 @@ async function selfTest() {
   const release = {
     published_at: '2026-11-12T06:00:00Z',
     assets: [
-      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe'),
-      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe.sig'),
       asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz'),
       asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz.sig'),
+      // Legacy Windows/Linux bundles are ignored even when they are signed.
+      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe'),
+      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe.sig'),
       asset('AgentGod.Files.Local_0.1.3_amd64.AppImage'),
       asset('AgentGod.Files.Local_0.1.3_amd64.AppImage.sig'),
-      asset('AgentGod.Files.Client_0.1.3_x64-setup.exe'),
-      asset('AgentGod.Files.Client_0.1.3_x64-setup.exe.sig'),
-      asset('AgentGod.Files.Client_0.1.3_amd64.AppImage'), // missing .sig
+      asset('AgentGod.Files.Client_0.1.3_universal.app.tar.gz'),
+      asset('AgentGod.Files.Client_0.1.3_universal.app.tar.gz.sig'),
       asset('latest-local.json'),
     ],
   };
+  const darwinKeys = ['darwin-aarch64', 'darwin-x86_64'];
   const specs = buildManifestSpecs(release);
-  assert.deepEqual(Object.keys(specs.local).sort(), [
-    'darwin-aarch64',
-    'darwin-x86_64',
-    'linux-x86_64',
-    'windows-x86_64',
-  ]);
-  // Client has a Windows bundle but its Linux AppImage has no signature.
-  assert.deepEqual(Object.keys(specs.client), ['windows-x86_64']);
-  assert.match(specs.local['windows-x86_64'].url, /Local_0\.1\.3_x64-setup\.exe$/);
+  assert.deepEqual(Object.keys(specs.local).sort(), darwinKeys);
+  assert.deepEqual(Object.keys(specs.client).sort(), darwinKeys);
   assert.match(specs.local['darwin-aarch64'].url, /universal\.app\.tar\.gz$/);
+  assert.equal(
+    specs.local['darwin-x86_64'].signature_url,
+    'https://example.com/AgentGod.Files.Local_0.1.3_universal.app.tar.gz.sig',
+  );
+  // A macOS bundle without its .sig must not produce a manifest entry.
+  assert.deepEqual(
+    buildManifestSpecs({
+      assets: [asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz')],
+    }),
+    { local: {}, client: {} },
+  );
   assert.equal(versionFromTag('desktop-v0.1.3'), '0.1.3');
   assert.equal(appSlug('latest-local.json'), null);
   assert.equal(appSlug('AgentGod.Files.Local_universal.app.tar.gz'), 'local');
   assert.equal(appSlug('AgentGod.Files.Client.app.tar.gz'), 'client');
   assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
   assert.equal(hasSignedAssets(release), true);
-  assert.equal(hasSignedAssets({ assets: [asset('AgentGod.Files.Local_0.1.3_amd64.AppImage')] }), false);
-  console.log('updater manifest self-test OK');
+  assert.equal(
+    hasSignedAssets({
+      assets: [
+        asset('AgentGod.Files.Local_0.1.3_x64-setup.exe'),
+        asset('AgentGod.Files.Local_0.1.3_x64-setup.exe.sig'),
+      ],
+    }),
+    false,
+  );
+  console.log('updater manifest self-test OK (macOS only)');
 }
 
 async function main() {
@@ -211,7 +227,7 @@ async function main() {
     }
     if (!hasSignedAssets(release)) {
       throw new Error(
-        '已配置 TAURI_SIGNING_PRIVATE_KEY，但 Release 中没有任何 .sig 更新包，' +
+        '已配置 TAURI_SIGNING_PRIVATE_KEY，但 Release 中没有 macOS 签名更新包，' +
           '请检查构建日志中的签名步骤',
       );
     }

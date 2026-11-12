@@ -7,14 +7,17 @@
 | **AgentGod Files Local** | 打开即可浏览本机文件；右上角「添加服务器」连接多台远程服务器 |
 | **AgentGod Files Client** | 同样默认显示本机文件，支持添加多台服务器并在同一窗口内用标签切换 |
 
+> **发布范围**：当前只提供 macOS 通用 `.dmg`（Intel / Apple Silicon）。Windows 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
+
 ## 0.1.4 更新
 
-- 正式启用带签名的应用内热更新：Release 附带 `latest-local.json` / `latest-client.json` 以及各平台的签名更新包与 `.sig`
-- 已安装 0.1.3 的用户打开应用会直接收到 0.1.4 提示，点击「应用内更新」即可自动下载、校验签名、安装，重启后生效，无需手动下载安装包
+- 发布范围收敛为 macOS：Release 只提供通用 `.dmg`，不再发布 Windows / Linux 安装包
+- 修正签名更新包生成方式：由 `bundle.createUpdaterArtifacts` + `TAURI_SIGNING_PRIVATE_KEY` 产出 `.app.tar.gz` / `.sig`，不再把 `updater` 传给 `--bundles`（那会让构建失败）
+- 更新清单 `latest-local.json` / `latest-client.json` 只包含 `darwin-x86_64` / `darwin-aarch64`；非 macOS 平台会明确提示暂无对应安装包
 - 发布流程新增签名私钥格式预检与签名资产可见性等待：配置了密钥却没有产出签名包时直接失败，不再静默降级
 - 功能与 0.1.3 一致，服务端无需同步升级
 
-> 0.1.2 及更早版本仍需手动下载一次安装包；0.1.3 及以后均可自动更新。
+> 0.1.2 及更早版本仍需手动下载一次 macOS 安装包；0.1.3 及以后的 macOS 版本可自动接收更新提示。
 
 ## 0.1.3 更新
 
@@ -41,15 +44,14 @@
 
 ## 安装包
 
-- **Windows**：下载 `*_x64-setup.exe`（推荐）或 `.msi`
-- **macOS（Intel / Apple Silicon 通用）**：下载 `.dmg`
-- **Linux**：下载 `.AppImage`（需 FUSE）或 `.deb`
+- **macOS（Intel / Apple Silicon 通用）**：下载 `*_universal.dmg`
+- **应用内更新**：配置签名密钥后，Release 还会附带 `*.app.tar.gz` / `.sig` 与 `latest-local.json` / `latest-client.json`
+- **Windows / Linux**：暂停发布，历史安装包已移除
 
 ## 说明
 
 - 安装包未做商业代码签名。macOS 首次打开如被拦截，请右键「打开」，或执行
-  `xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"`；
-  Windows SmartScreen 请选择「更多信息 → 仍要运行」。
+  `xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"`。
 - 客户端连接自签名证书服务器时，请在服务器设置中勾选「允许自签名证书」。
 - 服务器标签当前支持同版本 AgentGod Files 服务端的 HTTPS / HTTP；SFTP、WebDAV、SMB 等协议尚未内置。
 - 从 0.1.1 起，预览内容同样使用 AES-256-GCM 加密；请将服务端与桌面端升级到同一版本。

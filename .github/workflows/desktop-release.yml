@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+# Only macOS installers are published for now. Linux and Windows were dropped
+# from the matrix because their updater bundles kept breaking the release; the
+# code paths are kept so those platforms can be re-enabled later.
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -46,46 +49,20 @@ jobs:
       fail-fast: false
       matrix:
         app: [local, client]
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
-        include:
-          # `updater` must be listed explicitly: tauri-cli does not add it
-          # automatically, so without it no signed updater bundle is produced.
-          - platform: macos-latest
-            args: "--target universal-apple-darwin --bundles dmg,updater"
-            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-            updater_platform: macos
-          - platform: ubuntu-22.04
-            args: "--bundles deb,appimage,updater"
-            rust_targets: ""
-            updater_platform: linux
-          - platform: windows-latest
-            args: "--bundles nsis,msi,updater"
-            rust_targets: ""
-            updater_platform: windows
-    runs-on: ${{ matrix.platform }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux build dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_targets }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/${{ matrix.app }}
 
-      # A signing key is optional. Without it the release still contains all
-      # normal installers; only the silent in-app updater channel is disabled.
+      # A signing key is optional. Without it the release still contains the
+      # macOS .dmg; only the silent in-app updater channel is disabled.
       - name: Check updater signing key
         id: signing
         shell: bash
@@ -94,7 +71,7 @@ jobs:
         run: |
           if [ -n "$SIGNING_KEY" ]; then
             # A common mistake is pasting the public key or adding quotes.
-            # Validate the base64 payload before six platform builds start.
+            # Validate the base64 payload before the builds start.
             if ! node -e "
               const raw = (process.env.SIGNING_KEY || '').replace(/\s+/g, '');
               const decoded = Buffer.from(raw, 'base64').toString('utf8');
@@ -111,7 +88,7 @@ jobs:
 
       # tauri-cli reads the raw base64 payload from the environment. A secret
       # pasted with trailing newlines, or an empty password variable, can make
-      # the bundler fail on Windows/Linux. Normalize once for all later steps.
+      # the bundler fail. Normalize once for all later steps.
       - name: Normalize updater signing env
         if: steps.signing.outputs.enabled == 'true'
         shell: bash
@@ -126,12 +103,15 @@ jobs:
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_PASSWORD" >> "$GITHUB_ENV"
           fi
 
+      # Tauri 2 generates .app.tar.gz / .app.tar.gz.sig when this flag is set
+      # and TAURI_SIGNING_PRIVATE_KEY is present. Do NOT pass `--bundles
+      # updater`: updater is not a bundle target and makes the build fail.
       - name: Enable signed updater artifacts
         if: steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           node -e "const fs=require('fs');const p='desktop/${{ matrix.app }}/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
-          echo "updater artifacts enabled for ${{ matrix.app }} / ${{ matrix.updater_platform }}"
+          echo "updater artifacts enabled for ${{ matrix.app }} (macOS)"
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -144,7 +124,7 @@ jobs:
           # Both apps share one Release; a single latest.json would overwrite
           # itself. We generate latest-local.json / latest-client.json below.
           includeUpdaterJson: false
-          args: ${{ matrix.args }}
+          args: --target universal-apple-darwin
 
       # Make sure the signed updater bundle and its .sig reach the Release even
       # when the action itself does not publish those extra artifacts.
@@ -165,19 +145,15 @@ jobs:
           count=${#sigs[@]}
           echo "::notice::found $count signature file(s)"
           if [ "$count" -eq 0 ]; then
-            echo "::error::签名密钥已生效但没有产出任何 .sig 更新包；请确认 --bundles 包含 updater"
+            echo "::error::签名密钥已生效但没有产出任何 .sig 更新包；请检查 tauri build 日志与 createUpdaterArtifacts 配置"
             exit 1
           fi
           uploaded=0
-          shown=0
           for sig in "${sigs[@]}"; do
-            if [ "$shown" -lt 10 ]; then
-              echo "::notice::sig: ${sig#"$root"/}"
-              shown=$((shown + 1))
-            fi
+            echo "::notice::sig: ${sig#"$root"/}"
             bundle="${sig%.sig}"
             case "$bundle" in
-              *-setup.exe|*.app.tar.gz|*.AppImage|*.msi) ;;
+              *.app.tar.gz) ;;
               *) continue ;;
             esac
             gh release upload "$TAG" "$bundle" "$sig" --clobber
@@ -185,7 +161,7 @@ jobs:
             uploaded=$((uploaded + 1))
           done
           if [ "$uploaded" -eq 0 ]; then
-            echo "::error::找到了 .sig 但没有可安装的更新包（setup.exe / app.tar.gz / AppImage / msi）"
+            echo "::error::找到了 .sig 但没有 macOS 更新包（.app.tar.gz）"
             exit 1
           fi
 

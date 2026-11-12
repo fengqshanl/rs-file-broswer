@@ -1,0 +1,42 @@
+name: Prune legacy platform assets
+
+# One-shot maintenance: releases built before the macOS-only switch still
+# carry Windows/Linux installers. This removes those assets while keeping
+# .dmg, updater bundles, signatures and manifests. Safe to run repeatedly.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prune-legacy-assets.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete non-macOS installers from published releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for tag in desktop-v0.1.1 desktop-v0.1.2 desktop-v0.1.3 desktop-v0.1.4; do
+            echo "::group::$tag"
+            targets="$(gh api "repos/$REPO/releases/tags/$tag" \
+              --jq '.assets[] | select(.name | test("\\.(AppImage|deb|exe|msi)$"; "i")) | "\(.id)\t\(.name)"')"
+            if [ -z "$targets" ]; then
+              echo "nothing to prune"
+            else
+              while IFS=$'\t' read -r id name; do
+                [ -n "$id" ] || continue
+                echo "deleting $name (asset $id)"
+                gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null
+              done <<< "$targets"
+            fi
+            gh api "repos/$REPO/releases/tags/$tag" \
+              --jq '"remaining: " + ([.assets[].name] | sort | join(", "))'
+            echo "::endgroup::"
+          done

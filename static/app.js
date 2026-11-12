@@ -3968,9 +3968,12 @@ async function checkForAppUpdate(force = false) {
 function showUpdatePanel(info) {
   $('#update-title').textContent = `AgentGod Files v${info.latest_version} 已发布`;
   $('#update-summary').textContent = `当前 v${info.current_version} · ${updatePlatformLabel(info)}`;
+  const unsupportedPlatform = info.platform && info.platform !== 'macos';
   $('#update-asset').textContent = info.asset
     ? `已匹配本机安装包：${info.asset}`
-    : '未找到匹配当前系统的安装包，可在发布页手动选择';
+    : unsupportedPlatform
+      ? '当前仅发布 macOS 安装包，Windows / Linux 版本暂不提供'
+      : '未找到匹配当前系统的安装包，可在发布页手动选择';
   const notesWrap = $('#update-notes-wrap');
   notesWrap.hidden = !info.notes;
   $('#update-notes').textContent = info.notes || '';

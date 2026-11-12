@@ -34,6 +34,11 @@ const DOWNLOAD_PREFIX: &str =
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Platforms with published installers. Older Windows/Linux builds still work,
+/// but the update check must not offer a download that is no longer released.
+/// Add an entry here (plus a manifest rule) to re-enable a platform.
+pub const SUPPORTED_PLATFORMS: &[&str] = &["macos"];
+
 impl AppMode {
     /// Slug used for release asset prefixes and updater manifest filenames.
     pub fn package_slug(self) -> &'static str {
@@ -325,11 +330,11 @@ pub fn platform() -> (&'static str, &'static str) {
 /// Tauri updater uses `darwin-x86_64` style keys; a universal macOS package
 /// covers both Apple architectures.
 fn updater_targets(os: &str, arch: &str) -> Vec<String> {
+    if !SUPPORTED_PLATFORMS.contains(&os) {
+        return Vec::new();
+    }
     if os == "macos" {
         return vec![format!("darwin-{arch}"), "darwin-universal".to_string()];
-    }
-    if os == "unknown" {
-        return Vec::new();
     }
     vec![format!("{os}-{arch}")]
 }
@@ -372,6 +377,9 @@ fn version_parts(version: &str) -> Option<(u64, u64, u64)> {
 const IGNORED_SUFFIXES: &[&str] = &[".sig", ".json", ".tar.gz", ".zip", ".txt", ".yml"];
 
 fn pick_asset(assets: &[ReleaseAsset], app: AppMode, os: &str, arch: &str) -> Option<ReleaseAsset> {
+    if !SUPPORTED_PLATFORMS.contains(&os) {
+        return None;
+    }
     let candidates: Vec<&ReleaseAsset> = assets
         .iter()
         .filter(|asset| {
@@ -383,6 +391,8 @@ fn pick_asset(assets: &[ReleaseAsset], app: AppMode, os: &str, arch: &str) -> Op
         .collect();
 
     // Ordered by preference: an installer the OS can run directly first.
+    // Windows/Linux rules stay here for a quick re-enable; the guard above is
+    // the single switch that disables them today.
     let extensions: &[&str] = match os {
         "macos" => &[".dmg"],
         "windows" => &["-setup.exe", ".msi"],
@@ -478,36 +488,28 @@ mod tests {
     fn picks_the_installer_for_this_machine() {
         let assets = release_assets();
         assert_eq!(
-            pick_asset(&assets, AppMode::Local, "windows", "x86_64")
-                .unwrap()
-                .name,
-            "AgentGod.Files.Local_0.1.2_x64-setup.exe"
-        );
-        assert_eq!(
             pick_asset(&assets, AppMode::Local, "macos", "aarch64")
                 .unwrap()
                 .name,
             "AgentGod.Files.Local_0.1.2_universal.dmg"
         );
         assert_eq!(
-            pick_asset(&assets, AppMode::Local, "linux", "x86_64")
+            pick_asset(&assets, AppMode::Local, "macos", "x86_64")
                 .unwrap()
                 .name,
-            "AgentGod.Files.Local_0.1.2_amd64.AppImage"
-        );
-        assert_eq!(
-            pick_asset(&assets, AppMode::Client, "windows", "x86_64")
-                .unwrap()
-                .name,
-            "AgentGod.Files.Client_0.1.2_x64-setup.exe"
+            "AgentGod.Files.Local_0.1.2_universal.dmg"
         );
     }
 
     #[test]
-    fn never_suggests_a_signature_or_manifest() {
+    fn unsupported_platforms_never_get_an_installer() {
         let assets = release_assets();
-        assert!(pick_asset(&assets, AppMode::Local, "windows", "armv7").is_none());
+        assert!(pick_asset(&assets, AppMode::Local, "windows", "x86_64").is_none());
+        assert!(pick_asset(&assets, AppMode::Local, "linux", "x86_64").is_none());
+        assert!(pick_asset(&assets, AppMode::Client, "windows", "x86_64").is_none());
         assert!(pick_asset(&assets, AppMode::Client, "linux", "x86_64").is_none());
+        assert_eq!(updater_targets("windows", "x86_64"), Vec::<String>::new());
+        assert_eq!(updater_targets("linux", "x86_64"), Vec::<String>::new());
     }
 
     #[test]
@@ -516,6 +518,5 @@ mod tests {
             updater_targets("macos", "aarch64"),
             vec!["darwin-aarch64", "darwin-universal"]
         );
-        assert_eq!(updater_targets("linux", "x86_64"), vec!["linux-x86_64"]);
     }
 }
