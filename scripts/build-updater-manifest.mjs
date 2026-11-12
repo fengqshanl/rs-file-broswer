@@ -1,0 +1,193 @@
+#!/usr/bin/env node
+// Builds the static Tauri updater manifests for both desktop apps.
+//
+// Both apps are published into ONE GitHub Release, so they cannot share a
+// single `latest.json`. This script reads the release assets, pairs each signed
+// updater bundle with its `.sig`, and writes `latest-local.json` and
+// `latest-client.json` into OUTPUT_DIR. When no signed artifacts are present
+// (e.g. the signing secret has not been configured yet) it writes nothing, and
+// the apps simply fall back to the "download matching installer" channel.
+
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const REPO = 'fengqshanl/rs-file-broswer';
+const APPS = ['local', 'client'];
+
+// Order matters: the first matching bundle wins for a platform.
+const PLATFORM_RULES = [
+  { keys: ['windows-x86_64'], patterns: [/-setup\.exe$/i, /\.msi$/i] },
+  {
+    keys: ['darwin-x86_64', 'darwin-aarch64'],
+    patterns: [/\.app\.tar\.gz$/i],
+  },
+  { keys: ['linux-x86_64'], patterns: [/\.AppImage$/i] },
+];
+
+export function appSlug(name) {
+  const lower = name.toLowerCase();
+  if (lower.startsWith('agentgod.files.local_')) return 'local';
+  if (lower.startsWith('agentgod.files.client_')) return 'client';
+  return null;
+}
+
+export function versionFromTag(tag) {
+  const match = String(tag).match(/(\d+\.\d+\.\d+)/);
+  return match ? match[1] : null;
+}
+
+/** Pure asset-pairing logic, exercised by `--self-test`. */
+export function buildManifestSpecs(release) {
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+  const byName = new Map(assets.map((asset) => [asset.name, asset]));
+  const specs = { local: {}, client: {} };
+  for (const app of APPS) {
+    for (const rule of PLATFORM_RULES) {
+      let bundle = null;
+      for (const pattern of rule.patterns) {
+        bundle =
+          assets.find(
+            (asset) =>
+              appSlug(asset.name) === app &&
+              pattern.test(asset.name) &&
+              byName.has(`${asset.name}.sig`),
+          ) || null;
+        if (bundle) break;
+      }
+      if (!bundle) continue;
+      const signature = byName.get(`${bundle.name}.sig`);
+      for (const key of rule.keys) {
+        specs[app][key] = {
+          url: bundle.browser_download_url,
+          signature_url: signature.browser_download_url,
+        };
+      }
+    }
+  }
+  return specs;
+}
+
+async function github(pathname) {
+  const headers = {
+    'User-Agent': 'agentgod-files-release',
+    Accept: 'application/vnd.github+json',
+  };
+  if (process.env.GH_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  }
+  const response = await fetch(`https://api.github.com${pathname}`, { headers });
+  if (!response.ok) {
+    throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
+  }
+  return response.json();
+}
+
+async function readSignature(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`无法读取签名文件 ${url}: HTTP ${response.status}`);
+  }
+  const signature = (await response.text()).trim();
+  if (!signature) throw new Error(`签名文件为空：${url}`);
+  return signature;
+}
+
+export async function buildManifests(release, tag, outputDir) {
+  const version = versionFromTag(tag);
+  if (!version) throw new Error(`无法从 tag 解析版本号：${tag}`);
+  const specs = buildManifestSpecs(release);
+  await mkdir(outputDir, { recursive: true });
+  const written = [];
+
+  for (const app of APPS) {
+    const entries = Object.entries(specs[app]);
+    if (entries.length === 0) {
+      console.log(`skip latest-${app}.json: 该应用没有已签名的更新包`);
+      continue;
+    }
+    const platforms = {};
+    for (const [target, spec] of entries) {
+      platforms[target] = {
+        signature: await readSignature(spec.signature_url),
+        url: spec.url,
+      };
+    }
+    const manifest = {
+      version,
+      notes: `AgentGod Files 桌面版 v${version}`,
+      pub_date: release.published_at || new Date().toISOString(),
+      platforms,
+    };
+    const file = path.join(outputDir, `latest-${app}.json`);
+    await writeFile(file, `${JSON.stringify(manifest, null, 2)}\n`);
+    console.log(`wrote ${file} (${entries.length} platforms)`);
+    written.push(file);
+  }
+  if (written.length === 0) {
+    console.log('未找到签名更新包，跳过静默更新清单；普通安装包仍可正常下载。');
+  }
+  return written;
+}
+
+async function selfTest() {
+  const asset = (name) => ({
+    name,
+    browser_download_url: `https://example.com/${name}`,
+  });
+  const release = {
+    published_at: '2026-11-12T06:00:00Z',
+    assets: [
+      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe'),
+      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe.sig'),
+      asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz'),
+      asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz.sig'),
+      asset('AgentGod.Files.Local_0.1.3_amd64.AppImage'),
+      asset('AgentGod.Files.Local_0.1.3_amd64.AppImage.sig'),
+      asset('AgentGod.Files.Client_0.1.3_x64-setup.exe'),
+      asset('AgentGod.Files.Client_0.1.3_x64-setup.exe.sig'),
+      asset('AgentGod.Files.Client_0.1.3_amd64.AppImage'), // missing .sig
+      asset('latest-local.json'),
+    ],
+  };
+  const specs = buildManifestSpecs(release);
+  assert.deepEqual(Object.keys(specs.local).sort(), [
+    'darwin-aarch64',
+    'darwin-x86_64',
+    'linux-x86_64',
+    'windows-x86_64',
+  ]);
+  // Client has a Windows bundle but its Linux AppImage has no signature.
+  assert.deepEqual(Object.keys(specs.client), ['windows-x86_64']);
+  assert.match(specs.local['windows-x86_64'].url, /Local_0\.1\.3_x64-setup\.exe$/);
+  assert.match(specs.local['darwin-aarch64'].url, /universal\.app\.tar\.gz$/);
+  assert.equal(versionFromTag('desktop-v0.1.3'), '0.1.3');
+  assert.equal(appSlug('latest-local.json'), null);
+  assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
+  console.log('updater manifest self-test OK');
+}
+
+async function main() {
+  const tag = process.env.RELEASE_TAG;
+  if (!tag) throw new Error('缺少 RELEASE_TAG 环境变量');
+  const outputDir = process.env.OUTPUT_DIR || process.cwd();
+  const release = await github(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`);
+  await buildManifests(release, tag, outputDir);
+}
+
+const invokedDirectly =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  if (process.argv.includes('--self-test')) {
+    selfTest().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  } else {
+    main().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  }
+}

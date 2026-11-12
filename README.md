@@ -80,6 +80,25 @@
 
 安装包未做商业代码签名：macOS 首次打开请右键「打开」（或执行 `xattr -dr com.apple.quarantine`），Windows SmartScreen 选择「更多信息 → 仍要运行」。
 
+### 应用内更新与热更新
+
+**0.1.3 起**，桌面应用启动后会在后台检查 GitHub Releases（不阻塞界面、离线时静默跳过，结果缓存 30 分钟）。发现新版本会弹出提示，并按当前**操作系统 + CPU 架构 + 应用类型**（Local / Client）自动匹配对应安装包：
+
+- **应用内更新**：Release 附带已签名更新包时，直接在应用内下载、校验签名、安装，完成后点「重启应用」生效；Windows 安装器会自动接管并重启
+- **下载安装包**：始终可用，由系统默认浏览器打开已匹配好的安装包；没有匹配包时打开发布页
+- **跳过此版本**：记录在 `localStorage`，下次启动不再提示同一版本；右上角「检查更新」可随时强制重查
+
+> **从 0.1.2 及更早版本升级**：旧版安装包没有更新检查逻辑，且界面内嵌在二进制里、无法远程注入。这些用户需要手动下载一次 0.1.3 安装包；此后每次发版都会自动提示并可应用内更新。
+
+**维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
+
+1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/agentgod-files.key`
+2. 公钥内容写入 `desktop/local/tauri.conf.json` 与 `desktop/client/tauri.conf.json` 的 `plugins.updater.pubkey`（仓库中已填好本次生成的公钥）
+3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容）；密钥带密码时再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+4. 推送 `desktop-v*` 标签：工作流会构建签名更新包与 `.sig`，生成 `latest-local.json` / `latest-client.json` 并挂到同一个 Release
+
+未配置该 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载适配本机的安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
+
 ### 从源码构建桌面端
 
 ```bash
@@ -280,6 +299,7 @@ docker compose up -d --force-recreate
 - 本机标签不做登录，因为访问者必须是同一台机器上的本地进程；切换根目录时会 canonicalize 并校验目录存在，文件操作仍限制在当前根目录内。远程标签沿用完整的 RSA-OAEP + AES-GCM 登录流程，每个标签独立保存内存会话。
 - 跨标签复制不会在磁盘上产生明文临时文件：源端加密帧在页面内存中解密后立即按目标端会话密钥重新分块加密，再写入目标端。
 - 伴生服务不监听局域网、不启用 CORS 通配，也不接入任何遥测或第三方服务。
+- 更新检查只读取公开的 GitHub Releases API，不上传机器标识、文件路径或凭据；请求 8 秒超时、失败静默，Webview 仍保持 `connect-src 'self'`。静默更新包安装前必须由 Tauri 用内置公钥校验签名，校验不通过不会安装；下载链接由伴生服务从已校验的 Release 资产里选取，前端无法传入任意 URL。
 
 ### 资源保护
 
@@ -314,10 +334,12 @@ src/
 static/          嵌入式 Web UI（原生 JS + WebCrypto，无外部依赖）
 static/vendor/   Word/Excel 本地解析库（仅预览时按需加载）
 desktop/common/  共享伴生运行时：回环前端、本机服务、远程反向代理
+  src/update.rs   版本检查、平台安装包匹配、静默更新状态桥接
 desktop/local/   本机版 Tauri 2 应用
 desktop/client/  远程客户端 Tauri 2 应用
 desktop/web/     打包用占位页面（真实界面由伴生服务提供）
 scripts/         Node E2E 协议测试、Chrome UI 冒烟测试、测试视频生成
+  build-updater-manifest.mjs  生成两个应用各自的签名更新清单
 .github/         GitHub Actions 桌面发布工作流与 Release 说明
 Dockerfile       Alpine + musl 构建
 docker-compose.yml
@@ -350,6 +372,10 @@ docker-compose.yml
 ```bash
 # Rust 单元测试
 cargo test
+cargo test --manifest-path desktop/common/Cargo.toml   # 版本比较与安装包平台匹配
+
+# 更新清单生成逻辑自测（无需联网）
+node scripts/build-updater-manifest.mjs --self-test
 
 # 桌面端共享运行层（本机 / 客户端两种模式）
 cargo run --manifest-path desktop/common/Cargo.toml --bin dev_local
@@ -512,6 +538,7 @@ xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"
 - 自签名证书有效期 365 天、到期前 30 天自动轮换；运维自行放置的受信证书不会被覆盖
 - 桌面客户端目前只支持连接同版本 AgentGod Files 服务端（HTTPS / HTTP），不支持 SFTP、WebDAV、SMB、FTP
 - 桌面安装包未做商业代码签名，首次安装需要手动放行
+- 0.1.2 及更早的桌面安装包没有内置更新检查，需要手动升级一次到 0.1.3；未配置 `TAURI_SIGNING_PRIVATE_KEY` 的发布不含静默更新包，只能下载安装包手动升级
 - 桌面本机标签按「同一台机器的本地访问即可信」设计，不设登录；多人共用电脑时请使用操作系统账户隔离
 
 ## 安全边界

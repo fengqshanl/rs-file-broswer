@@ -7,6 +7,10 @@
 //! the existing same-origin frontend works unchanged and streaming is preserved
 //! by proxying response bodies with backpressure.
 
+pub mod update;
+
+pub use update::{AutoInstaller, InstallStatus, NoopInstaller, UpdateHub};
+
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -101,6 +105,7 @@ pub struct FrontState {
     pub config_path: PathBuf,
     pub config: RwLock<ServersConfig>,
     pub local_url: Option<String>,
+    pub update: Arc<UpdateHub>,
     clients: Mutex<HashMap<String, reqwest::Client>>,
 }
 
@@ -136,7 +141,17 @@ pub fn data_dir() -> PathBuf {
         .join("AgentGodFiles")
 }
 
+/// Headless entry point (used by the `dev_local` / `dev_client` binaries).
 pub async fn start(mode: AppMode) -> anyhow::Result<Runtime> {
+    start_with_updater(mode, Arc::new(NoopInstaller)).await
+}
+
+/// Tauri shells pass an updater implementation; the companion exposes a small
+/// same-origin HTTP API so the webview never needs a JS plugin or capability.
+pub async fn start_with_updater(
+    mode: AppMode,
+    installer: Arc<dyn AutoInstaller>,
+) -> anyhow::Result<Runtime> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("无法创建数据目录: {}", data_dir.display()))?;
@@ -164,6 +179,7 @@ pub async fn start(mode: AppMode) -> anyhow::Result<Runtime> {
         config_path,
         config: RwLock::new(config),
         local_url,
+        update: UpdateHub::new(mode, installer),
         clients: Mutex::new(HashMap::new()),
     });
 
@@ -327,6 +343,11 @@ pub fn router(front: Arc<FrontState>) -> Router {
         .route("/app/info", get(app_info))
         .route("/app/servers", post(servers_action))
         .route("/app/local/root", post(local_set_root))
+        .route("/app/update/check", get(update_check))
+        .route("/app/update/status", get(update_status))
+        .route("/app/update/open", post(update_open))
+        .route("/app/update/install", post(update_install))
+        .route("/app/update/restart", post(update_restart))
         .fallback(proxy)
         .layer(middleware::from_fn(front_guard))
         .with_state(front)
@@ -442,6 +463,64 @@ async fn fetch_local_info(local_url: &str) -> Value {
     match client.get(format!("{local_url}/app/info")).send().await {
         Ok(response) => response.json::<Value>().await.unwrap_or(Value::Null),
         Err(_) => Value::Null,
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateQuery {
+    #[serde(default)]
+    force: Option<String>,
+}
+
+impl UpdateQuery {
+    fn forced(&self) -> bool {
+        matches!(
+            self.force.as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        )
+    }
+}
+
+fn update_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+async fn update_check(
+    State(front): State<Arc<FrontState>>,
+    axum::extract::Query(query): axum::extract::Query<UpdateQuery>,
+) -> Response {
+    Json(front.update.check(query.forced()).await).into_response()
+}
+
+async fn update_status(State(front): State<Arc<FrontState>>) -> Response {
+    Json(front.update.install_status()).into_response()
+}
+
+async fn update_open(State(front): State<Arc<FrontState>>) -> Response {
+    match front.update.open_download() {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(message) => update_error(StatusCode::BAD_GATEWAY, message),
+    }
+}
+
+async fn update_install(State(front): State<Arc<FrontState>>) -> Response {
+    let check = front.update.check(false).await;
+    if !check.has_update || !check.silent {
+        return update_error(
+            StatusCode::CONFLICT,
+            "当前没有可用的静默更新包，请下载适配本机的安装包升级",
+        );
+    }
+    match front.update.start_install() {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(message) => update_error(StatusCode::BAD_GATEWAY, message),
+    }
+}
+
+async fn update_restart(State(front): State<Arc<FrontState>>) -> Response {
+    match front.update.restart() {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(message) => update_error(StatusCode::BAD_GATEWAY, message),
     }
 }
 

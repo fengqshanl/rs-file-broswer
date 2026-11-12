@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,12 +51,15 @@ jobs:
           - platform: macos-latest
             args: "--target universal-apple-darwin --bundles dmg"
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            updater_platform: macos
           - platform: ubuntu-22.04
             args: "--bundles deb,appimage"
             rust_targets: ""
+            updater_platform: linux
           - platform: windows-latest
             args: "--bundles nsis,msi"
             rust_targets: ""
+            updater_platform: windows
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -78,11 +82,95 @@ jobs:
         with:
           workspaces: desktop/${{ matrix.app }}
 
+      # A signing key is optional. Without it the release still contains all
+      # normal installers; only the silent in-app updater channel is disabled.
+      - name: Check updater signing key
+        id: signing
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 TAURI_SIGNING_PRIVATE_KEY，本次发布不含应用内热更新包"
+          fi
+
+      - name: Enable signed updater artifacts
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          node -e "const fs=require('fs');const p='desktop/${{ matrix.app }}/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          echo "updater artifacts enabled for ${{ matrix.app }} / ${{ matrix.updater_platform }}"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop/${{ matrix.app }}
           releaseId: ${{ needs.prepare.outputs.release_id }}
           retryAttempts: 3
+          # Both apps share one Release; a single latest.json would overwrite
+          # itself. We generate latest-local.json / latest-client.json below.
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+
+      # Make sure the signed updater bundle and its .sig reach the Release even
+      # when the action itself does not publish those extra artifacts.
+      - name: Upload signed updater bundle
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: desktop-v${{ needs.prepare.outputs.version }}
+          APP: ${{ matrix.app }}
+        run: |
+          set -euo pipefail
+          root="desktop/$APP/target"
+          bundle=""
+          for preferred in "*-setup.exe" "*.app.tar.gz" "*.AppImage" "*.msi"; do
+            while IFS= read -r sig; do
+              candidate="${sig%.sig}"
+              if [[ "$candidate" == $preferred ]]; then
+                bundle="$candidate"
+                break 2
+              fi
+            done < <(find "$root" -type f -name '*.sig' 2>/dev/null | sort)
+          done
+          if [ -z "$bundle" ]; then
+            echo "::warning::未找到带签名的更新包，跳过上传"
+            exit 0
+          fi
+          gh release upload "$TAG" "$bundle" "$bundle.sig" --clobber
+          echo "uploaded $(basename "$bundle") and its signature"
+
+  manifest:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Test manifest builder
+        run: node scripts/build-updater-manifest.mjs --self-test
+
+      - name: Publish updater manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: desktop-v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUTPUT_DIR=.update-manifests \
+            node scripts/build-updater-manifest.mjs
+          for file in .update-manifests/latest-local.json .update-manifests/latest-client.json; do
+            if [ -f "$file" ]; then
+              gh release upload "$RELEASE_TAG" "$file" --clobber
+              echo "uploaded $(basename "$file")"
+            fi
+          done

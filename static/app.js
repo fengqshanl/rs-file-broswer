@@ -3450,6 +3450,8 @@ async function boot() {
   $('#app-version').textContent = `v${info.version || ''}`;
   syncTabs(info);
   renderTabs();
+  // Best effort and non-blocking: an offline desktop must stay fully usable.
+  void checkForAppUpdate(false);
   const localTarget = (info.targets || []).find((target) => target.kind === 'local');
   const initial = localTarget || (info.targets || [])[0];
   if (!initial) {
@@ -3826,6 +3828,25 @@ function bindEvents() {
   });
   $('#btn-logout').addEventListener('click', onLogout);
   $('#btn-clear-uploads').addEventListener('click', clearFinishedUploads);
+  $('#btn-check-update').addEventListener('click', () => {
+    void checkForAppUpdate(true);
+  });
+  $('#btn-update-close').addEventListener('click', hideUpdatePanel);
+  $('#btn-update-skip').addEventListener('click', () => {
+    if (updateInfo && updateInfo.latest_version) {
+      rememberSkippedUpdate(updateInfo.latest_version);
+    }
+    hideUpdatePanel();
+  });
+  $('#btn-update-download').addEventListener('click', () => {
+    void openUpdateDownload();
+  });
+  $('#btn-update-silent').addEventListener('click', () => {
+    void startSilentUpdate();
+  });
+  $('#btn-update-restart').addEventListener('click', () => {
+    void restartAfterUpdate();
+  });
   $('#filter').addEventListener('input', (event) => {
     state.filter = event.target.value;
     renderFiles();
@@ -3865,6 +3886,175 @@ function bindEvents() {
 
 function hasFileDrag(event) {
   return Array.from(event.dataTransfer ? event.dataTransfer.types : []).includes('Files');
+}
+
+/* ---------- Desktop app updates ---------- */
+
+const UPDATE_SKIP_KEY = 'agentgod.skipped-update';
+let updateCheckBusy = false;
+let updatePollTimer = null;
+let updateInfo = null;
+
+function skippedUpdateVersion() {
+  try {
+    return localStorage.getItem(UPDATE_SKIP_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function rememberSkippedUpdate(version) {
+  try {
+    localStorage.setItem(UPDATE_SKIP_KEY, version);
+  } catch {
+    /* storage can be unavailable in a hardened webview */
+  }
+}
+
+function updatePlatformLabel(info) {
+  const os =
+    { macos: 'macOS', windows: 'Windows', linux: 'Linux' }[info.platform] ||
+    info.platform ||
+    '当前系统';
+  const arch =
+    { x86_64: 'x64', aarch64: 'ARM64' }[info.arch] || info.arch || '';
+  return arch ? `${os} · ${arch}` : os;
+}
+
+async function updateRequest(path, options = {}) {
+  const response = await fetch(path, { cache: 'no-store', ...options });
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    throw new Error((data && data.error) || `请求失败 (${response.status})`);
+  }
+  return data || {};
+}
+
+async function checkForAppUpdate(force = false) {
+  if (!state.app || !state.app.mode || updateCheckBusy) return;
+  updateCheckBusy = true;
+  const button = $('#btn-check-update');
+  if (button) button.disabled = true;
+  try {
+    const info = await updateRequest(
+      `/app/update/check${force ? '?force=1' : ''}`,
+    );
+    updateInfo = info;
+    if (info.error) {
+      if (force) toast(info.error, 'error');
+      return;
+    }
+    if (!info.has_update || !info.latest_version) {
+      if (force) toast(`已是最新版本 v${info.current_version}`, 'success');
+      return;
+    }
+    if (!force && skippedUpdateVersion() === info.latest_version) return;
+    showUpdatePanel(info);
+  } catch (error) {
+    // Startup checks must never block the file browser. Only manual checks
+    // surface connectivity problems.
+    if (force) toast(error.message || '检查更新失败', 'error');
+  } finally {
+    updateCheckBusy = false;
+    if (button) button.disabled = false;
+  }
+}
+
+function showUpdatePanel(info) {
+  $('#update-title').textContent = `AgentGod Files v${info.latest_version} 已发布`;
+  $('#update-summary').textContent = `当前 v${info.current_version} · ${updatePlatformLabel(info)}`;
+  $('#update-asset').textContent = info.asset
+    ? `已匹配本机安装包：${info.asset}`
+    : '未找到匹配当前系统的安装包，可在发布页手动选择';
+  const notesWrap = $('#update-notes-wrap');
+  notesWrap.hidden = !info.notes;
+  $('#update-notes').textContent = info.notes || '';
+  $('#btn-update-download').textContent = info.download_url
+    ? '下载安装包'
+    : '打开发布页';
+  $('#btn-update-download').disabled = false;
+  $('#btn-update-silent').hidden = !info.silent;
+  $('#btn-update-silent').disabled = false;
+  $('#btn-update-restart').hidden = true;
+  $('#update-progress').hidden = true;
+  $('#update-panel').hidden = false;
+}
+
+function stopUpdatePolling() {
+  if (updatePollTimer) {
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+  }
+}
+
+function hideUpdatePanel() {
+  $('#update-panel').hidden = true;
+  stopUpdatePolling();
+}
+
+async function openUpdateDownload() {
+  try {
+    await updateRequest('/app/update/open', { method: 'POST' });
+  } catch (error) {
+    toast(error.message || '无法打开下载链接', 'error');
+  }
+}
+
+async function startSilentUpdate() {
+  try {
+    await updateRequest('/app/update/install', { method: 'POST' });
+  } catch (error) {
+    toast(error.message || '无法启动应用内更新', 'error');
+    return;
+  }
+  $('#btn-update-silent').disabled = true;
+  $('#btn-update-download').disabled = true;
+  $('#update-progress').hidden = false;
+  $('#update-progress-bar').value = 0;
+  $('#update-progress-text').textContent = '准备中…';
+  stopUpdatePolling();
+  updatePollTimer = setInterval(() => {
+    void pollUpdateStatus();
+  }, 800);
+  void pollUpdateStatus();
+}
+
+async function pollUpdateStatus() {
+  try {
+    renderUpdateStatus(await updateRequest('/app/update/status'));
+  } catch {
+    // Windows exits the process while the installer takes over.
+    stopUpdatePolling();
+  }
+}
+
+function renderUpdateStatus(status) {
+  $('#update-progress-bar').value = Number(status.percent) || 0;
+  $('#update-progress-text').textContent = status.message || '';
+  if (status.phase === 'done') {
+    stopUpdatePolling();
+    $('#btn-update-silent').hidden = true;
+    $('#btn-update-restart').hidden = false;
+    toast('更新已安装，重启应用后生效', 'success');
+  } else if (status.phase === 'error') {
+    stopUpdatePolling();
+    $('#btn-update-silent').disabled = false;
+    $('#btn-update-download').disabled = false;
+    toast(status.message || '更新失败', 'error');
+  }
+}
+
+async function restartAfterUpdate() {
+  try {
+    await updateRequest('/app/update/restart', { method: 'POST' });
+  } catch (error) {
+    toast(error.message || '重启失败，请手动重新打开应用', 'error');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

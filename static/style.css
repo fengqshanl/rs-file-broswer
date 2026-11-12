@@ -2045,3 +2045,150 @@ progress::-moz-progress-bar {
     flex-basis: auto;
   }
 }
+
+/* ---------- Desktop update panel ---------- */
+
+.update-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(390px, calc(100vw - 40px));
+  padding: 16px 18px;
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 14px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow);
+  animation: slide-in 0.24s ease both;
+}
+
+/* Authored display values override the UA [hidden] rule. */
+.update-panel[hidden],
+.update-panel [hidden] {
+  display: none !important;
+}
+
+.update-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-badge {
+  padding: 3px 9px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+
+.update-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.update-close:hover {
+  color: var(--text);
+  background: var(--line);
+}
+
+.update-close svg {
+  width: 16px;
+  height: 16px;
+}
+
+.update-title {
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.update-summary,
+.update-asset {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.update-summary {
+  color: var(--muted);
+}
+
+.update-asset {
+  color: var(--faint);
+}
+
+.update-notes {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.update-notes summary {
+  cursor: pointer;
+}
+
+.update-notes pre {
+  max-height: 150px;
+  margin: 8px 0 0;
+  padding: 10px;
+  overflow: auto;
+  font: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.update-progress progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--accent-strong);
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.update-skip {
+  margin-left: auto;
+  color: var(--muted) !important;
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .update-panel {
+    right: 10px;
+    bottom: 10px;
+    width: calc(100vw - 20px);
+  }
+}
