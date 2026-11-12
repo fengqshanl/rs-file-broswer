@@ -105,9 +105,11 @@
 
 发布流程在构建前会先用私钥签名一个测试文件，并用 `scripts/verify-updater-signature.mjs` 校验签名与仓库中的 `pubkey` 一致；构建后再对每个 `.app.tar.gz` 做同样校验。这样能避免“构建成功、用户下载后却因签名不匹配而安装失败”的情况。常见错误与处理：
 
-- **`failed to decode base64 secret key` / `Invalid symbol 10`**：密钥文件被写入了换行，或误把 `.pub` 公钥当成私钥。工作流已自动去除空白并统一为 `.key` 格式，无需手工处理
+- **`Invalid symbol 10 / 32 / 37`**：粘贴内容多了换行、粘贴成了解码后的两行文本，或末尾带了 `%` 等 URL 编码字符。`scripts/normalize-updater-key.mjs` 会自动识别并还原成标准 `.key` 内容，无需手工处理；完全无法识别时会在预检步骤直接说明拿到的是公钥、签名文件还是无效内容
 - **`Wrong password for that key`**：`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 与生成密钥时不一致，或密钥有密码但未配置该 secret
 - **签名 ID 与 pubkey 不匹配**：私钥不是生成当前 `pubkey` 的那一把。若旧私钥已丢失，只能更换 `pubkey` 并发布新版，同时让已安装用户手动下载一次
+
+预检失败时，Actions 的错误摘要会写明签名材料类型（私钥 / 公钥 / 签名文件）、是否配置了密码，以及签名器返回的错误行。
 
 未配置签名 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 macOS 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
 
