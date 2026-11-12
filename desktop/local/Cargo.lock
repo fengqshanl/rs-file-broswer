@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-desktop-common"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agentgod-files",
  "anyhow",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files-local"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agentgod-desktop-common",
  "serde_json",

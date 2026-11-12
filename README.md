@@ -96,12 +96,20 @@
 
 **维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
 
-1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/agentgod-files.key`
+1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/agentgod-files.key`（如设置了密码，请妥善保存）
 2. 公钥内容写入 `desktop/local/tauri.conf.json` 与 `desktop/client/tauri.conf.json` 的 `plugins.updater.pubkey`（仓库中已填好本次生成的公钥）
-3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容，原始文本或 base64 均可）；密钥带密码时再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
+   - `TAURI_SIGNING_PRIVATE_KEY`：`~/.tauri/agentgod-files.key` 的完整内容（base64 单行）。也接受解码后的两行文本，工作流会统一规范化
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：生成密钥时设置的密码；未设置密码则留空
 4. 推送 `desktop-v*` 标签：工作流在 macOS runner 上执行 `tauri build --target universal-apple-darwin`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.app.tar.gz` / `.sig`，再生成 `latest-local.json` / `latest-client.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
 
-当前仓库已配置该 secret。工作流会先校验私钥格式，把 base64 内容解码成临时密钥文件后以**文件路径**传给 tauri-cli（CLI 不接受 base64 字符串），再在生成清单前等待 `.sig` 资产可见；若已配置密钥却没产出签名包，发布会直接失败而不是静默降级。未配置该 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 macOS 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
+发布流程在构建前会先用私钥签名一个测试文件，并用 `scripts/verify-updater-signature.mjs` 校验签名与仓库中的 `pubkey` 一致；构建后再对每个 `.app.tar.gz` 做同样校验。这样能避免“构建成功、用户下载后却因签名不匹配而安装失败”的情况。常见错误与处理：
+
+- **`failed to decode base64 secret key` / `Invalid symbol 10`**：密钥文件被写入了换行，或误把 `.pub` 公钥当成私钥。工作流已自动去除空白并统一为 `.key` 格式，无需手工处理
+- **`Wrong password for that key`**：`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 与生成密钥时不一致，或密钥有密码但未配置该 secret
+- **签名 ID 与 pubkey 不匹配**：私钥不是生成当前 `pubkey` 的那一把。若旧私钥已丢失，只能更换 `pubkey` 并发布新版，同时让已安装用户手动下载一次
+
+未配置签名 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 macOS 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
 
 ### 从源码构建桌面端
 
@@ -344,6 +352,8 @@ desktop/client/  远程客户端 Tauri 2 应用
 desktop/web/     打包用占位页面（真实界面由伴生服务提供）
 scripts/         Node E2E 协议测试、Chrome UI 冒烟测试、测试视频生成
   build-updater-manifest.mjs  生成两个应用各自的签名更新清单
+  normalize-updater-key.mjs   把签名私钥规范化为 tauri-cli 要求的 .key 格式
+  verify-updater-signature.mjs 校验更新包签名与应用内嵌 pubkey 是否匹配
 .github/         GitHub Actions 桌面发布工作流与 Release 说明
 Dockerfile       Alpine + musl 构建
 docker-compose.yml

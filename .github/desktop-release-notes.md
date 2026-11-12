@@ -9,6 +9,14 @@
 
 > **发布范围**：当前只提供 macOS 通用 `.dmg`（Intel / Apple Silicon）。Windows 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
 
+## 0.1.5 更新
+
+- 修复应用内热更新的发布链路：签名私钥改为按 tauri-cli 要求的 `.key` base64 格式传入，不再把内容解码后写入（后者会报 `failed to decode base64 secret key`）
+- 发布前先用私钥签名测试文件，并校验签名与两个应用内嵌的 `pubkey` 一致；构建后再校验每个 `.app.tar.gz`，签名不匹配会立即失败
+- 兼容 tauri-action 带空格的更新包文件名，`latest-local.json` / `latest-client.json` 可正确生成
+- 已安装 0.1.3 / 0.1.4 的 macOS 用户会收到 0.1.5 更新提示，可直接应用内更新并重启
+- Release 资产继续保持 macOS-only，并自动清理历史 Windows / Linux 安装包
+
 ## 0.1.4 更新
 
 - 发布范围收敛为 macOS：Release 只提供通用 `.dmg`，不再发布 Windows / Linux 安装包

@@ -29,11 +29,14 @@ const PLATFORM_RULES = [
 
 export function appSlug(name) {
   const lower = name.toLowerCase();
-  // tauri-cli names updater bundles without a version suffix (e.g.
-  // `AgentGod.Files.Local.app.tar.gz`), while tauri-action renames the
-  // installers it uploads. Accept both shapes.
-  if (lower.startsWith('agentgod.files.local')) return 'local';
-  if (lower.startsWith('agentgod.files.client')) return 'client';
+  // tauri-cli names updater bundles without a version suffix and keeps the
+  // product name (`AgentGod Files Local.app.tar.gz`). tauri-action renames
+  // them to `AgentGod Files Local_universal.app.tar.gz`, while our release
+  // step uploads `AgentGod.Files.Local_0.1.5_universal.app.tar.gz`. Compare a
+  // compact form so spaces, dots, underscores and dashes are all equivalent.
+  const compact = lower.replace(/[\s._-]+/g, '');
+  if (compact.startsWith('agentgodfileslocal')) return 'local';
+  if (compact.startsWith('agentgodfilesclient')) return 'client';
   return null;
 }
 
@@ -51,14 +54,24 @@ export function buildManifestSpecs(release) {
     for (const rule of PLATFORM_RULES) {
       let bundle = null;
       for (const pattern of rule.patterns) {
-        bundle =
-          assets.find(
-            (asset) =>
-              appSlug(asset.name) === app &&
-              pattern.test(asset.name) &&
-              byName.has(`${asset.name}.sig`),
-          ) || null;
-        if (bundle) break;
+        const candidates = assets.filter(
+          (asset) =>
+            appSlug(asset.name) === app &&
+            pattern.test(asset.name) &&
+            byName.has(`${asset.name}.sig`),
+        );
+        if (!candidates.length) continue;
+        // Older releases may contain the same bundle twice: once with the
+        // product name (spaces) from tauri-action, once with our ASCII name.
+        // Prefer the ASCII asset so the manifest URL is stable and readable.
+        candidates.sort(
+          (a, b) =>
+            (a.name.match(/\s/g) || []).length -
+              (b.name.match(/\s/g) || []).length ||
+            a.name.localeCompare(b.name),
+        );
+        bundle = candidates[0];
+        break;
       }
       if (!bundle) continue;
       const signature = byName.get(`${bundle.name}.sig`);
@@ -193,8 +206,25 @@ async function selfTest() {
   assert.equal(versionFromTag('desktop-v0.1.3'), '0.1.3');
   assert.equal(appSlug('latest-local.json'), null);
   assert.equal(appSlug('AgentGod.Files.Local_universal.app.tar.gz'), 'local');
+  assert.equal(appSlug('AgentGod Files Local_universal.app.tar.gz'), 'local');
+  assert.equal(appSlug('AgentGod.Files.Local_0.1.5_universal.app.tar.gz'), 'local');
   assert.equal(appSlug('AgentGod.Files.Client.app.tar.gz'), 'client');
+  assert.equal(appSlug('AgentGod Files Client_universal.app.tar.gz.sig'), 'client');
   assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
+  // When the same bundle exists under a spaced and an ASCII name, the ASCII
+  // asset wins so the manifest URL stays stable.
+  const duplicated = buildManifestSpecs({
+    assets: [
+      asset('AgentGod Files Local_universal.app.tar.gz'),
+      asset('AgentGod Files Local_universal.app.tar.gz.sig'),
+      asset('AgentGod.Files.Local_0.1.5_universal.app.tar.gz'),
+      asset('AgentGod.Files.Local_0.1.5_universal.app.tar.gz.sig'),
+    ],
+  });
+  assert.match(
+    duplicated.local['darwin-aarch64'].url,
+    /AgentGod\.Files\.Local_0\.1\.5_universal\.app\.tar\.gz$/,
+  );
   assert.equal(hasSignedAssets(release), true);
   assert.equal(
     hasSignedAssets({

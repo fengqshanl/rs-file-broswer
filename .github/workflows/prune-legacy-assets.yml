@@ -1,0 +1,68 @@
+name: Prune legacy platform assets
+
+# Maintenance task: releases built before the macOS-only switch still carry
+# Windows/Linux installers that are no longer produced or tested. This removes
+# those assets while keeping .dmg, updater bundles, signatures and manifests.
+#
+# Safe to run repeatedly. It also runs automatically when this file changes,
+# which is how the existing releases were cleaned up.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prune-legacy-assets.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Delete non-macOS installers from every release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS=$'\t' read -r tag id name; do
+            [ -n "${id:-}" ] || continue
+            echo "::notice::deleting $tag/$name (asset $id)"
+            gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null
+            found=$((found + 1))
+          done < <(gh api "repos/$REPO/releases?per_page=100" --paginate \
+            --jq '.[] | .tag_name as $tag | .assets[] | select(.name | test("\\.(AppImage|deb|exe|msi)$"; "i")) | "\($tag)\t\(.id)\t\(.name)"')
+          echo "deleted ${found} legacy asset(s)"
+
+      # Keep the public description consistent with what is actually published.
+      - name: Refresh release notes to macOS-only wording
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          banner='> **发布范围**：当前只提供 macOS 通用 `.dmg`（Intel / Apple Silicon）。Windows 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。'
+          gh api "repos/$REPO/releases?per_page=100" --paginate --jq '.[].tag_name' |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            gh api "repos/$REPO/releases/tags/$tag" --jq .body > body.raw
+            if grep -qF "$banner" body.raw; then
+              echo "$tag: notes already up to date"
+              continue
+            fi
+            BANNER="$banner" node -e '
+              const fs = require("fs");
+              const banner = process.env.BANNER;
+              const body = fs.readFileSync("body.raw", "utf8");
+              const lines = body
+                .split("\n")
+                .filter((line) => !/^\s*-\s*\*\*(Windows|Linux)\*\*/.test(line));
+              fs.writeFileSync("notes.md", `${banner}\n\n${lines.join("\n").trim()}\n`);
+            '
+            gh release edit "$tag" --repo "$REPO" --notes-file notes.md
+            echo "$tag: release notes updated"
+          done

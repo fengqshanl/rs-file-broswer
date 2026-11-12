@@ -9,15 +9,15 @@ on:
 permissions:
   contents: write
 
-# Only macOS installers are published for now. Linux and Windows were dropped
-# from the matrix because their updater bundles kept breaking the release; the
-# code paths are kept so those platforms can be re-enabled later.
+# Publishing is macOS-only for now. The Windows/Linux matrix entries were
+# removed on purpose; re-add them here and a rule in
+# scripts/build-updater-manifest.mjs to publish those platforms again.
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      release_id: ${{ steps.release.outputs.release_id }}
       version: ${{ steps.version.outputs.version }}
+      signing: ${{ steps.signing.outputs.enabled }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +26,56 @@ jobs:
         run: |
           version="$(node -p "require('./desktop/local/tauri.conf.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # A signing key is optional. Without it the release still contains the
+      # macOS .dmg and users still see the "new version" prompt; only the
+      # one-click in-app update channel is unavailable.
+      - name: Check updater signing key
+        id: signing
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 TAURI_SIGNING_PRIVATE_KEY，本次发布不含应用内热更新包"
+          fi
+
+      # Validate the key once, up front, instead of discovering a problem after
+      # two 12-minute macOS builds. Two things are checked:
+      #   1. the key can actually sign (correct password, valid format)
+      #   2. its key ID matches the pubkey compiled into both apps
+      # Point 2 is what makes the difference between "update downloads" and
+      # "update installs": the updater rejects a signature from another key.
+      - name: Preflight updater signing key
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          key_path="${RUNNER_TEMP}/agentgod-updater.key"
+          node scripts/normalize-updater-key.mjs "$key_path"
+
+          npm install --global @tauri-apps/cli@2 >/dev/null
+
+          preflight="${RUNNER_TEMP}/preflight.bin"
+          printf 'agentgod updater signing preflight\n' > "$preflight"
+          if ! tauri signer sign \
+                --private-key-path "$key_path" \
+                --password "${SIGNING_PASSWORD:-}" \
+                "$preflight"; then
+            echo "::error::更新签名私钥无法使用。请确认 TAURI_SIGNING_PRIVATE_KEY 是 ~/.tauri/agentgod-files.key 的完整内容；若密钥设置了密码，TAURI_SIGNING_PRIVATE_KEY_PASSWORD 必须与生成时一致"
+            exit 1
+          fi
+
+          node scripts/verify-updater-signature.mjs \
+            "$preflight" "${preflight}.sig" desktop/local/tauri.conf.json
+          node scripts/verify-updater-signature.mjs \
+            "$preflight" "${preflight}.sig" desktop/client/tauri.conf.json
 
       - name: Create or reuse release
         id: release
@@ -40,8 +90,23 @@ jobs:
               --title "AgentGod Files 桌面版 v${VERSION}" \
               --notes-file .github/desktop-release-notes.md
           fi
-          release_id="$(gh release view "$tag" --json databaseId --jq .databaseId)"
-          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          gh release view "$tag" --json databaseId --jq .databaseId
+
+      # Releases built before the macOS-only switch still carry Windows/Linux
+      # installers. Users must never pick one of those, so clean every release
+      # on each publish (the operation is idempotent).
+      - name: Prune non-macOS installers from all releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r tag id name; do
+            [ -n "${id:-}" ] || continue
+            echo "::notice::deleting $tag/$name"
+            gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null
+          done < <(gh api "repos/$REPO/releases?per_page=100" --paginate \
+            --jq '.[] | .tag_name as $tag | .assets[] | select(.name | test("\\.(AppImage|deb|exe|msi)$"; "i")) | "\($tag)\t\(.id)\t\(.name)"')
 
   build:
     needs: prepare
@@ -61,38 +126,12 @@ jobs:
         with:
           workspaces: desktop/${{ matrix.app }}
 
-      # A signing key is optional. Without it the release still contains the
-      # macOS .dmg; only the silent in-app updater channel is disabled.
-      - name: Check updater signing key
-        id: signing
-        shell: bash
-        env:
-          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if [ -n "$SIGNING_KEY" ]; then
-            # A common mistake is pasting the public key or adding quotes.
-            # Validate the base64 payload before the builds start.
-            if ! node -e "
-              const raw = (process.env.SIGNING_KEY || '').trim();
-              const decoded = Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8');
-              const valid = raw.includes('encrypted secret key') || decoded.includes('encrypted secret key');
-              process.exit(valid ? 0 : 1);
-            "; then
-              echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是有效的 Tauri 更新签名私钥（应为 ~/.tauri/agentgod-files.key 的原始内容或 base64），请重新复制"
-              exit 1
-            fi
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::未配置 TAURI_SIGNING_PRIVATE_KEY，本次发布不含应用内热更新包"
-          fi
-
-      # tauri-cli accepts the raw key contents or a path to the key file, but
-      # NOT a base64 string. Secrets are often pasted base64-encoded, so decode
-      # when needed and always point the CLI at a real file. An empty password
-      # variable can also break the bundler, so only pass it when set.
+      # The bundler reads TAURI_SIGNING_PRIVATE_KEY as either key contents or a
+      # file path. A path keeps the secret out of the environment of every
+      # child process. The password variable is always exported (empty when no
+      # password is configured) so signing never waits for terminal input.
       - name: Normalize updater signing env
-        if: steps.signing.outputs.enabled == 'true'
+        if: needs.prepare.outputs.signing == 'true'
         shell: bash
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -100,80 +139,90 @@ jobs:
         run: |
           set -euo pipefail
           key_path="${RUNNER_TEMP}/agentgod-updater.key"
-          KEY_PATH="$key_path" node -e '
-            const fs = require("fs");
-            const raw = (process.env.SIGNING_KEY || "").trim();
-            const decoded = Buffer.from(raw.replace(/\s+/g, ""), "base64").toString("utf8");
-            const content = decoded.includes("encrypted secret key") ? decoded : raw;
-            fs.writeFileSync(process.env.KEY_PATH, `${content.trimEnd()}\n`, { mode: 0o600 });
-          '
+          node scripts/normalize-updater-key.mjs "$key_path"
           echo "TAURI_SIGNING_PRIVATE_KEY=$key_path" >> "$GITHUB_ENV"
-          if [ -n "${SIGNING_PASSWORD:-}" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_PASSWORD" >> "$GITHUB_ENV"
-          fi
-          echo "signing key written to $key_path"
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<AGENTGOD_EOF"
+            printf '%s\n' "${SIGNING_PASSWORD:-}"
+            echo "AGENTGOD_EOF"
+          } >> "$GITHUB_ENV"
 
-      # Tauri 2 generates .app.tar.gz / .app.tar.gz.sig when this flag is set
-      # and TAURI_SIGNING_PRIVATE_KEY is present. Do NOT pass `--bundles
-      # updater`: updater is not a bundle target and makes the build fail.
+      # Tauri 2 emits .app.tar.gz / .app.tar.gz.sig when this flag is on and a
+      # private key is present. Do NOT add `updater` to --bundles: it is not a
+      # bundle target and makes the build fail.
       - name: Enable signed updater artifacts
-        if: steps.signing.outputs.enabled == 'true'
+        if: needs.prepare.outputs.signing == 'true'
         shell: bash
         run: |
           node -e "const fs=require('fs');const p='desktop/${{ matrix.app }}/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
           echo "updater artifacts enabled for ${{ matrix.app }} (macOS)"
 
+      # No releaseId/tagName on purpose: the action only builds. Uploading is
+      # done below with deterministic ASCII asset names, which keeps one
+      # updater bundle per app and lets the manifest job match assets exactly.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signing variables come from $GITHUB_ENV (normalized above).
         with:
           projectPath: desktop/${{ matrix.app }}
-          releaseId: ${{ needs.prepare.outputs.release_id }}
           retryAttempts: 3
-          # Both apps share one Release; a single latest.json would overwrite
-          # itself. We generate latest-local.json / latest-client.json below.
           includeUpdaterJson: false
           args: --target universal-apple-darwin
 
-      # Make sure the signed updater bundle and its .sig reach the Release even
-      # when the action itself does not publish those extra artifacts.
-      - name: Upload signed updater bundle
-        if: steps.signing.outputs.enabled == 'true'
+      - name: Upload macOS installer
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: desktop-v${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           APP: ${{ matrix.app }}
         run: |
           set -euo pipefail
-          root="${GITHUB_WORKSPACE:-.}"
-          sigs=()
-          while IFS= read -r sig; do
-            [ -z "$sig" ] || sigs+=("$sig")
-          done < <(find "$root" -type f -name '*.sig' 2>/dev/null | sort)
-          count=${#sigs[@]}
-          echo "::notice::found $count signature file(s)"
-          if [ "$count" -eq 0 ]; then
-            echo "::error::签名密钥已生效但没有产出任何 .sig 更新包；请检查 tauri build 日志与 createUpdaterArtifacts 配置"
+          case "$APP" in
+            local) product="AgentGod.Files.Local" ;;
+            client) product="AgentGod.Files.Client" ;;
+            *) echo "::error::未知应用 ${APP}"; exit 1 ;;
+          esac
+          dmg_dir="desktop/${APP}/target/universal-apple-darwin/release/bundle/dmg"
+          dmg="$(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' | sort | head -n 1)"
+          if [ -z "$dmg" ]; then
+            echo "::error::没有找到 macOS 安装包（$dmg_dir）"
             exit 1
           fi
-          uploaded=0
-          for sig in "${sigs[@]}"; do
-            echo "::notice::sig: ${sig#"$root"/}"
-            bundle="${sig%.sig}"
-            case "$bundle" in
-              *.app.tar.gz) ;;
-              *) continue ;;
-            esac
-            gh release upload "$TAG" "$bundle" "$sig" --clobber
-            echo "uploaded $(basename "$bundle") and its signature"
-            uploaded=$((uploaded + 1))
-          done
-          if [ "$uploaded" -eq 0 ]; then
-            echo "::error::找到了 .sig 但没有 macOS 更新包（.app.tar.gz）"
+          upload="${RUNNER_TEMP}/${product}_${VERSION}_universal.dmg"
+          cp "$dmg" "$upload"
+          gh release upload "desktop-v${VERSION}" "$upload" --clobber
+          echo "::notice::uploaded $(basename "$upload")"
+
+      # Verify the exact bytes users will download against the pubkey compiled
+      # into the app before publishing them.
+      - name: Verify and upload updater bundle
+        if: needs.prepare.outputs.signing == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          APP: ${{ matrix.app }}
+        run: |
+          set -euo pipefail
+          case "$APP" in
+            local) product="AgentGod.Files.Local" ;;
+            client) product="AgentGod.Files.Client" ;;
+            *) echo "::error::未知应用 ${APP}"; exit 1 ;;
+          esac
+          app_dir="desktop/${APP}"
+          macos_dir="${app_dir}/target/universal-apple-darwin/release/bundle/macos"
+          bundle="$(find "$macos_dir" -maxdepth 1 -type f -name '*.app.tar.gz' | sort | head -n 1)"
+          if [ -z "$bundle" ] || [ ! -f "${bundle}.sig" ]; then
+            echo "::error::签名密钥已生效但没有产出 .app.tar.gz / .sig；请检查 createUpdaterArtifacts 与构建日志"
             exit 1
           fi
+          node scripts/verify-updater-signature.mjs "$bundle" "${bundle}.sig" "${app_dir}/tauri.conf.json"
+
+          upload="${RUNNER_TEMP}/${product}_${VERSION}_universal.app.tar.gz"
+          cp "$bundle" "$upload"
+          cp "${bundle}.sig" "${upload}.sig"
+          gh release upload "desktop-v${VERSION}" "$upload" "${upload}.sig" --clobber
+          echo "::notice::uploaded $(basename "$upload") and its signature"
 
   manifest:
     needs: [prepare, build]
@@ -192,7 +241,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: desktop-v${{ needs.prepare.outputs.version }}
-          EXPECT_SIGNED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '1' || '0' }}
+          EXPECT_SIGNED: ${{ needs.prepare.outputs.signing == 'true' && '1' || '0' }}
         run: |
           set -euo pipefail
           OUTPUT_DIR=.update-manifests \
