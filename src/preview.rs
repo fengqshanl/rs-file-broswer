@@ -1,9 +1,6 @@
 use std::{io, sync::Arc};
 
-use aes_gcm::{
-    aead::{Aead, AeadCore, Payload},
-    Aes256Gcm, KeyInit,
-};
+use aes_gcm::{Aes256Gcm, KeyInit};
 use axum::{
     body::{Body, Bytes},
     extract::{OriginalUri, State},
@@ -11,7 +8,6 @@ use axum::{
     response::Response,
 };
 use futures_util::stream::try_unfold;
-use rand::rngs::OsRng;
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 
@@ -19,12 +15,12 @@ use crate::{
     api::read_encrypted,
     auth::AuthSession,
     crypto,
-    error::{log, ApiError},
+    error::ApiError,
     files::{resolve_file, DOWNLOAD_CHUNK},
     state::AppState,
 };
 
-pub const PREVIEW_CHUNK: usize = DOWNLOAD_CHUNK;
+const PREVIEW_CHUNK: usize = DOWNLOAD_CHUNK;
 
 #[derive(Deserialize)]
 struct PreviewStreamRequest {
@@ -44,7 +40,7 @@ pub async fn stream(
 ) -> Result<Response, ApiError> {
     let aad = crypto::request_aad(&method, &uri);
     let request: PreviewStreamRequest = read_encrypted(&session, &aad, body).await?;
-    let (path, clean, name, resolved_size) = resolve_file(&state, &request.path).await?;
+    let (path, _clean, name, resolved_size) = resolve_file(&state, &request.path).await?;
 
     let file = tokio::fs::File::open(&path)
         .await
@@ -67,7 +63,6 @@ pub async fn stream(
     // 18 random bytes encode to 24 base64 characters without padding, safe in
     // an HTTP header. The id binds every frame to this response.
     let stream_id = crypto::random_b64(18);
-    log(&format!("加密预览 file={clean}"));
 
     let stream_state = PreviewStream {
         file,
@@ -86,23 +81,9 @@ pub async fn stream(
         buffer.truncate(read);
 
         stream.limiter.wait(4 + 12 + buffer.len() + 16).await;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let aad = format!("pv:{}:{}", stream.stream_id, stream.seq);
-        let ciphertext = stream
-            .cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: &buffer,
-                    aad: aad.as_bytes(),
-                },
-            )
+        let frame = crypto::seal_frame(&stream.cipher, &aad, &buffer)
             .map_err(|_| io::Error::other("预览分块加密失败"))?;
-
-        let mut frame = Vec::with_capacity(4 + 12 + ciphertext.len());
-        frame.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-        frame.extend_from_slice(nonce.as_slice());
-        frame.extend_from_slice(&ciphertext);
         stream.seq += 1;
         Ok(Some((Bytes::from(frame), stream)))
     });
@@ -160,7 +141,7 @@ struct PreviewStream {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-pub fn content_type_for(name: &str) -> &'static str {
+fn content_type_for(name: &str) -> &'static str {
     let extension = name
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase())

@@ -10,7 +10,7 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, Payload},
+    aead::{Aead, Payload},
     Aes256Gcm, KeyInit, Nonce,
 };
 use axum::{
@@ -20,7 +20,6 @@ use axum::{
     response::Response,
 };
 use futures_util::stream::try_unfold;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
@@ -640,23 +639,9 @@ pub async fn download(
         buffer.truncate(read);
 
         stream.limiter.wait(4 + 12 + buffer.len() + 16).await;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let aad = format!("dl:{}", stream.seq);
-        let ciphertext = stream
-            .cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: &buffer,
-                    aad: aad.as_bytes(),
-                },
-            )
+        let frame = crypto::seal_frame(&stream.cipher, &aad, &buffer)
             .map_err(|_| io::Error::other("下载分块加密失败"))?;
-
-        let mut frame = Vec::with_capacity(4 + 12 + ciphertext.len());
-        frame.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-        frame.extend_from_slice(nonce.as_slice());
-        frame.extend_from_slice(&ciphertext);
         stream.seq += 1;
         Ok(Some((Bytes::from(frame), stream)))
     });
@@ -731,22 +716,9 @@ pub async fn download_folder(
         match stream.rx.recv().await {
             Some(ArchiveMessage::Data(data)) => {
                 stream.limiter.wait(4 + 12 + data.len() + 16).await;
-                let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
                 let aad = format!("dl:{}", stream.seq);
-                let ciphertext = stream
-                    .cipher
-                    .encrypt(
-                        &nonce,
-                        Payload {
-                            msg: data.as_ref(),
-                            aad: aad.as_bytes(),
-                        },
-                    )
+                let frame = crypto::seal_frame(&stream.cipher, &aad, data.as_ref())
                     .map_err(|_| io::Error::other("归档分块加密失败"))?;
-                let mut frame = Vec::with_capacity(4 + 12 + ciphertext.len());
-                frame.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-                frame.extend_from_slice(nonce.as_slice());
-                frame.extend_from_slice(&ciphertext);
                 stream.seq += 1;
                 Ok(Some((Bytes::from(frame), stream)))
             }
@@ -755,22 +727,9 @@ pub async fn download_folder(
                     .limiter
                     .wait(4 + 12 + ARCHIVE_END_MARKER.len() + 16)
                     .await;
-                let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
                 let aad = format!("dl:{}", stream.seq);
-                let ciphertext = stream
-                    .cipher
-                    .encrypt(
-                        &nonce,
-                        Payload {
-                            msg: ARCHIVE_END_MARKER,
-                            aad: aad.as_bytes(),
-                        },
-                    )
+                let frame = crypto::seal_frame(&stream.cipher, &aad, ARCHIVE_END_MARKER)
                     .map_err(|_| io::Error::other("归档结束标记加密失败"))?;
-                let mut frame = Vec::with_capacity(4 + 12 + ciphertext.len());
-                frame.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-                frame.extend_from_slice(nonce.as_slice());
-                frame.extend_from_slice(&ciphertext);
                 stream.seq += 1;
                 stream.ended = true;
                 Ok(Some((Bytes::from(frame), stream)))

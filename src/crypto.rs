@@ -152,6 +152,26 @@ pub fn decrypt_envelope<T: DeserializeOwned>(
     Ok(serde_json::from_slice(&plaintext)?)
 }
 
+/// Encrypts one binary stream chunk into the wire frame shared by downloads
+/// and previews: `[u32 ciphertext length][12-byte nonce][ciphertext + tag]`.
+pub fn seal_frame(cipher: &Aes256Gcm, aad: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("流分块加密失败"))?;
+    let mut frame = Vec::with_capacity(4 + 12 + ciphertext.len());
+    frame.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    frame.extend_from_slice(nonce.as_slice());
+    frame.extend_from_slice(&ciphertext);
+    Ok(frame)
+}
+
 /// The AAD binds every encrypted API payload to the exact HTTP method and URI,
 /// so a ciphertext cannot be replayed against a different endpoint.
 pub fn request_aad(method: &axum::http::Method, uri: &axum::http::Uri) -> String {
@@ -177,5 +197,36 @@ mod tests {
         assert!(
             decrypt_envelope::<serde_json::Value>(&key, "POST /api/delete", &envelope).is_err()
         );
+    }
+
+    #[test]
+    fn stream_frame_roundtrip_is_bound_to_aad() {
+        let key = [9u8; 32];
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let frame = seal_frame(&cipher, "pv:stream:0", b"hello").unwrap();
+        assert_eq!(frame.len(), 4 + 12 + 5 + 16);
+        let length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+        assert_eq!(length, 5 + 16);
+        let nonce = Nonce::from_slice(&frame[4..16]);
+        let ciphertext = &frame[16..];
+        let plaintext = cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: b"pv:stream:0",
+                },
+            )
+            .unwrap();
+        assert_eq!(plaintext, b"hello");
+        assert!(cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: b"pv:stream:1",
+                },
+            )
+            .is_err());
     }
 }

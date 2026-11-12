@@ -4,7 +4,8 @@
  *
  * It speaks the exact same RSA-OAEP / AES-256-GCM protocol as the browser UI,
  * so a PASS means login, encrypted API calls, chunked upload, encrypted
- * streaming download, rename and delete all work against a live server.
+ * download/preview streams and the file operations all work against a live
+ * server. Transfer tests also assert that plaintext never appears on the wire.
  *
  * Usage:
  *   BASE_URL=https://127.0.0.1:18443 ADMIN_PASSWORD=... \
