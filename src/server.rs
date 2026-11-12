@@ -16,8 +16,8 @@ pub struct HttpServer {
     task: JoinHandle<()>,
 }
 
-impl HttpServer {
-    pub fn abort(&self) {
+impl Drop for HttpServer {
+    fn drop(&mut self) {
         self.task.abort();
     }
 }

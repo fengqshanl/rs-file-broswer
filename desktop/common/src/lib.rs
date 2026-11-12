@@ -34,8 +34,6 @@ use agentgod_files::{
     server::{start_http, HttpServer},
 };
 
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
-
 const FORWARD_REQUEST_HEADERS: &[&str] = &[
     "authorization",
     "content-type",
@@ -152,10 +150,7 @@ pub async fn start(mode: AppMode) -> anyhow::Result<Runtime> {
         .as_ref()
         .map(|server| format!("http://{}", server.addr));
 
-    let config_path = data_dir.join(match mode {
-        AppMode::Local => "servers-local.json",
-        AppMode::Client => "servers-client.json",
-    });
+    let config_path = data_dir.join(config_filename(mode));
     let mut config = load_config(&config_path);
     normalize_active(&mut config, local_url.is_some());
     // The local app always opens on this machine's files; saved remote
@@ -249,6 +244,13 @@ fn save_config(path: &Path, config: &ServersConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn config_filename(mode: AppMode) -> &'static str {
+    match mode {
+        AppMode::Local => "servers-local.json",
+        AppMode::Client => "servers-client.json",
+    }
+}
+
 fn normalize_active(config: &mut ServersConfig, has_local: bool) {
     let valid = config.active.as_deref().map(|active| {
         (has_local && active == "local") || config.servers.iter().any(|server| server.id == active)
@@ -263,12 +265,11 @@ fn normalize_active(config: &mut ServersConfig, has_local: bool) {
     }
 }
 
-fn resolve_active(front: &FrontState) -> Option<(String, String, bool)> {
-    let config = front.config.read().expect("config lock").clone();
+fn pick_active(config: &ServersConfig, local_url: Option<&str>) -> Option<(String, String, bool)> {
     if let Some(active) = config.active.as_deref() {
         if active == "local" {
-            if let Some(local_url) = front.local_url.as_ref() {
-                return Some(("local".to_string(), local_url.clone(), false));
+            if let Some(local_url) = local_url {
+                return Some(("local".to_string(), local_url.to_string(), false));
             }
         } else if let Some(server) = config.servers.iter().find(|server| server.id == active) {
             return Some((
@@ -278,8 +279,8 @@ fn resolve_active(front: &FrontState) -> Option<(String, String, bool)> {
             ));
         }
     }
-    if let Some(local_url) = front.local_url.as_ref() {
-        return Some(("local".to_string(), local_url.clone(), false));
+    if let Some(local_url) = local_url {
+        return Some(("local".to_string(), local_url.to_string(), false));
     }
     config.servers.first().map(|server| {
         (
@@ -288,6 +289,11 @@ fn resolve_active(front: &FrontState) -> Option<(String, String, bool)> {
             server.allow_invalid_certs,
         )
     })
+}
+
+fn resolve_active(front: &FrontState) -> Option<(String, String, bool)> {
+    let config = front.config.read().expect("config lock").clone();
+    pick_active(&config, front.local_url.as_deref())
 }
 
 pub fn router(front: Arc<FrontState>) -> Router {
@@ -360,7 +366,7 @@ async fn index() -> Response {
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
+        HeaderValue::from_static(agentgod_files::web::CONTENT_SECURITY_POLICY),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
@@ -659,4 +665,111 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
 
 fn to_reqwest_method(method: &Method) -> reqwest::Method {
     reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(id: &str, url: &str, allow_invalid_certs: bool) -> ServerEntry {
+        ServerEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            url: url.to_string(),
+            allow_invalid_certs,
+        }
+    }
+
+    #[test]
+    fn config_files_are_per_app() {
+        assert_eq!(config_filename(AppMode::Local), "servers-local.json");
+        assert_eq!(config_filename(AppMode::Client), "servers-client.json");
+    }
+
+    #[test]
+    fn server_urls_are_normalized() {
+        assert_eq!(
+            normalize_server("NAS", "192.168.1.10:8090").unwrap(),
+            "https://192.168.1.10:8090"
+        );
+        assert_eq!(
+            normalize_server("NAS", " http://127.0.0.1:8090/ ").unwrap(),
+            "http://127.0.0.1:8090"
+        );
+        assert!(normalize_server("  ", "https://example.com").is_err());
+        assert!(normalize_server("NAS", "ftp://example.com").is_err());
+        assert!(normalize_server("NAS", "https://").is_err());
+    }
+
+    #[test]
+    fn active_target_is_repaired_when_stale() {
+        let mut config = ServersConfig {
+            active: Some("missing".to_string()),
+            servers: vec![server("a", "https://a.example", false)],
+        };
+        normalize_active(&mut config, true);
+        assert_eq!(config.active.as_deref(), Some("local"));
+
+        normalize_active(&mut config, false);
+        assert_eq!(config.active.as_deref(), Some("a"));
+
+        let mut empty = ServersConfig::default();
+        normalize_active(&mut empty, false);
+        assert!(empty.active.is_none());
+    }
+
+    #[test]
+    fn explicit_active_server_wins_without_local_mode() {
+        let config = ServersConfig {
+            active: Some("b".to_string()),
+            servers: vec![
+                server("a", "https://a.example", false),
+                server("b", "https://b.example", true),
+            ],
+        };
+        assert_eq!(
+            pick_active(&config, None),
+            Some(("b".to_string(), "https://b.example".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn local_target_is_used_when_selected_or_when_no_remote_is_active() {
+        let config = ServersConfig {
+            active: Some("local".to_string()),
+            servers: vec![server("a", "https://a.example", false)],
+        };
+        assert_eq!(
+            pick_active(&config, Some("http://127.0.0.1:1234")),
+            Some((
+                "local".to_string(),
+                "http://127.0.0.1:1234".to_string(),
+                false
+            ))
+        );
+
+        let fallback = ServersConfig {
+            active: None,
+            servers: vec![server("a", "https://a.example", false)],
+        };
+        assert_eq!(
+            pick_active(&fallback, None),
+            Some(("a".to_string(), "https://a.example".to_string(), false))
+        );
+        assert_eq!(pick_active(&ServersConfig::default(), None), None);
+    }
+
+    #[test]
+    fn loopback_origins_are_accepted() {
+        for origin in [
+            "http://127.0.0.1:8090",
+            "http://localhost:8090",
+            "https://[::1]:8090",
+        ] {
+            assert!(is_loopback_origin(origin), "{origin}");
+        }
+        for origin in ["https://evil.example", "null", "file:///tmp/x"] {
+            assert!(!is_loopback_origin(origin), "{origin}");
+        }
+    }
 }

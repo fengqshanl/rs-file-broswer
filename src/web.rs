@@ -6,7 +6,7 @@ use std::{
 use axum::{
     body::Body,
     extract::Request,
-    http::{header, HeaderName, HeaderValue},
+    http::{header, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -16,7 +16,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::{app, auth, error::log, files, preview, state::AppState};
 
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
 
 pub fn router(state: Arc<AppState>) -> Router {
     let local_mode = state.cfg.local_mode;
@@ -77,7 +77,7 @@ async fn loopback_host_guard(request: Request, next: Next) -> Response {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if !is_loopback_host(host) {
-        return (axum::http::StatusCode::MISDIRECTED_REQUEST, "invalid host").into_response();
+        return (StatusCode::MISDIRECTED_REQUEST, "invalid host").into_response();
     }
     next.run(request).await
 }
@@ -151,7 +151,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(CSP),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
     if is_api {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -220,4 +220,37 @@ pub async fn xlsx_js() -> Response {
 
 async fn health() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "ok")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_hosts_are_accepted() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:8090",
+            "localhost",
+            "LOCALHOST:1234",
+            "[::1]",
+            "[::1]:4321",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn foreign_hosts_are_rejected() {
+        for host in [
+            "",
+            "evil.example",
+            "evil.example:8090",
+            "192.168.1.10:8090",
+            "10.0.0.1",
+            "[2001:db8::1]:8090",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
 }
