@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
-    config::Config, credentials::Credentials, crypto::Crypto, preview::PreviewToken,
-    rate::RateLimiter,
+    config::Config, credentials::Credentials, crypto::Crypto, files::CachedListing,
+    preview::PreviewToken, rate::RateLimiter,
 };
 
 pub struct AppState {
@@ -21,6 +21,7 @@ pub struct AppState {
     pub credentials_update: Mutex<()>,
     pub sessions: DashMap<String, Session>,
     pub preview_tokens: DashMap<String, PreviewToken>,
+    pub listings: DashMap<PathBuf, CachedListing>,
     pub login_guard: LoginGuard,
     pub uploads: DashMap<String, Arc<UploadSession>>,
     pub upload_limiter: Arc<RateLimiter>,
@@ -153,6 +154,7 @@ impl AppState {
             credentials_update: Mutex::new(()),
             sessions: DashMap::new(),
             preview_tokens: DashMap::new(),
+            listings: DashMap::new(),
             uploads: DashMap::new(),
             login_guard: LoginGuard::new(cfg.login_max_failures, cfg.login_window),
             cfg,

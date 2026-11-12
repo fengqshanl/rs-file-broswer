@@ -26,9 +26,6 @@ use crate::{
 
 pub const PREVIEW_TOKEN_TTL: Duration = Duration::from_secs(3600);
 pub const PREVIEW_CHUNK: usize = 64 * 1024;
-/// Caps a single ranged response so a hostile client cannot pin a huge
-/// read per request; browsers re-request the next range as needed.
-const MAX_PREVIEW_RANGE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct PreviewToken {
@@ -316,7 +313,6 @@ pub fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
         }
         end.min(size - 1)
     };
-    let end = end.min(start.saturating_add(MAX_PREVIEW_RANGE_BYTES - 1));
     Some((start, end))
 }
 
@@ -403,10 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn range_is_capped() {
+    fn range_serves_whole_large_file() {
         let (start, end) = parse_range("bytes=0-", 100 * 1024 * 1024).unwrap();
         assert_eq!(start, 0);
-        assert_eq!(end, MAX_PREVIEW_RANGE_BYTES - 1);
+        assert_eq!(end, 100 * 1024 * 1024 - 1);
     }
 
     #[test]

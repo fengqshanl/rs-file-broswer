@@ -24,7 +24,10 @@ const ICONS = {
 };
 
 const ARCHIVE_END_MARKER = 'AGF_TAR_END_v1';
-const TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+const LIST_PAGE_SIZE = Math.max(1, Number(window.AGENTGOD_PAGE_SIZE) || 300);
+const TEXT_STREAM_BYTES = 32 * 1024 * 1024;
+const HISTORY_KEY = 'agentgod.history.v1';
+const HISTORY_LIMIT = 300;
 const OFFICE_PREVIEW_BYTES = 64 * 1024 * 1024;
 const BLOB_DOWNLOAD_LIMIT = 1024 * 1024 * 1024;
 const SHEET_MAX_ROWS = 2000;
@@ -50,6 +53,11 @@ const state = {
   cwd: '/',
   entries: [],
   filter: '',
+  list: { offset: 0, total: 0, hasMore: false, loading: false },
+  pageSize: LIST_PAGE_SIZE,
+  autoLoadPaging: true,
+  navToken: 0,
+  pendingHighlight: null,
 };
 
 const uploadQueue = [];
@@ -76,6 +84,10 @@ function buttonEl(text, className) {
   button.className = className;
   button.textContent = text;
   return button;
+}
+
+function spinnerNode() {
+  return span('spinner');
 }
 
 function iconNode(name) {
@@ -357,12 +369,20 @@ function handleSessionLost(message) {
   state.entries = [];
   state.filter = '';
   state.cwd = '/';
+  state.list = { offset: 0, total: 0, hasMore: false, loading: false };
+  state.pageSize = LIST_PAGE_SIZE;
+  state.navToken += 1;
+  state.pendingHighlight = null;
   uploadQueue.length = 0;
   $('#app-view').hidden = true;
   $('#login-view').hidden = false;
   $('#upload-panel').hidden = true;
   $('#upload-list').replaceChildren();
   $('#file-list').replaceChildren();
+  $('#list-skeleton').hidden = true;
+  $('#list-footer').replaceChildren();
+  $('#list-footer').hidden = true;
+  $('#dir-summary').textContent = '';
   $('#free-space').textContent = '';
   uploadQueue.length = 0;
   $('#password').value = '';
@@ -414,24 +434,53 @@ async function onLogout() {
 
 /* ---------- Listing ---------- */
 
-async function loadDir(path) {
+async function loadDir(path, options = {}) {
   if (!state.key) return;
-  $('#dir-summary').textContent = '加载中…';
+  const target = normalizeRelPath(path) || '/';
+  state.cwd = target;
+  state.entries = [];
+  state.filter = '';
+  $('#filter').value = '';
+  state.list = { offset: 0, total: 0, hasMore: false, loading: false };
+  state.navToken = (state.navToken || 0) + 1;
+  const token = state.navToken;
+  renderBreadcrumbs();
+  showListSkeleton(true);
+  $('#dir-summary').textContent = '正在加载…';
+
   try {
-    const data = await api('/api/list', { path });
-    state.cwd = data.path || '/';
+    const data = await api('/api/list', {
+      path: target,
+      offset: 0,
+      limit: state.pageSize,
+    });
+    if (token !== state.navToken) return;
+    state.cwd = data.path || target;
     state.entries = Array.isArray(data.entries) ? data.entries : [];
-    state.filter = '';
-    $('#filter').value = '';
-    renderBreadcrumbs();
-    renderFiles();
+    state.list.offset = state.entries.length;
+    state.list.total = Number(data.total) || state.entries.length;
+    state.list.hasMore = Boolean(data.has_more);
     $('#free-space').textContent =
       typeof data.free_space === 'number' ? `剩余 ${formatSize(data.free_space)}` : '';
+    renderBreadcrumbs();
+    showListSkeleton(false);
+    renderFiles();
     if (data.truncated) {
-      toast('目录项目过多，仅显示前 10000 项', 'error');
+      toast('目录项目超过 50000 个，仅显示前 50000 项', 'error');
+    }
+    if (!options.skipHistory) {
+      recordHistory('dir', state.cwd, basenameOf(state.cwd), parentOf(state.cwd));
+    }
+    if (state.pendingHighlight) {
+      const pending = state.pendingHighlight;
+      state.pendingHighlight = null;
+      await highlightEntry(pending);
     }
   } catch (error) {
+    if (token !== state.navToken) return;
+    showListSkeleton(false);
     $('#dir-summary').textContent = '加载失败';
+    renderFiles();
     toast(error.message || '读取目录失败', 'error');
   }
 }
@@ -458,24 +507,43 @@ function renderBreadcrumbs() {
   }
 }
 
+function visibleEntries() {
+  const filter = state.filter.trim().toLowerCase();
+  if (!filter) return state.entries;
+  return state.entries.filter((entry) => entry.name.toLowerCase().includes(filter));
+}
+
+function showListSkeleton(show) {
+  const skeleton = $('#list-skeleton');
+  if (!skeleton) return;
+  skeleton.hidden = !show;
+  if (show) {
+    if (!skeleton.children.length) {
+      for (let index = 0; index < 8; index += 1) {
+        skeleton.append(div('skeleton-row'));
+      }
+    }
+    $('#file-list').hidden = true;
+    $('#list-footer').hidden = true;
+    $('#empty-state').hidden = true;
+    $('.list-head').hidden = true;
+  }
+}
+
 function renderFiles() {
   const list = $('#file-list');
   list.replaceChildren();
-  const filter = state.filter.trim().toLowerCase();
-  const visible = state.entries.filter(
-    (entry) => !filter || entry.name.toLowerCase().includes(filter),
-  );
-
+  const visible = visibleEntries();
   const hasEntries = visible.length > 0;
   $('.list-head').hidden = !hasEntries;
   list.hidden = !hasEntries;
   const empty = $('#empty-state');
-  empty.hidden = hasEntries;
-  if (!hasEntries) {
-    empty.querySelector('p').textContent = filter
+  empty.hidden = hasEntries || state.list.loading;
+  if (!hasEntries && !state.list.loading) {
+    empty.querySelector('p').textContent = state.filter.trim()
       ? '没有匹配的项目'
       : '这个文件夹还是空的';
-    empty.querySelector('span:last-child').textContent = filter
+    empty.querySelector('span:last-child').textContent = state.filter.trim()
       ? '换个关键词试试'
       : '拖拽文件到此处或点击“上传”';
   }
@@ -483,7 +551,130 @@ function renderFiles() {
   for (const entry of visible) {
     list.append(renderRow(entry));
   }
-  $('#dir-summary').textContent = `${visible.length} 个项目`;
+  updateListSummary();
+  renderListFooter();
+}
+
+function updateListSummary() {
+  const visible = visibleEntries().length;
+  const loaded = state.entries.length;
+  const total = Math.max(state.list.total, loaded);
+  if (state.filter.trim()) {
+    $('#dir-summary').textContent = `${visible} 个匹配项 · 已加载 ${loaded} / ${total} 项`;
+  } else if (loaded < total) {
+    $('#dir-summary').textContent = `已加载 ${loaded} / ${total} 项`;
+  } else {
+    $('#dir-summary').textContent = `${total} 个项目`;
+  }
+}
+
+function renderListFooter() {
+  const footer = $('#list-footer');
+  footer.replaceChildren();
+  if (state.filter.trim()) {
+    footer.hidden = true;
+    return;
+  }
+  if (state.list.loading) {
+    footer.hidden = false;
+    const row = div('list-loading');
+    const label = span('');
+    label.textContent = '正在加载更多…';
+    row.append(spinnerNode(), label);
+    footer.append(row);
+    return;
+  }
+  if (state.list.hasMore) {
+    footer.hidden = false;
+    const button = buttonEl('加载更多', 'btn ghost load-more');
+    button.addEventListener('click', () => void loadMore());
+    footer.append(button);
+    return;
+  }
+  if (state.entries.length > 0) {
+    footer.hidden = false;
+    const note = div('list-loading muted');
+    note.textContent = `已加载全部 ${state.list.total || state.entries.length} 项`;
+    footer.append(note);
+  } else {
+    footer.hidden = true;
+  }
+}
+
+function appendRows(fromIndex) {
+  if (state.filter.trim()) {
+    renderFiles();
+    return;
+  }
+  const list = $('#file-list');
+  const visible = visibleEntries();
+  for (let index = fromIndex; index < visible.length; index += 1) {
+    list.append(renderRow(visible[index]));
+  }
+  const hasEntries = visible.length > 0;
+  $('.list-head').hidden = !hasEntries;
+  list.hidden = !hasEntries;
+  $('#empty-state').hidden = hasEntries;
+  updateListSummary();
+  renderListFooter();
+}
+
+async function loadMore() {
+  if (!state.key || state.list.loading || !state.list.hasMore) return;
+  const token = state.navToken;
+  state.list.loading = true;
+  renderListFooter();
+  try {
+    const data = await api('/api/list', {
+      path: state.cwd,
+      offset: state.list.offset,
+      limit: state.pageSize,
+    });
+    if (token !== state.navToken) return;
+    const before = state.entries.length;
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    state.entries.push(...entries);
+    state.list.offset = state.entries.length;
+    state.list.total = Number(data.total) || state.list.total;
+    state.list.hasMore = Boolean(data.has_more);
+    appendRows(before);
+  } catch (error) {
+    if (token === state.navToken) {
+      toast(error.message || '加载更多失败', 'error');
+    }
+  } finally {
+    if (token === state.navToken) {
+      state.list.loading = false;
+      renderListFooter();
+    }
+  }
+}
+
+async function highlightEntry(fullPath) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const row = findRow(fullPath);
+    if (row) {
+      flashRow(row);
+      return;
+    }
+    if (!state.list.hasMore) return;
+    const before = state.entries.length;
+    await loadMore();
+    if (state.entries.length === before) return;
+  }
+}
+
+function findRow(fullPath) {
+  for (const row of document.querySelectorAll('#file-list .file-row')) {
+    if (row.dataset.path === fullPath) return row;
+  }
+  return null;
+}
+
+function flashRow(row) {
+  row.classList.add('highlight');
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setTimeout(() => row.classList.remove('highlight'), 3200);
 }
 
 function renderRow(entry) {
@@ -526,6 +717,7 @@ function renderRow(entry) {
 
   const actions = div('cell actions');
   const fullPath = joinPath(state.cwd, entry.name);
+  row.dataset.path = fullPath;
   if (entry.is_dir) {
     actions.append(
       actionButton('download', '下载文件夹 (.tar)', () =>
@@ -625,6 +817,7 @@ async function chooseSaveTarget(suggestedName) {
 }
 
 async function startDownload(path, name) {
+  recordHistory('file', path, name, parentOf(path));
   await streamEncryptedDownload({
     endpoint: '/api/download',
     payload: { path },
@@ -635,6 +828,7 @@ async function startDownload(path, name) {
 }
 
 async function startFolderDownload(path, name) {
+  recordHistory('dir', path, name, parentOf(path));
   await streamEncryptedDownload({
     endpoint: '/api/download_folder',
     payload: { path },
@@ -1284,6 +1478,7 @@ function handlePreviewKeys(event) {
 }
 
 function openPreview(entry) {
+  recordHistory('file', joinPath(state.cwd, entry.name), entry.name, state.cwd);
   const initialKind = previewKindOf(entry.name);
   const isImage = initialKind === 'image' || initialKind === 'svg';
   let images = isImage ? visibleImageEntries() : [];
@@ -1395,6 +1590,39 @@ function openPreview(entry) {
   });
 }
 
+function mediaStatus(text) {
+  const status = div('preview-media-status');
+  status.textContent = text;
+  return status;
+}
+
+function previewProgress(wrapper) {
+  const box = div('preview-progress');
+  const bar = document.createElement('progress');
+  bar.max = 100;
+  bar.value = 0;
+  const label = span('preview-progress-label');
+  label.textContent = '正在接收…';
+  box.append(bar, label);
+  wrapper.append(box);
+  return {
+    update(received, total) {
+      if (total > 0) bar.value = Math.min(100, (received / total) * 100);
+      label.textContent =
+        total > 0
+          ? `正在接收 ${formatSize(received)} / ${formatSize(total)}`
+          : `正在接收 ${formatSize(received)}`;
+    },
+    parse(labelText) {
+      bar.removeAttribute('value');
+      label.textContent = labelText;
+    },
+    remove() {
+      box.remove();
+    },
+  };
+}
+
 async function renderPreview({ content, entry, kind }) {
   if (kind === 'none') {
     content.replaceChildren(
@@ -1416,22 +1644,40 @@ async function renderPreview({ content, entry, kind }) {
   const token = await api('/api/preview/token', { path });
   const url = token.url;
 
+  if ((kind === 'docx' || kind === 'sheet') && token.size > OFFICE_PREVIEW_BYTES) {
+    content.replaceChildren(
+      previewMessage(
+        '文件过大，无法在线预览',
+        `Office 文档在线预览上限为 ${formatSize(OFFICE_PREVIEW_BYTES)}，请下载后查看。`,
+      ),
+    );
+    return;
+  }
+
   if (kind === 'image' || kind === 'svg') {
     content.classList.add('media-mode');
+    const wrapper = div('preview-media-wrap');
     const image = document.createElement('img');
     image.className = 'preview-image';
     image.alt = entry.name;
+    image.decoding = 'async';
+    const status = mediaStatus('正在接收图片…');
+    image.addEventListener('load', () => status.remove(), { once: true });
     image.addEventListener('error', () => {
       content.classList.remove('media-mode');
-      content.replaceChildren(previewMessage('图片加载失败', '文件可能已损坏或格式不受支持。'));
+      content.replaceChildren(
+        previewMessage('图片加载失败', '文件可能已损坏或格式不受支持。'),
+      );
     });
     image.src = url;
-    content.replaceChildren(image);
+    wrapper.append(image, status);
+    content.replaceChildren(wrapper);
     return;
   }
 
   if (kind === 'video') {
     content.classList.add('media-mode');
+    const wrapper = div('preview-media-wrap');
     const video = document.createElement('video');
     video.className = 'preview-video';
     video.controls = true;
@@ -1439,34 +1685,92 @@ async function renderPreview({ content, entry, kind }) {
     video.playsInline = true;
     video.preload = 'metadata';
     video.src = url;
+    const status = mediaStatus('正在连接…');
+    const showStatus = (text) => {
+      status.hidden = false;
+      status.textContent = text;
+    };
+    const hideStatus = () => {
+      status.hidden = true;
+    };
+    video.addEventListener('waiting', () => showStatus('正在缓冲…'));
+    video.addEventListener('stalled', () => showStatus('正在缓冲…'));
+    video.addEventListener('playing', hideStatus);
+    video.addEventListener('canplay', hideStatus);
+    video.addEventListener('progress', () => {
+      if (status.hidden) return;
+      try {
+        const buffered = video.buffered;
+        if (
+          buffered.length > 0 &&
+          Number.isFinite(video.duration) &&
+          video.duration > 0
+        ) {
+          const percent = Math.min(
+            100,
+            Math.round((buffered.end(buffered.length - 1) / video.duration) * 100),
+          );
+          status.textContent = video.paused
+            ? `已缓冲 ${percent}%`
+            : `正在播放 · 已缓冲 ${percent}%`;
+        }
+      } catch {
+        /* buffered ranges can be unavailable while metadata loads */
+      }
+    });
     video.addEventListener('error', () => {
       content.classList.remove('media-mode');
       content.replaceChildren(
-        previewMessage('浏览器无法播放该视频', '可能是编码格式不受支持（例如 H.265/HEVC），可下载后使用本地播放器。'),
+        previewMessage(
+          '浏览器无法播放该视频',
+          '可能是编码格式不受支持（例如 H.265/HEVC），可下载后使用本地播放器。',
+        ),
       );
     });
-    content.replaceChildren(video);
+    wrapper.append(video, status);
+    content.replaceChildren(wrapper);
     return;
   }
 
   if (kind === 'audio') {
     content.classList.add('media-mode');
+    const wrapper = div('preview-media-wrap');
     const audio = document.createElement('audio');
     audio.className = 'preview-audio';
     audio.controls = true;
     audio.autoplay = true;
     audio.src = url;
-    content.replaceChildren(audio);
+    const status = mediaStatus('正在连接…');
+    audio.addEventListener('waiting', () => {
+      status.hidden = false;
+      status.textContent = '正在缓冲…';
+    });
+    audio.addEventListener('stalled', () => {
+      status.hidden = false;
+      status.textContent = '正在缓冲…';
+    });
+    audio.addEventListener('playing', () => {
+      status.hidden = true;
+    });
+    audio.addEventListener('canplay', () => {
+      status.hidden = true;
+    });
+    wrapper.append(audio, status);
+    content.replaceChildren(wrapper);
     return;
   }
 
   if (kind === 'pdf') {
     content.classList.add('media-mode');
+    const wrapper = div('preview-media-wrap');
     const frame = document.createElement('iframe');
     frame.className = 'preview-frame';
     frame.title = entry.name;
+    const status = mediaStatus('正在加载 PDF…');
+    frame.addEventListener('load', () => status.remove(), { once: true });
     frame.src = url;
-    content.replaceChildren(frame);
+    wrapper.append(frame, status);
+    content.replaceChildren(wrapper);
     return;
   }
 
@@ -1480,75 +1784,142 @@ async function renderPreview({ content, entry, kind }) {
     const note = div('preview-banner');
     note.textContent = 'HTML 在隔离沙箱中运行：脚本可运行，但无法访问本应用的登录状态或接口。';
     const wrapper = div('preview-stack');
-    wrapper.append(note, frame);
+    const frameWrap = div('preview-media-wrap');
+    const status = mediaStatus('正在加载…');
+    frame.addEventListener('load', () => status.remove(), { once: true });
+    frameWrap.append(frame, status);
+    wrapper.append(note, frameWrap);
     content.replaceChildren(wrapper);
     frame.src = url;
     return;
   }
 
   if (kind === 'text') {
-    const headers = entry.size > TEXT_PREVIEW_BYTES
-      ? { Range: `bytes=0-${TEXT_PREVIEW_BYTES - 1}` }
-      : {};
-    const response = await fetch(url, { headers, cache: 'no-store' });
-    if (!response.ok) throw new Error(`读取文件失败 (${response.status})`);
-    const buffer = await response.arrayBuffer();
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+    const wrapper = div('preview-stack');
+    const banner = div('preview-banner');
+    banner.textContent = '正在接收…';
     const pre = document.createElement('pre');
     pre.className = 'preview-text';
-    pre.textContent = text;
-    const wrapper = div('preview-stack');
-    if (entry.size > TEXT_PREVIEW_BYTES) {
-      const note = div('preview-banner');
-      note.textContent = `文件较大，仅显示前 ${formatSize(TEXT_PREVIEW_BYTES)}，完整内容请下载查看。`;
-      wrapper.append(note);
-    }
-    wrapper.append(pre);
+    const textNode = document.createTextNode('');
+    pre.append(textNode);
+    wrapper.append(banner, pre);
     content.replaceChildren(wrapper);
+
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`读取文件失败 (${response.status})`);
+    const total =
+      Number(response.headers.get('content-length')) || token.size || 0;
+    const reader = response.body.getReader();
+    const textDecoder = new TextDecoder('utf-8', { fatal: false });
+    let received = 0;
+    let truncated = false;
+    let lastPaint = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!wrapper.isConnected) {
+        await reader.cancel().catch(() => {});
+        return;
+      }
+      received += value.length;
+      textNode.appendData(textDecoder.decode(value, { stream: true }));
+      const now = performance.now();
+      if (now - lastPaint > 120) {
+        lastPaint = now;
+        banner.textContent =
+          total > 0
+            ? `正在接收 ${formatSize(received)} / ${formatSize(total)}（内容已可边收边看）`
+            : `正在接收 ${formatSize(received)}（内容已可边收边看）`;
+      }
+      if (received >= TEXT_STREAM_BYTES) {
+        truncated = true;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+    }
+    textNode.appendData(textDecoder.decode());
+    banner.textContent = truncated
+      ? `文件较大，仅显示前 ${formatSize(TEXT_STREAM_BYTES)}（已接收 ${formatSize(received)}），完整内容请下载查看。`
+      : total > 0 && received >= total
+        ? `已接收全部 ${formatSize(received)}`
+        : `已接收 ${formatSize(received)}`;
     return;
   }
 
   if (kind === 'docx') {
-    await loadScript('/vendor/mammoth.js');
-    const buffer = await fetchArrayBuffer(url, token.size);
-    const result = await window.mammoth.convertToHtml({ arrayBuffer: buffer });
     const wrapper = div('preview-stack');
     const documentView = div('preview-docx');
+    const progress = previewProgress(wrapper);
+    wrapper.append(documentView);
+    content.replaceChildren(wrapper);
+    await loadScript('/vendor/mammoth.js');
+    const buffer = await fetchStreamBytes(url, token.size, (received, total) => {
+      progress.update(received, total);
+    });
+    if (!wrapper.isConnected) return;
+    progress.parse('正在解析文档…');
+    const result = await window.mammoth.convertToHtml({ arrayBuffer: buffer });
     documentView.append(sanitizeHtml(result.value || ''));
     if (!documentView.textContent.trim() && !documentView.querySelector('img, table')) {
       documentView.append(previewMessage('文档没有可显示的文本内容', ''));
     }
-    wrapper.append(documentView);
-    content.replaceChildren(wrapper);
+    progress.remove();
     return;
   }
 
   if (kind === 'sheet') {
+    const wrapper = div('preview-stack');
+    const progress = previewProgress(wrapper);
+    content.replaceChildren(wrapper);
     await loadScript('/vendor/xlsx.js');
     const extension = fileExtension(entry.name);
+    const buffer = await fetchStreamBytes(url, token.size, (received, total) => {
+      progress.update(received, total);
+    });
+    if (!wrapper.isConnected) return;
+    progress.parse('正在解析表格…');
     let workbook;
     if (extension === 'csv' || extension === 'tsv') {
-      const response = await fetch(url, { cache: 'no-store' });
-      if (!response.ok) throw new Error(`读取文件失败 (${response.status})`);
-      const text = await response.text();
-      workbook = window.XLSX.read(text, { type: 'string', raw: false });
+      workbook = window.XLSX.read(new TextDecoder('utf-8').decode(buffer), {
+        type: 'string',
+        raw: false,
+      });
     } else {
-      const buffer = await fetchArrayBuffer(url, token.size);
-      workbook = window.XLSX.read(new Uint8Array(buffer), { type: 'array' });
+      workbook = window.XLSX.read(buffer, { type: 'array' });
     }
-    content.replaceChildren(renderWorkbook(workbook));
+    progress.remove();
+    wrapper.append(renderWorkbook(workbook));
     return;
   }
 
   content.replaceChildren(previewMessage('暂不支持在线预览此类型', '可以下载后使用本地应用打开。'));
 }
 
-async function fetchArrayBuffer(url, expectedSize) {
+async function fetchStreamBytes(url, expectedSize, onProgress) {
   const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) throw new Error(`读取文件失败 (${response.status})`);
-  const buffer = await response.arrayBuffer();
-  if (expectedSize && buffer.byteLength !== expectedSize) {
-    throw new Error('文件内容不完整，请重试');
+  const total = Number(response.headers.get('content-length')) || expectedSize || 0;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  let lastPaint = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const now = performance.now();
+    if (onProgress && now - lastPaint > 120) {
+      lastPaint = now;
+      onProgress(received, total);
+    }
+  }
+  if (onProgress) onProgress(received, total || received);
+  const buffer = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
   }
   return buffer;
 }
@@ -1809,6 +2180,144 @@ function openAccountDialog() {
   });
 }
 
+/* ---------- History ---------- */
+
+function basenameOf(path) {
+  const clean = normalizeRelPath(path);
+  if (!clean) return '根目录';
+  return clean.slice(clean.lastIndexOf('/') + 1);
+}
+
+function parentOf(path) {
+  const clean = normalizeRelPath(path);
+  if (!clean) return '/';
+  const index = clean.lastIndexOf('/');
+  return index === -1 ? '/' : `/${clean.slice(0, index)}`;
+}
+
+function relativeTime(milliseconds) {
+  const delta = Date.now() - Number(milliseconds || 0);
+  if (!Number.isFinite(delta) || delta < 0) return '';
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (delta < minute) return '刚刚';
+  if (delta < hour) return `${Math.floor(delta / minute)} 分钟前`;
+  if (delta < day) return `${Math.floor(delta / hour)} 小时前`;
+  if (delta < 2 * day) return '昨天';
+  if (delta < 7 * day) return `${Math.floor(delta / day)} 天前`;
+  return new Date(milliseconds).toLocaleDateString('zh-CN');
+}
+
+function readHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item) =>
+        item &&
+        (item.type === 'dir' || item.type === 'file') &&
+        typeof item.path === 'string' &&
+        typeof item.name === 'string' &&
+        typeof item.at === 'number',
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeHistory(items) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, HISTORY_LIMIT)));
+  } catch {
+    /* storage may be unavailable (private mode); history is best effort */
+  }
+}
+
+function recordHistory(type, path, name, parent) {
+  const clean = normalizeRelPath(path);
+  if (!clean && type !== 'dir') return;
+  const entry = {
+    type,
+    path: clean ? `/${clean}` : '/',
+    name: name || basenameOf(path),
+    parent: parent || parentOf(path),
+    at: Date.now(),
+  };
+  const items = readHistory().filter(
+    (item) => !(item.type === entry.type && item.path === entry.path),
+  );
+  items.unshift(entry);
+  writeHistory(items);
+}
+
+function openHistoryDialog() {
+  const items = readHistory();
+  return openModal((dialog, finish) => {
+    dialog.classList.add('history-dialog');
+    const body = div('modal-body');
+    const head = div('history-head');
+    const heading = document.createElement('h2');
+    heading.textContent = '浏览历史';
+    const clear = buttonEl('清空', 'btn ghost small');
+    clear.disabled = items.length === 0;
+    clear.addEventListener('click', () => {
+      writeHistory([]);
+      finish(null);
+      toast('历史记录已清空', 'info');
+    });
+    head.append(heading, clear);
+    body.append(head);
+
+    if (!items.length) {
+      const empty = div('history-empty');
+      empty.textContent = '还没有浏览记录。打开文件夹或预览文件后会出现在这里。';
+      body.append(empty);
+    } else {
+      const list = div('history-list');
+      for (const item of items.slice(0, 100)) {
+        const row = buttonEl('', 'history-item');
+        const icon = span('history-icon');
+        icon.innerHTML = item.type === 'dir' ? ICONS.folder : ICONS.file;
+        const info = div('history-info');
+        const title = span('history-name');
+        title.textContent = item.name;
+        const meta = span('history-meta');
+        meta.textContent = `${item.type === 'dir' ? '文件夹' : '文件'} · ${
+          item.parent === '/' ? '根目录' : item.parent
+        }`;
+        info.append(title, meta);
+        const time = span('history-time');
+        time.textContent = relativeTime(item.at);
+        row.append(icon, info, time);
+        row.addEventListener('click', () => {
+          finish(null);
+          void jumpToHistory(item);
+        });
+        list.append(row);
+      }
+      body.append(list);
+    }
+
+    const actions = div('modal-actions');
+    const close = buttonEl('关闭', 'btn ghost');
+    close.addEventListener('click', () => finish(null));
+    actions.append(close);
+    body.append(actions);
+    dialog.append(body);
+  });
+}
+
+async function jumpToHistory(item) {
+  if (item.type === 'dir') {
+    await loadDir(item.path);
+    return;
+  }
+  state.pendingHighlight = item.path;
+  await loadDir(item.parent || '/');
+}
+
 /* ---------- Wiring ---------- */
 
 function bindEvents() {
@@ -1828,6 +2337,24 @@ function bindEvents() {
   });
   $('#btn-mkdir').addEventListener('click', createFolder);
   $('#btn-refresh').addEventListener('click', () => loadDir(state.cwd));
+  $('#btn-history').addEventListener('click', openHistoryDialog);
+  if ('IntersectionObserver' in window) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          entries.some((entry) => entry.isIntersecting) &&
+          state.key &&
+          state.autoLoadPaging !== false &&
+          state.list.hasMore &&
+          !state.list.loading
+        ) {
+          void loadMore();
+        }
+      },
+      { rootMargin: '240px 0px' },
+    );
+    observer.observe($('#list-footer'));
+  }
   $('#btn-account').addEventListener('click', openAccountDialog);
   $('#user-badge').addEventListener('click', () => {
     if (state.key) openAccountDialog();

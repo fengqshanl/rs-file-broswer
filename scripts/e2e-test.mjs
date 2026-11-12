@@ -471,6 +471,37 @@ async function main() {
   await api('/api/upload/finish', { id: nestedInit.id });
   record('upload into nested folder', `${nestedRoot}/docs/2026/note.txt`);
 
+  /* ---------- paginated directory listing ---------- */
+
+  const pageOne = await api('/api/list', {
+    path: `/${nestedRoot}`,
+    offset: 0,
+    limit: 2,
+  });
+  if (!Array.isArray(pageOne.entries) || pageOne.entries.length !== 2) {
+    throw new Error('first page did not honour limit=2');
+  }
+  if (pageOne.total < 3 || !pageOne.has_more) {
+    throw new Error('pagination metadata missing');
+  }
+  const pageTwo = await api('/api/list', {
+    path: `/${nestedRoot}`,
+    offset: 2,
+    limit: 2,
+  });
+  if (pageTwo.entries.length < 1 || pageTwo.has_more) {
+    throw new Error('second page returned wrong slice');
+  }
+  const fullList = await api('/api/list', {
+    path: `/${nestedRoot}`,
+    offset: 0,
+    limit: 100,
+  });
+  if (fullList.entries.length !== fullList.total) {
+    throw new Error('full listing length mismatch');
+  }
+  record('paginated listing', `${fullList.total} entries, pages verified`);
+
   /* ---------- folder download as encrypted tar ---------- */
 
   const folderAad = 'POST /api/download_folder';
@@ -536,6 +567,44 @@ async function main() {
     throw new Error('range response bytes mismatch');
   }
   record('preview token + HTTP range', '206 Partial Content honoured');
+
+  const bigSize = 6 * 1024 * 1024;
+  const bigBytes = new Uint8Array(bigSize);
+  for (let index = 0; index < bigSize; index += 1) {
+    bigBytes[index] = index & 0xff;
+  }
+  const bigInit = await api('/api/upload/init', {
+    dir: `/${nestedRoot}`,
+    name: 'big-range.bin',
+    size: bigSize,
+  });
+  for (let offset = 0, sequence = 0; offset < bigSize; offset += CHUNK, sequence += 1) {
+    await uploadChunkBlob(
+      bigInit.id,
+      sequence,
+      bigBytes.subarray(offset, Math.min(offset + CHUNK, bigSize)),
+    );
+  }
+  await api('/api/upload/finish', { id: bigInit.id });
+
+  const bigToken = await api('/api/preview/token', {
+    path: `/${nestedRoot}/big-range.bin`,
+  });
+  const bigRange = await fetch(`${BASE_URL}${bigToken.url}`, {
+    headers: { Range: 'bytes=0-' },
+  });
+  if (bigRange.status !== 206) {
+    throw new Error(`large range returned ${bigRange.status}, expected 206`);
+  }
+  const bigLength = Number(bigRange.headers.get('content-length'));
+  if (bigLength !== bigSize) {
+    throw new Error(`large range truncated: ${bigLength} != ${bigSize}`);
+  }
+  const bigBody = await bigRange.arrayBuffer();
+  if (bigBody.byteLength !== bigSize) {
+    throw new Error('large range body size mismatch');
+  }
+  record('large range preview', `${bigSize} bytes in one 206 response`);
 
   const htmlBody = '<!doctype html><html><body><h1>预览测试</h1><script>document.title="x"</script></body></html>';
   const htmlBytes = encoder.encode(htmlBody);

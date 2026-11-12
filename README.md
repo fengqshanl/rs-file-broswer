@@ -30,7 +30,10 @@
 - **批量与文件夹上传**：多选文件、整目录上传、拖拽文件夹，自动创建子目录并保留空目录
 - **文件与文件夹下载**：单文件流式下载；文件夹服务端流式打包为未压缩 `.tar`
 - **在线预览**：图片 / SVG、视频、音频、PDF、HTML（沙箱）、文本 / 代码 / JSON、CSV / TSV、Word（`.docx`）、Excel（`.xlsx` / `.xlsm`）
+- **边收边看**：视频/音频/PDF 依赖 HTTP Range 流式播放，图片渐进显示，文本按块接收即时追加，Office 文档显示实时接收进度后再解析
 - **预览快捷键**：视频 `←`/`→` 快退/快进 5 秒、`空格` 播放/暂停；图片 `←`/`→` 在目录内循环切换
+- **浏览历史**：自动记录访问过的文件夹与打开的文件，点击记录可跳回对应目录并高亮目标文件
+- **大目录分页**：目录扫描一次并缓存，前端按页加载（滚动到底自动续载），加载期间显示骨架屏
 - **账户管理**：登录后可修改用户名和密码，其他会话立即失效
 - **加密登录**：RSA-OAEP 包装随机会话密钥，Argon2id 校验密码
 - **加密传输**：API 与上下载全程 AES-256-GCM，AEAD 附加数据绑定方法与 URI，防重放
@@ -176,7 +179,9 @@ docker compose up -d --force-recreate
 - **预览**：点击文件名或眼睛图标。图片、视频、音频、PDF、HTML、文本、Office 文档均可在线查看
 - **快捷键**：预览打开时，视频 `←`/`→` 快退/快进 5 秒、`空格` 播放/暂停；图片 `←`/`→` 循环切换目录内图片
 - **账户**：点击右上角「账户」或左上角用户名，可修改用户名与密码
-- **筛选**：工具栏搜索框按名称过滤当前目录
+- **历史**：点击工具栏时钟图标，可查看最近访问的文件夹与文件；点击记录回到对应目录并高亮该文件，可一键清空
+- **大目录**：首次打开会显示骨架屏，列表滚动到底自动加载下一页；底部也会显示「加载更多」按钮
+- **筛选**：工具栏搜索框按名称过滤**已加载**的项目；大目录可继续滚动加载后再筛选
 
 ## 安全设计
 
@@ -209,9 +214,9 @@ docker compose up -d --force-recreate
 
 - **全局令牌桶限速**：上传、下载（含预览）各自一个全局桶，所有连接共享，而不是每连接限速。
 - **并发上限**：默认 2 个上传 + 2 个下载，预览另设 4 个并发；其余请求排队。
-- **内存可控**：下载块 64 KiB、上传块最大 4 MiB，流式处理，不缓存整个文件。
+- **内存可控**：下载块 64 KiB、上传块最大 4 MiB，流式处理，不缓存整个文件；预览同样流式，单次读取 64 KiB。
 - **磁盘安全余量**：拒绝任何会占用「剩余空间 − 2 GiB」的上传，分块写入时持续检查。
-- **目录列表上限**：单目录最多返回 10,000 项，避免超大目录耗尽内存。
+- **大目录保护**：目录在阻塞线程中一次扫描并排序，结果缓存 15 秒（最多缓存 2 个目录），前端每页 300 项；单目录上限 50,000 项。这样翻页不会反复遍历目录，也不会把数万个 DOM 节点一次性塞进浏览器。
 - **容器限制**：示例配置使用 256 MB 内存、1 CPU、128 PID、只读根文件系统、丢弃全部 capability（仅保留文件访问所需的 `DAC_OVERRIDE` / `DAC_READ_SEARCH`），日志轮转 10 MB × 3。
 - **登录 CPU 保护**：Argon2 并发信号量 + 失败退避。
 
@@ -247,7 +252,7 @@ docker-compose.yml
 | `POST /api/login` | `{ek, iv, ct}`：RSA-OAEP 包装的会话密钥 + AES-GCM 加密的 `{username,password,ts}` |
 | 登录响应 | AES-GCM 加密的 `{token,expires_in,user}`，AAD = `login-resp` |
 | 其他 API | `Authorization: Bearer <token>` + `{iv,ct}`，AAD = `<METHOD> <URI>` |
-| `POST /api/list` | 加密 `{path}` → 目录项与剩余空间 |
+| `POST /api/list` | 加密 `{path, offset, limit}` → 当前页目录项、`total`、`has_more`、剩余空间（扫描结果服务端缓存 15 秒） |
 | `POST /api/mkdir` / `ensure_dirs` | 创建单个/批量文件夹 |
 | `POST /api/rename` / `delete` | 重命名、递归删除 |
 | `POST /api/upload/init` | 加密 `{dir,name,size}` → `{id}` |
@@ -256,7 +261,7 @@ docker-compose.yml
 | `POST /api/download` | 加密 `{path}`；响应为带 `x-file-size`/`x-chunk-size` 的加密帧流 |
 | `POST /api/download_folder` | 加密 `{path}`；tar 加密帧流，最后一帧为 `AGF_TAR_END_v1` |
 | `POST /api/preview/token` | 加密 `{path}` → `{url,name,size,content_type,expires_in}` |
-| `GET /preview/<token>` | Range 预览（仅 TLS，见预览安全模型） |
+| `GET /preview/<token>` | Range 预览，完整支持单段 `bytes=` 请求，大文件不截断（仅 TLS，见预览安全模型） |
 | `POST /api/account/update` | 加密 `{current_password,new_username,new_password}`，改密后吊销其他会话 |
 | 下载帧 | `[u32 ct_len][12B iv][ct]`，AAD = `dl:<seq>` |
 
@@ -353,7 +358,9 @@ node scripts/ui-smoke.mjs
 - 不支持在线预览旧版 Office（`.doc`/`.xls`）与 `.pptx`
 - HTML 预览只加载单文件，依赖同目录 CSS/JS/图片的站点无法完整显示
 - 文件夹下载为未压缩 tar（降低 CPU 占用），下载后需自行解压
-- 表格预览最多 2000 行 × 80 列，Word/Excel 预览上限 64 MB，文本预览上限 2 MB
+- 表格预览最多 2000 行 × 80 列；Word/Excel 预览上限 64 MB（需完整接收后解析，期间显示进度）；文本流式显示上限 32 MB
+- 单目录最多显示 50,000 项；筛选只作用于已加载的分页内容
+- 浏览历史保存在浏览器 `localStorage`（最多 300 条），不跨浏览器同步
 - 文件在宿主机磁盘上不额外加密存储，访问控制依赖容器与宿主机文件权限
 
 ## 安全边界

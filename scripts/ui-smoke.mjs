@@ -415,6 +415,113 @@ async function main() {
   await evaluate("document.querySelector('#modal').close(); true");
   console.log('PASS  arrow keys switch photos');
 
+  /* ---------- skeleton + paginated listing ---------- */
+
+  const skeletonShown = await evaluate(
+    "(() => { state.pageSize = 3; state.autoLoadPaging = false; loadDir('/'); return !document.querySelector('#list-skeleton').hidden; })()",
+  );
+  if (!skeletonShown) throw new Error('loading skeleton was not shown');
+  await waitFor(
+    "document.querySelector('#list-skeleton').hidden && document.querySelectorAll('#file-list .file-row').length === 3",
+    20_000,
+    'first page of three rows',
+  );
+  await waitFor("!!document.querySelector('#list-footer .load-more')", 5_000, 'load-more button');
+  await evaluate("document.querySelector('#list-footer .load-more').click(); true");
+  await waitFor(
+    "document.querySelectorAll('#file-list .file-row').length > 3",
+    20_000,
+    'second page appended',
+  );
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const hasMore = await evaluate("!!document.querySelector('#list-footer .load-more')");
+    if (!hasMore) break;
+    await evaluate("document.querySelector('#list-footer .load-more').click(); true");
+    await sleep(300);
+  }
+  const footerText = await evaluate("document.querySelector('#list-footer').textContent");
+  if (!footerText.includes('已加载全部')) {
+    throw new Error(`pagination footer unexpected: ${footerText}`);
+  }
+  await evaluate("state.pageSize = 300; state.autoLoadPaging = true; loadDir('/'); true");
+  await waitFor(
+    "document.querySelectorAll('#file-list .file-row').length >= 5",
+    20_000,
+    'full listing after restoring page size',
+  );
+  console.log('PASS  loading skeleton and paginated listing');
+
+  /* ---------- history jump + highlight ---------- */
+
+  await evaluate(
+    "[...document.querySelectorAll('.file-row .name-btn')].find((node) => node.textContent === 'ui-folder').click(); true",
+  );
+  await waitFor(
+    "document.querySelector('.crumbs').textContent.includes('ui-folder') && [...document.querySelectorAll('.file-row .file-name')].some((node) => node.textContent === 'top.txt')",
+    15_000,
+    'ui-folder listing',
+  );
+  await evaluate(
+    "openPreview({ name: 'top.txt', size: 12, modified: Date.now(), is_dir: false }); true",
+  );
+  await waitFor("!!document.querySelector('.preview-text')", 15_000, 'top.txt preview');
+  await evaluate("document.querySelector('#modal').close(); true");
+  await evaluate("document.querySelector('#btn-history').click(); true");
+  await waitFor(
+    "[...document.querySelectorAll('.history-item')].some((node) => node.textContent.includes('top.txt'))",
+    10_000,
+    'history entry for top.txt',
+  );
+  await evaluate(
+    "[...document.querySelectorAll('.history-item')].find((node) => node.textContent.includes('top.txt')).click(); true",
+  );
+  await waitFor(
+    "document.querySelector('.crumbs').textContent.includes('ui-folder')",
+    15_000,
+    'history navigation',
+  );
+  await waitFor(
+    "!!document.querySelector('#file-list .file-row.highlight')",
+    10_000,
+    'highlighted file row',
+  );
+  console.log('PASS  history jump and file highlight');
+
+  await evaluate("loadDir('/'); true");
+  await waitFor(
+    "document.querySelectorAll('#file-list .file-row').length >= 5",
+    20_000,
+    'back to root listing',
+  );
+
+  /* ---------- streaming text preview ---------- */
+
+  await evaluate(`(() => {
+    const text = '流式文本内容 '.repeat(40000);
+    const file = new File([text], 'ui-big.txt', { type: 'text/plain' });
+    enqueueUploads([{ file, relative: 'ui-big.txt' }], '/');
+    return true;
+  })()`);
+  await waitFor(
+    "[...document.querySelectorAll('.upload-item.done')].some((node) => node.textContent.includes('ui-big.txt'))",
+    45_000,
+    'large text upload',
+  );
+  await evaluate(
+    "openPreview({ name: 'ui-big.txt', size: 800000, modified: Date.now(), is_dir: false }); true",
+  );
+  await waitFor(
+    "(() => { const pre = document.querySelector('.preview-text'); return !!pre && pre.textContent.length > 200000; })()",
+    25_000,
+    'streamed text content',
+  );
+  const streamBanner = await evaluate("document.querySelector('.preview-banner').textContent");
+  if (!streamBanner.includes('已接收')) {
+    throw new Error(`text stream banner unexpected: ${streamBanner}`);
+  }
+  await evaluate("document.querySelector('#modal').close(); true");
+  console.log('PASS  streaming text preview');
+
   /* ---------- video keyboard shortcuts ---------- */
 
   let videoBase64;
@@ -598,6 +705,7 @@ async function main() {
     api('/api/delete', { path: '/ui-photo-a.png' }).catch(() => null),
     api('/api/delete', { path: '/ui-photo-b.png' }).catch(() => null),
     api('/api/delete', { path: '/ui-video.webm' }).catch(() => null),
+    api('/api/delete', { path: '/ui-big.txt' }).catch(() => null),
     api('/api/delete', { path: '/ui-doc.docx' }).catch(() => null),
     api('/api/delete', { path: '/ui-sheet.xlsx' }).catch(() => null),
     api('/api/delete', { path: '/ui-folder' }).catch(() => null),

@@ -93,6 +93,13 @@
           </span>
           <span class="btn-label">新建文件夹</span>
         </button>
+        <button id="btn-history" class="btn icon-only" type="button" title="浏览历史" aria-label="浏览历史">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/>
+            </svg>
+          </span>
+        </button>
         <button id="btn-refresh" class="btn icon-only" type="button" title="刷新" aria-label="刷新">
           <span class="icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -136,7 +143,9 @@
         <span class="col-time">修改时间</span>
         <span class="col-actions">操作</span>
       </div>
+      <div id="list-skeleton" class="list-skeleton" hidden></div>
       <div id="file-list" class="file-list" role="list"></div>
+      <div id="list-footer" class="list-footer" hidden></div>
       <div id="empty-state" class="empty-state" hidden>
         <span class="empty-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">

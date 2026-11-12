@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use aes_gcm::{
@@ -42,13 +42,27 @@ use crate::{
 pub const DOWNLOAD_CHUNK: usize = 64 * 1024;
 pub const UPLOAD_CHUNK_MAX: usize = 4 * 1024 * 1024;
 const CHUNK_BODY_LIMIT: usize = 4 + 12 + UPLOAD_CHUNK_MAX + 16 + 64;
-const MAX_LIST_ENTRIES: usize = 10_000;
+const MAX_LIST_ENTRIES: usize = 50_000;
 const MAX_ENSURE_DIRS: usize = 20_000;
+/// A scan stays valid for this long, so paging through a large folder costs
+/// one directory walk instead of one per page.
+const LISTING_TTL: Duration = Duration::from_secs(15);
+/// Caps how much memory cached folder scans may occupy (entries are ~100 B).
+const MAX_CACHED_LISTINGS: usize = 2;
+const LIST_PAGE_LIMIT: usize = 1_000;
 
 #[derive(Deserialize)]
 struct ListRequest {
     #[serde(default)]
     path: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page_size")]
+    limit: usize,
+}
+
+fn default_page_size() -> usize {
+    300
 }
 
 #[derive(Deserialize)]
@@ -94,13 +108,21 @@ struct UploadIdRequest {
     id: String,
 }
 
-#[derive(Serialize)]
-struct Entry {
+#[derive(Clone, Serialize)]
+pub(crate) struct Entry {
     name: String,
     is_dir: bool,
     is_symlink: bool,
     size: u64,
     modified: u64,
+}
+
+/// A fully scanned and sorted directory listing, reused across paginated
+/// requests so a huge folder is walked once instead of once per page.
+pub struct CachedListing {
+    pub entries: Arc<Vec<Entry>>,
+    pub truncated: bool,
+    pub built_at: Instant,
 }
 
 struct DownloadStream {
@@ -330,41 +352,95 @@ pub async fn list(
     let request: ListRequest = read_encrypted(&session, &aad, body).await?;
     let (directory, clean) = resolve_dir(&state, &request.path).await?;
 
-    let mut reader = tokio::fs::read_dir(&directory)
+    let (entries, truncated) = load_listing(&state, &directory).await?;
+
+    let total = entries.len();
+    let limit = request.limit.clamp(1, LIST_PAGE_LIMIT);
+    let start = request.offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let page = entries[start..end].to_vec();
+
+    let response = json!({
+        "path": logical_path(&clean),
+        "entries": page,
+        "total": total,
+        "offset": start,
+        "limit": limit,
+        "has_more": end < total,
+        "truncated": truncated,
+        "free_space": free_space(&directory),
+    });
+    encrypted_response(&session, &aad, response)
+}
+
+async fn load_listing(
+    state: &AppState,
+    directory: &Path,
+) -> Result<(Arc<Vec<Entry>>, bool), ApiError> {
+    if let Some(cached) = state.listings.get(directory) {
+        if cached.built_at.elapsed() < LISTING_TTL {
+            return Ok((cached.entries.clone(), cached.truncated));
+        }
+    }
+
+    let dir = directory.to_path_buf();
+    let tmp_root = state.cfg.tmp_root.clone();
+    let (entries, truncated) = tokio::task::spawn_blocking(move || scan_directory(&dir, &tmp_root))
         .await
+        .map_err(|err| ApiError::internal(err.to_string()))?
         .map_err(|err| ApiError::internal(err.to_string()))?;
+    let entries = Arc::new(entries);
+
+    if state.listings.len() >= MAX_CACHED_LISTINGS {
+        state.listings.clear();
+    }
+    state.listings.insert(
+        directory.to_path_buf(),
+        CachedListing {
+            entries: entries.clone(),
+            truncated,
+            built_at: Instant::now(),
+        },
+    );
+
+    Ok((entries, truncated))
+}
+
+/// Walks a directory in one blocking pass: a single syscall per regular file
+/// instead of the two an async per-entry walk needs. Sorting is done once and
+/// reused for every page of the same folder.
+fn scan_directory(root: &Path, tmp_root: &Path) -> io::Result<(Vec<Entry>, bool)> {
+    let reader = std::fs::read_dir(root)?;
     let mut entries = Vec::new();
     let mut truncated = false;
-    loop {
+
+    for item in reader {
         if entries.len() >= MAX_LIST_ENTRIES {
             truncated = true;
             break;
         }
-        let entry = match reader.next_entry().await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => break,
-            Err(err) => return Err(ApiError::internal(err.to_string())),
-        };
-        let path = entry.path();
-        if path == state.cfg.tmp_root {
+        let Ok(item) = item else { continue };
+        let path = item.path();
+        if path == tmp_root {
             continue;
         }
-        let Ok(name) = entry.file_name().into_string() else {
+        let Ok(name) = item.file_name().into_string() else {
             continue;
         };
-        let Ok(link_metadata) = tokio::fs::symlink_metadata(&path).await else {
+        let Ok(link_metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
         let is_symlink = link_metadata.file_type().is_symlink();
-        let metadata = tokio::fs::metadata(&path).await.ok();
-        let is_dir = metadata.as_ref().map(|meta| meta.is_dir()).unwrap_or(false);
-        let size = metadata
-            .as_ref()
-            .map(|meta| if meta.is_dir() { 0 } else { meta.len() })
-            .unwrap_or(0);
-        let modified = metadata
-            .as_ref()
-            .and_then(|meta| meta.modified().ok())
+        let effective = if is_symlink {
+            std::fs::metadata(&path).unwrap_or(link_metadata)
+        } else {
+            link_metadata
+        };
+        let is_dir = effective.is_dir();
+        let size = if is_dir { 0 } else { effective.len() };
+        let modified = effective
+            .modified()
+            .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or(0);
@@ -377,21 +453,19 @@ pub async fn list(
         });
     }
 
-    entries.sort_by(|left, right| {
-        right
-            .is_dir
-            .cmp(&left.is_dir)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.name.cmp(&right.name))
+    entries.sort_by_cached_key(|entry| {
+        (
+            if entry.is_dir { 0u8 } else { 1u8 },
+            entry.name.to_lowercase(),
+            entry.name.clone(),
+        )
     });
 
-    let response = json!({
-        "path": logical_path(&clean),
-        "entries": entries,
-        "free_space": free_space(&directory),
-        "truncated": truncated,
-    });
-    encrypted_response(&session, &aad, response)
+    Ok((entries, truncated))
+}
+
+fn invalidate_listings(state: &AppState) {
+    state.listings.clear();
 }
 
 pub async fn mkdir(
@@ -408,6 +482,7 @@ pub async fn mkdir(
         return Err(ApiError::bad("文件夹名称不能为空"));
     }
     let created = ensure_dir_path(&state, &clean).await?;
+    invalidate_listings(&state);
     encrypted_response(
         &session,
         &aad,
@@ -439,6 +514,7 @@ pub async fn ensure_dirs(
             created += 1;
         }
     }
+    invalidate_listings(&state);
 
     encrypted_response(&session, &aad, json!({ "ok": true, "created": created }))
 }
@@ -473,6 +549,7 @@ pub async fn rename(
     tokio::fs::rename(&source, &target)
         .await
         .map_err(|err| ApiError::internal(err.to_string()))?;
+    invalidate_listings(&state);
 
     let new_clean = if parent_clean.is_empty() {
         request.new_name.clone()
@@ -517,6 +594,7 @@ pub async fn delete(
             .await
             .map_err(|err| ApiError::internal(err.to_string()))?;
     }
+    invalidate_listings(&state);
     encrypted_response(
         &session,
         &aad,
@@ -766,6 +844,7 @@ pub async fn upload_init(
     validate_name(&request.name)?;
     let dir_clean = clean_rel(&request.dir)?;
     let (directory, _) = resolve_dir_create(&state, &dir_clean).await?;
+    invalidate_listings(&state);
     let final_path = directory.join(&request.name);
     if tokio::fs::symlink_metadata(&final_path).await.is_ok() {
         return Err(ApiError::conflict("同名文件或文件夹已存在"));
@@ -974,6 +1053,7 @@ pub async fn upload_finish(
         remove_temp(&temp_path).await;
         return Err(ApiError::internal(err.to_string()));
     }
+    invalidate_listings(&state);
     log(&format!(
         "上传完成 user={} path={} size={}",
         session.user, logical_path, size

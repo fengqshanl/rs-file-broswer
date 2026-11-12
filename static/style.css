@@ -1446,3 +1446,239 @@ progress::-moz-progress-bar {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------- list loading, pagination and history ---------- */
+
+.list-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0 20px;
+}
+
+.skeleton-row {
+  height: 56px;
+  border-radius: 12px;
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0.06) 25%,
+    rgba(148, 163, 184, 0.14) 37%,
+    rgba(148, 163, 184, 0.06) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+.list-footer {
+  display: flex;
+  justify-content: center;
+  padding: 16px 0 30px;
+}
+
+.list-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.list-loading.muted {
+  color: var(--faint);
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(148, 163, 184, 0.25);
+  border-top-color: var(--accent);
+  animation: spinner-rotate 0.8s linear infinite;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.load-more {
+  min-width: 160px;
+}
+
+.file-row.highlight {
+  outline: 1px solid rgba(94, 234, 212, 0.55);
+  animation: row-highlight 3s ease;
+}
+
+@keyframes row-highlight {
+  0%,
+  25% {
+    background: rgba(94, 234, 212, 0.22);
+    box-shadow: inset 0 0 0 2px rgba(94, 234, 212, 0.45);
+  }
+  100% {
+    background: rgba(94, 234, 212, 0.05);
+    box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.16);
+  }
+}
+
+.modal.history-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.history-head h2 {
+  margin: 0;
+}
+
+.btn.small {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 54vh;
+  overflow: auto;
+  margin: 8px 0 4px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.history-item:hover {
+  border-color: var(--line-strong);
+  background: rgba(30, 41, 59, 0.65);
+}
+
+.history-icon {
+  display: flex;
+  flex: none;
+  color: var(--accent);
+}
+
+.history-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.history-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.history-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.history-empty {
+  padding: 26px 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ---------- streaming preview status ---------- */
+
+.preview-media-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.preview-stack > .preview-media-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+.preview-media-status {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(8, 13, 24, 0.82);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+}
+
+.preview-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(10, 17, 32, 0.7);
+}
+
+.preview-progress progress {
+  flex: 1;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.preview-progress-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
