@@ -98,10 +98,10 @@
 
 1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/agentgod-files.key`
 2. 公钥内容写入 `desktop/local/tauri.conf.json` 与 `desktop/client/tauri.conf.json` 的 `plugins.updater.pubkey`（仓库中已填好本次生成的公钥）
-3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容）；密钥带密码时再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容，原始文本或 base64 均可）；密钥带密码时再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 4. 推送 `desktop-v*` 标签：工作流在 macOS runner 上执行 `tauri build --target universal-apple-darwin`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.app.tar.gz` / `.sig`，再生成 `latest-local.json` / `latest-client.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
 
-当前仓库已配置该 secret。工作流会先校验私钥格式，再在生成清单前等待 `.sig` 资产可见；若已配置密钥却没产出签名包，发布会直接失败而不是静默降级。未配置该 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 macOS 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
+当前仓库已配置该 secret。工作流会先校验私钥格式，把 base64 内容解码成临时密钥文件后以**文件路径**传给 tauri-cli（CLI 不接受 base64 字符串），再在生成清单前等待 `.sig` 资产可见；若已配置密钥却没产出签名包，发布会直接失败而不是静默降级。未配置该 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 macOS 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
 
 ### 从源码构建桌面端
 

@@ -73,11 +73,12 @@ jobs:
             # A common mistake is pasting the public key or adding quotes.
             # Validate the base64 payload before the builds start.
             if ! node -e "
-              const raw = (process.env.SIGNING_KEY || '').replace(/\s+/g, '');
-              const decoded = Buffer.from(raw, 'base64').toString('utf8');
-              process.exit(decoded.includes('encrypted secret key') ? 0 : 1);
+              const raw = (process.env.SIGNING_KEY || '').trim();
+              const decoded = Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8');
+              const valid = raw.includes('encrypted secret key') || decoded.includes('encrypted secret key');
+              process.exit(valid ? 0 : 1);
             "; then
-              echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是有效的 Tauri 更新签名私钥（应为 rsign encrypted secret key 的 base64 内容），请重新复制 ~/.tauri/agentgod-files.key 的完整内容"
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是有效的 Tauri 更新签名私钥（应为 ~/.tauri/agentgod-files.key 的原始内容或 base64），请重新复制"
               exit 1
             fi
             echo "enabled=true" >> "$GITHUB_OUTPUT"
@@ -86,9 +87,10 @@ jobs:
             echo "::notice::未配置 TAURI_SIGNING_PRIVATE_KEY，本次发布不含应用内热更新包"
           fi
 
-      # tauri-cli reads the raw base64 payload from the environment. A secret
-      # pasted with trailing newlines, or an empty password variable, can make
-      # the bundler fail. Normalize once for all later steps.
+      # tauri-cli accepts the raw key contents or a path to the key file, but
+      # NOT a base64 string. Secrets are often pasted base64-encoded, so decode
+      # when needed and always point the CLI at a real file. An empty password
+      # variable can also break the bundler, so only pass it when set.
       - name: Normalize updater signing env
         if: steps.signing.outputs.enabled == 'true'
         shell: bash
@@ -97,11 +99,19 @@ jobs:
           SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          key="$(node -e "process.stdout.write((process.env.SIGNING_KEY || '').replace(/\s+/g, ''))")"
-          echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
+          key_path="${RUNNER_TEMP}/agentgod-updater.key"
+          KEY_PATH="$key_path" node -e '
+            const fs = require("fs");
+            const raw = (process.env.SIGNING_KEY || "").trim();
+            const decoded = Buffer.from(raw.replace(/\s+/g, ""), "base64").toString("utf8");
+            const content = decoded.includes("encrypted secret key") ? decoded : raw;
+            fs.writeFileSync(process.env.KEY_PATH, `${content.trimEnd()}\n`, { mode: 0o600 });
+          '
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key_path" >> "$GITHUB_ENV"
           if [ -n "${SIGNING_PASSWORD:-}" ]; then
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_PASSWORD" >> "$GITHUB_ENV"
           fi
+          echo "signing key written to $key_path"
 
       # Tauri 2 generates .app.tar.gz / .app.tar.gz.sig when this flag is set
       # and TAURI_SIGNING_PRIVATE_KEY is present. Do NOT pass `--bundles
