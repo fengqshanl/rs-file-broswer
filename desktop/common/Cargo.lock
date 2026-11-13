@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-desktop-common"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "agentgod-files",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",

@@ -138,6 +138,7 @@ async fn ssh_target_supports_the_full_file_api() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("existing")).unwrap();
     std::fs::write(root.path().join("existing/hello.txt"), b"hello from sftp").unwrap();
+    std::fs::write(root.path().join(".hidden.txt"), b"dotfile").unwrap();
 
     let port = start_ssh_server(PASSWORD, root.path().to_path_buf()).await;
     let data_dir = tempfile::tempdir().unwrap();
@@ -203,6 +204,39 @@ async fn ssh_target_supports_the_full_file_api() {
         .map(|entry| entry["name"].as_str().unwrap().to_string())
         .collect();
     assert!(names.contains(&"existing".to_string()), "{names:?}");
+    assert!(!names.contains(&".hidden.txt".to_string()), "{names:?}");
+
+    // Hidden entries appear only when explicitly requested.
+    let hidden: Value = client
+        .call(
+            reqwest::Method::POST,
+            "/api/list",
+            &json!({ "path": "/", "show_hidden": true }),
+        )
+        .await;
+    let hidden_names: Vec<String> = hidden["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        hidden_names.contains(&".hidden.txt".to_string()),
+        "{hidden_names:?}"
+    );
+
+    // Recursive folder size walks the remote tree.
+    let size: Value = client
+        .call(
+            reqwest::Method::POST,
+            "/api/folder_size",
+            &json!({ "path": "/existing" }),
+        )
+        .await;
+    assert_eq!(size["size"], 15);
+    assert_eq!(size["files"], 1);
+    assert_eq!(size["dirs"], 0);
+    assert_eq!(size["truncated"], false);
 
     // mkdir + upload in multiple chunks.
     let mkdir: Value = client

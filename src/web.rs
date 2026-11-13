@@ -35,6 +35,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/logout", post(auth::logout))
         .route("/api/account/update", post(auth::update_credentials))
         .route("/api/list", post(files::list))
+        .route("/api/folder_size", post(files::folder_size))
         .route("/api/mkdir", post(files::mkdir))
         .route("/api/ensure_dirs", post(files::ensure_dirs))
         .route("/api/rename", post(files::rename))

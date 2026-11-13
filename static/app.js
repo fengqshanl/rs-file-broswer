@@ -25,6 +25,8 @@ const ICONS = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
   cut:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="7" r="2.5"/><circle cx="6" cy="17" r="2.5"/><path d="m8 8.5 11 5.5"/><path d="m8 15.5 11-5.5"/></svg>',
+  refresh:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>',
 };
 
 const ARCHIVE_END_MARKER = 'AGF_TAR_END_v1';
@@ -32,6 +34,7 @@ const LIST_PAGE_SIZE = 300;
 const ENSURE_DIRS_BATCH = 100;
 const TEXT_STREAM_BYTES = 32 * 1024 * 1024;
 const HISTORY_KEY = 'agentgod.history.v1';
+const SHOW_HIDDEN_KEY = 'agentgod.show-hidden';
 const HISTORY_LIMIT = 300;
 const OFFICE_PREVIEW_BYTES = 64 * 1024 * 1024;
 const IMAGE_PREVIEW_BYTES = 128 * 1024 * 1024;
@@ -59,6 +62,14 @@ function emptyList() {
   return { offset: 0, total: 0, hasMore: false, loading: false };
 }
 
+function readStoredShowHidden() {
+  try {
+    return localStorage.getItem(SHOW_HIDDEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 function makeTab(target) {
   return {
     id: target.id,
@@ -71,6 +82,11 @@ function makeTab(target) {
     navToken: 0,
     pendingHighlight: null,
     selectedPath: null,
+    selectedEntry: null,
+    selectedPaths: new Set(),
+    anchorPath: null,
+    folderSizes: new Map(),
+    folderSizePending: new Map(),
     freeSpace: null,
     loaded: false,
     needsRefresh: false,
@@ -83,6 +99,7 @@ const state = {
   activeTabId: null,
   standaloneTab: null,
   clipboard: null,
+  showHidden: readStoredShowHidden(),
   pageSize: LIST_PAGE_SIZE,
   autoLoadPaging: true,
 };
@@ -186,20 +203,6 @@ function iconNode(name) {
   const element = span('icon');
   element.innerHTML = ICONS[name];
   return element;
-}
-
-function actionButton(name, label, handler, danger = false) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'action-btn' + (danger ? ' danger' : '');
-  button.title = label;
-  button.setAttribute('aria-label', label);
-  button.innerHTML = ICONS[name];
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    handler();
-  });
-  return button;
 }
 
 /* ---------- Encoding helpers ---------- */
@@ -480,6 +483,11 @@ function clearTabSession(tab) {
   tab.navToken += 1;
   tab.pendingHighlight = null;
   tab.selectedPath = null;
+  tab.selectedEntry = null;
+  tab.selectedPaths.clear();
+  tab.anchorPath = null;
+  tab.folderSizes.clear();
+  tab.folderSizePending.clear();
   tab.freeSpace = null;
   tab.loaded = false;
   tab.needsRefresh = false;
@@ -587,6 +595,10 @@ async function loadDir(path, options = {}) {
   tab.needsRefresh = false;
   tab.selectedPath = null;
   tab.selectedEntry = null;
+  tab.selectedPaths.clear();
+  tab.anchorPath = null;
+  tab.folderSizes.clear();
+  tab.folderSizePending.clear();
   const token = tab.navToken;
   const isActive = tab === activeTab();
 
@@ -604,6 +616,7 @@ async function loadDir(path, options = {}) {
         path: target,
         offset: 0,
         limit: state.pageSize,
+        show_hidden: state.showHidden,
       },
       'POST',
       tab,
@@ -668,9 +681,176 @@ function renderBreadcrumbs() {
 }
 
 function visibleEntries() {
+  let entries = state.entries;
+  if (!state.showHidden) {
+    // Newer services filter server-side and flag hidden entries. The name
+    // check keeps dotfiles hidden when talking to an older service.
+    entries = entries.filter(
+      (entry) => !entry.hidden && !entry.name.startsWith('.'),
+    );
+  }
   const filter = state.filter.trim().toLowerCase();
-  if (!filter) return state.entries;
-  return state.entries.filter((entry) => entry.name.toLowerCase().includes(filter));
+  if (!filter) return entries;
+  return entries.filter((entry) => entry.name.toLowerCase().includes(filter));
+}
+
+/* ---------- Folder sizes (lazy, cached per tab) ---------- */
+
+const FOLDER_SIZE_CONCURRENCY = 3;
+const folderSizeQueue = [];
+let folderSizeActive = 0;
+
+function folderSizeLabel(data) {
+  if (data && data.error) return '—';
+  return data && data.truncated
+    ? `≥ ${formatSize(data.size)}`
+    : formatSize(data ? data.size : 0);
+}
+
+function folderSizeTitle(data) {
+  if (data && data.error) return '无法读取文件夹大小';
+  if (!data) return '正在计算文件夹大小…';
+  const parts = [
+    formatSize(data.size),
+    `${Number(data.files) || 0} 个文件`,
+    `${Number(data.dirs) || 0} 个文件夹`,
+  ];
+  if (data.truncated) parts.push('项目过多，结果为下限');
+  return parts.join(' · ');
+}
+
+function queueFolderSize(tab, entry, fullPath) {
+  if (!entry.is_dir || !tab.session) return;
+  if (tab.folderSizes.has(fullPath)) return;
+  if (tab.folderSizePending.get(fullPath) === tab.navToken) return;
+  tab.folderSizePending.set(fullPath, tab.navToken);
+  folderSizeQueue.push({ tab, path: fullPath, token: tab.navToken });
+  pumpFolderSizeQueue();
+}
+
+let folderSizeObserver = null;
+
+/// Only measure folders that actually scroll into view. A directory with
+/// hundreds of subfolders would otherwise start hundreds of recursive walks.
+function observeFolderSize(row, tab, entry, fullPath) {
+  if (!entry.is_dir || !tab.session || tab.folderSizes.has(fullPath)) return;
+  if (typeof IntersectionObserver !== 'function') {
+    queueFolderSize(tab, entry, fullPath);
+    return;
+  }
+  if (!folderSizeObserver) {
+    folderSizeObserver = new IntersectionObserver(
+      (records, observer) => {
+        for (const record of records) {
+          if (!record.isIntersecting) continue;
+          observer.unobserve(record.target);
+          const job = record.target.__folderSizeJob;
+          record.target.__folderSizeJob = null;
+          if (job) queueFolderSize(job.tab, job.entry, job.path);
+        }
+      },
+      { rootMargin: '240px 0px' },
+    );
+  }
+  row.__folderSizeJob = { tab, entry, path: fullPath };
+  folderSizeObserver.observe(row);
+}
+
+function resetFolderSizeObserver() {
+  if (folderSizeObserver) folderSizeObserver.disconnect();
+}
+
+function pumpFolderSizeQueue() {
+  while (folderSizeActive < FOLDER_SIZE_CONCURRENCY && folderSizeQueue.length) {
+    const job = folderSizeQueue.shift();
+    folderSizeActive += 1;
+    void measureFolderSize(job);
+  }
+}
+
+async function measureFolderSize({ tab, path, token }) {
+  try {
+    if (tab.session && tab.navToken === token) {
+      const data = await api('/api/folder_size', { path }, 'POST', tab);
+      if (tab.navToken === token) {
+        tab.folderSizes.set(path, data);
+        updateFolderSizeCell(tab, path);
+      }
+    }
+  } catch {
+    // Unreadable directories keep the dash; the listing itself still works.
+    if (tab.navToken === token) {
+      tab.folderSizes.set(path, { error: true });
+      updateFolderSizeCell(tab, path);
+    }
+  } finally {
+    if (tab.folderSizePending.get(path) === token) {
+      tab.folderSizePending.delete(path);
+    }
+    folderSizeActive = Math.max(0, folderSizeActive - 1);
+    pumpFolderSizeQueue();
+  }
+}
+
+function updateFolderSizeCell(tab, path) {
+  if (tab !== activeTab()) return;
+  const row = findRow(path);
+  if (!row) return;
+  const cell = row.querySelector('.size');
+  const data = tab.folderSizes.get(path);
+  if (!cell || !data) return;
+  cell.textContent = folderSizeLabel(data);
+  cell.title = folderSizeTitle(data);
+}
+
+/* ---------- Selection ---------- */
+
+function entryPath(tab, entry) {
+  return joinPath(tab.cwd, entry.name);
+}
+
+function selectedEntries(tab = activeTab()) {
+  if (!tab.selectedPaths || tab.selectedPaths.size === 0) return [];
+  const selected = [];
+  for (const entry of tab.entries) {
+    if (tab.selectedPaths.has(entryPath(tab, entry))) selected.push(entry);
+  }
+  return selected;
+}
+
+function syncSelection(tab = activeTab()) {
+  for (const row of document.querySelectorAll('#file-list .file-row')) {
+    row.classList.toggle('selected', tab.selectedPaths.has(row.dataset.path));
+  }
+}
+
+function clearSelection(tab = activeTab()) {
+  tab.selectedPaths.clear();
+  tab.selectedPath = null;
+  tab.selectedEntry = null;
+  tab.anchorPath = null;
+  syncSelection(tab);
+}
+
+function selectAllEntries(tab = activeTab()) {
+  const visible = visibleEntries();
+  tab.selectedPaths.clear();
+  for (const entry of visible) {
+    tab.selectedPaths.add(entryPath(tab, entry));
+  }
+  const last = visible[visible.length - 1];
+  tab.anchorPath = last ? entryPath(tab, last) : null;
+  tab.selectedPath = last ? entryPath(tab, last) : null;
+  tab.selectedEntry = last || null;
+  syncSelection(tab);
+}
+
+function openEntry(entry, tab = activeTab()) {
+  if (!entry) return;
+  const fullPath = entryPath(tab, entry);
+  if (entry.is_dir) return loadDir(fullPath, { tab });
+  if (previewKindOf(entry.name) !== 'none') return openPreview(entry, tab);
+  return startDownload(fullPath, entry.name, tab);
 }
 
 function showListSkeleton(show) {
@@ -692,6 +872,7 @@ function showListSkeleton(show) {
 
 function renderFiles() {
   const list = $('#file-list');
+  resetFolderSizeObserver();
   list.replaceChildren();
   const visible = visibleEntries();
   const hasEntries = visible.length > 0;
@@ -792,6 +973,7 @@ async function loadMore(tab = activeTab()) {
         path: tab.cwd,
         offset: tab.list.offset,
         limit: state.pageSize,
+        show_hidden: state.showHidden,
       },
       'POST',
       tab,
@@ -847,12 +1029,31 @@ function flashRow(row) {
 function renderRow(entry, tab = activeTab()) {
   const row = div('file-row');
   row.setAttribute('role', 'listitem');
-  const fullPath = joinPath(tab.cwd, entry.name);
+  const fullPath = entryPath(tab, entry);
   row.dataset.path = fullPath;
-  if (tab.selectedPath === fullPath) row.classList.add('selected');
+  if (entry.hidden) row.classList.add('hidden-entry');
+  if (tab.selectedPaths.has(fullPath)) row.classList.add('selected');
   row.addEventListener('click', (event) => {
-    if (event.target.closest('button, a, input, .previewable')) return;
-    selectRow(row, entry, tab);
+    const modified = event.metaKey || event.ctrlKey || event.shiftKey;
+    if (
+      !modified &&
+      event.target.closest('button, a, input, .previewable')
+    ) {
+      return;
+    }
+    selectRow(row, entry, tab, event);
+  });
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    if (!tab.selectedPaths.has(fullPath)) {
+      tab.selectedPaths.clear();
+      tab.selectedPaths.add(fullPath);
+      tab.anchorPath = fullPath;
+      tab.selectedPath = fullPath;
+      tab.selectedEntry = entry;
+      syncSelection(tab);
+    }
+    openRowContextMenu(event.clientX, event.clientY, tab);
   });
 
   const nameCell = div('cell name-cell');
@@ -863,9 +1064,10 @@ function renderRow(entry, tab = activeTab()) {
   if (entry.is_dir) {
     const nameButton = buttonEl(entry.name, 'name-btn');
     nameButton.title = entry.name;
-    nameButton.addEventListener('click', () =>
-      loadDir(joinPath(tab.cwd, entry.name), { tab }),
-    );
+    nameButton.addEventListener('click', (event) => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+      loadDir(joinPath(tab.cwd, entry.name), { tab });
+    });
     nameCell.append(nameButton);
   } else {
     const name = span('file-name');
@@ -873,7 +1075,10 @@ function renderRow(entry, tab = activeTab()) {
     name.title = entry.name;
     if (previewKindOf(entry.name) !== 'none') {
       name.classList.add('previewable');
-      name.addEventListener('click', () => openPreview(entry, tab));
+      name.addEventListener('click', (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+        openPreview(entry, tab);
+      });
     }
     nameCell.append(name);
   }
@@ -884,48 +1089,74 @@ function renderRow(entry, tab = activeTab()) {
   }
 
   const sizeCell = div('cell size');
-  sizeCell.textContent = entry.is_dir ? '—' : formatSize(entry.size);
+  if (entry.is_dir) {
+    const cached = tab.folderSizes.get(fullPath);
+    sizeCell.textContent = cached ? folderSizeLabel(cached) : '—';
+    sizeCell.title = cached ? folderSizeTitle(cached) : '正在计算文件夹大小…';
+    observeFolderSize(row, tab, entry, fullPath);
+  } else {
+    sizeCell.textContent = formatSize(entry.size);
+  }
 
   const timeCell = div('cell time');
   timeCell.textContent = formatDate(entry.modified);
 
-  const actions = div('cell actions');
-  if (entry.is_dir) {
-    actions.append(
-      actionButton('download', '下载文件夹 (.tar)', () =>
-        startFolderDownload(fullPath, entry.name, tab),
-      ),
-    );
-  } else {
-    if (previewKindOf(entry.name) !== 'none') {
-      actions.append(
-        actionButton('eye', '预览', () => openPreview(entry, tab)),
-      );
-    }
-    actions.append(
-      actionButton('download', '下载', () =>
-        startDownload(fullPath, entry.name, tab),
-      ),
-    );
-  }
-  actions.append(
-    actionButton('copy', '复制', () => copyEntry(entry, false, tab)),
-    actionButton('cut', '剪切', () => copyEntry(entry, true, tab)),
-    actionButton('edit', '重命名', () => renameEntry(entry, tab)),
-    actionButton('trash', '删除', () => deleteEntry(entry, tab), true),
-  );
-
-  row.append(nameCell, sizeCell, timeCell, actions);
+  row.append(nameCell, sizeCell, timeCell);
   return row;
 }
 
-function selectRow(row, entry, tab) {
-  for (const other of document.querySelectorAll('#file-list .file-row.selected')) {
-    other.classList.remove('selected');
+function selectRow(row, entry, tab, event = null) {
+  const path = row.dataset.path;
+  const toggle = Boolean(event && (event.metaKey || event.ctrlKey));
+  const range = Boolean(event && event.shiftKey && tab.anchorPath);
+
+  if (range) {
+    const visible = visibleEntries();
+    const anchorIndex = visible.findIndex(
+      (item) => entryPath(tab, item) === tab.anchorPath,
+    );
+    const currentIndex = visible.findIndex(
+      (item) => entryPath(tab, item) === path,
+    );
+    if (anchorIndex >= 0 && currentIndex >= 0) {
+      tab.selectedPaths.clear();
+      const start = Math.min(anchorIndex, currentIndex);
+      const end = Math.max(anchorIndex, currentIndex);
+      for (let index = start; index <= end; index += 1) {
+        tab.selectedPaths.add(entryPath(tab, visible[index]));
+      }
+      tab.selectedPath = path;
+      tab.selectedEntry = entry;
+      syncSelection(tab);
+      return;
+    }
   }
-  row.classList.add('selected');
-  tab.selectedPath = row.dataset.path;
+
+  if (toggle) {
+    if (tab.selectedPaths.has(path)) {
+      tab.selectedPaths.delete(path);
+      if (tab.selectedPath === path) {
+        const remaining = selectedEntries(tab);
+        const last = remaining[remaining.length - 1] || null;
+        tab.selectedPath = last ? entryPath(tab, last) : null;
+        tab.selectedEntry = last;
+      }
+    } else {
+      tab.selectedPaths.add(path);
+      tab.selectedPath = path;
+      tab.selectedEntry = entry;
+    }
+    tab.anchorPath = path;
+    syncSelection(tab);
+    return;
+  }
+
+  tab.selectedPaths.clear();
+  tab.selectedPaths.add(path);
+  tab.anchorPath = path;
+  tab.selectedPath = path;
   tab.selectedEntry = entry;
+  syncSelection(tab);
 }
 
 /* ---------- File operations ---------- */
@@ -956,27 +1187,37 @@ async function renameEntry(entry, tab = activeTab()) {
   }
 }
 
-async function deleteEntry(entry, tab = activeTab()) {
+async function deleteEntries(entries, tab = activeTab()) {
+  if (!entries.length) return;
   const cwd = tab.cwd;
-  const detail = entry.is_dir
-    ? '该文件夹及其中的全部内容都会被删除，此操作不可恢复。'
-    : '此操作不可恢复。';
+  const multiple = entries.length > 1;
   const confirmed = await confirmDialog({
-    title: `删除「${entry.name}」？`,
-    message: detail,
+    title: multiple ? `删除 ${entries.length} 个项目？` : `删除「${entries[0].name}」？`,
+    message: entries.some((entry) => entry.is_dir)
+      ? '选中的文件夹及其中的全部内容都会被删除，此操作不可恢复。'
+      : '此操作不可恢复。',
   });
   if (!confirmed) return;
   try {
-    await api('/api/delete', { path: joinPath(cwd, entry.name) }, 'POST', tab);
-    if (tab.selectedPath === joinPath(cwd, entry.name)) {
-      tab.selectedPath = null;
-      tab.selectedEntry = null;
+    for (const entry of entries) {
+      await api(
+        '/api/delete',
+        { path: joinPath(cwd, entry.name) },
+        'POST',
+        tab,
+      );
     }
-    toast('已删除', 'success');
+    clearSelection(tab);
+    toast(multiple ? `已删除 ${entries.length} 项` : '已删除', 'success');
     await loadDir(cwd, { tab });
   } catch (error) {
     toast(error.message || '删除失败', 'error');
+    await loadDir(cwd, { tab });
   }
+}
+
+function deleteEntry(entry, tab = activeTab()) {
+  return deleteEntries([entry], tab);
 }
 
 async function createFolder() {
@@ -1002,38 +1243,58 @@ async function createFolder() {
 
 const COPY_CHUNK = 2 * 1024 * 1024;
 
+function clipboardItems() {
+  const clipboard = state.clipboard;
+  return clipboard && Array.isArray(clipboard.items) ? clipboard.items : [];
+}
+
 function updatePasteButton() {
   const button = $('#btn-paste');
   if (!button) return;
   const clipboard = state.clipboard;
+  const items = clipboardItems();
   const tab = activeTab();
-  button.disabled = !clipboard || !tab.session;
+  button.disabled = items.length === 0 || !tab.session;
   const label = button.querySelector('.btn-label');
-  if (label) label.textContent = clipboard?.cut ? '移动' : '粘贴';
-  button.title = clipboard
-    ? `${clipboard.cut ? '移动' : '复制'}「${clipboard.name}」到当前目录`
-    : '先复制或剪切一个文件/文件夹';
+  const verb = clipboard?.cut ? '移动' : '粘贴';
+  if (label) {
+    label.textContent =
+      items.length > 1 ? `${verb} (${items.length})` : verb;
+  }
+  button.title = items.length
+    ? `${clipboard.cut ? '移动' : '复制'} ${items.length} 项到当前目录`
+    : '先复制或剪切文件/文件夹';
 }
 
-function copyEntry(entry, cut = false, tab = activeTab()) {
+function copyEntries(entries, cut = false, tab = activeTab()) {
   if (!tab.session) {
     toast('请先登录当前标签', 'error');
     return;
   }
+  if (!entries.length) return;
   state.clipboard = {
     tabId: tab.id,
-    path: joinPath(tab.cwd, entry.name),
-    name: entry.name,
-    isDir: entry.is_dir,
+    items: entries.map((entry) => ({
+      path: joinPath(tab.cwd, entry.name),
+      name: entry.name,
+      isDir: entry.is_dir,
+    })),
     cut: Boolean(cut),
   };
   updatePasteButton();
+  const count = state.clipboard.items.length;
   toast(
-    cut
-      ? `已剪切「${entry.name}」，切换到目标标签后点击“移动”`
-      : `已复制「${entry.name}」，切换到目标标签后点击“粘贴”`,
+    count === 1
+      ? cut
+        ? `已剪切「${entries[0].name}」，切换到目标标签后点击“移动”`
+        : `已复制「${entries[0].name}」，切换到目标标签后点击“粘贴”`
+      : `已${cut ? '剪切' : '复制'} ${count} 项`,
     'success',
   );
+}
+
+function copyEntry(entry, cut = false, tab = activeTab()) {
+  copyEntries([entry], cut, tab);
 }
 
 function addTransferItem(label, total, detail) {
@@ -1081,7 +1342,7 @@ async function listAllEntries(tab, path) {
   while (true) {
     const data = await api(
       '/api/list',
-      { path, offset, limit: 1000 },
+      { path, offset, limit: 1000, show_hidden: true },
       'POST',
       tab,
     );
@@ -1348,7 +1609,8 @@ function refreshTab(tab) {
 
 async function pasteClipboard() {
   const clipboard = state.clipboard;
-  if (!clipboard) return;
+  const items = clipboardItems();
+  if (!clipboard || !items.length) return;
   const sourceTab =
     clipboard.tabId === 'standalone'
       ? state.standaloneTab
@@ -1365,106 +1627,128 @@ async function pasteClipboard() {
     return;
   }
 
-  const sourcePath = normalizeRelPath(clipboard.path);
   const destPath = normalizeRelPath(destTab.cwd);
-  if (sourceTab.id === destTab.id && clipboard.isDir) {
-    if (
-      destPath === sourcePath ||
-      destPath.startsWith(`${sourcePath}/`)
-    ) {
-      toast('不能把文件夹复制到自身内部', 'error');
-      return;
-    }
-  }
-  if (
-    sourceTab.id === destTab.id &&
-    clipboard.cut &&
-    parentOf(clipboard.path) === destTab.cwd
-  ) {
-    toast('源文件夹和目标文件夹相同', 'info');
-    return;
-  }
-
+  const verb = clipboard.cut ? '移动' : '复制';
   const progress = addTransferItem(
-    `${clipboard.cut ? '移动' : '复制'}「${clipboard.name}」`,
-    0,
+    `${verb} ${items.length} 项`,
+    items.length,
     `${targetLabel(sourceTab.target)} → ${targetLabel(destTab.target)}`,
   );
+  const copied = [];
+  let skipped = 0;
   try {
     const existing = (await listAllEntries(destTab, destTab.cwd)).map(
       (entry) => entry.name,
     );
-    const destName = uniqueName(clipboard.name, clipboard.isDir, existing);
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      const sourcePath = normalizeRelPath(item.path);
+      if (!sourcePath) {
+        skipped += 1;
+        continue;
+      }
+      if (
+        sourceTab.id === destTab.id &&
+        item.isDir &&
+        (destPath === sourcePath || destPath.startsWith(`${sourcePath}/`))
+      ) {
+        skipped += 1;
+        toast(`不能把「${item.name}」复制到自身内部`, 'error');
+        continue;
+      }
+      if (
+        sourceTab.id === destTab.id &&
+        clipboard.cut &&
+        parentOf(item.path) === destTab.cwd
+      ) {
+        skipped += 1;
+        continue;
+      }
 
-    if (clipboard.isDir) {
-      progress.update(0, 0, '正在扫描文件夹…');
-      const tree = await collectTree(sourceTab, clipboard.path, (scanned) => {
-        progress.update(0, 0, `正在扫描 · ${scanned} 项`);
-      });
-      const destRoot = joinPath(destTab.cwd, destName);
-      const allDirs = [
-        destRoot,
-        ...tree.dirs.map((relative) => joinPath(destRoot, relative)),
-      ];
-      await ensureDirsInTab(destTab, allDirs);
-      const totalBytes = tree.files.reduce((sum, file) => sum + file.size, 0);
-      let copied = 0;
-      for (const file of tree.files) {
-        const relativeDir = dirnameOf(file.relative);
-        const destDir = relativeDir
-          ? joinPath(destRoot, relativeDir)
-          : destRoot;
-        const name = file.relative.slice(file.relative.lastIndexOf('/') + 1);
-        progress.update(
-          copied,
-          totalBytes,
-          `${file.relative} · ${formatSize(copied)} / ${formatSize(totalBytes)}`,
+      const destName = uniqueName(item.name, item.isDir, existing);
+      existing.push(destName);
+      progress.update(index, items.length, `正在处理「${item.name}」…`);
+
+      if (item.isDir) {
+        const tree = await collectTree(sourceTab, item.path, (scanned) => {
+          progress.update(
+            index,
+            items.length,
+            `${item.name} · 已扫描 ${scanned} 项`,
+          );
+        });
+        const destRoot = joinPath(destTab.cwd, destName);
+        const allDirs = [
+          destRoot,
+          ...tree.dirs.map((relative) => joinPath(destRoot, relative)),
+        ];
+        await ensureDirsInTab(destTab, allDirs);
+        const totalBytes = tree.files.reduce(
+          (sum, file) => sum + file.size,
+          0,
         );
+        let copiedBytes = 0;
+        for (const file of tree.files) {
+          const relativeDir = dirnameOf(file.relative);
+          const fileDestDir = relativeDir
+            ? joinPath(destRoot, relativeDir)
+            : destRoot;
+          const name = file.relative.slice(
+            file.relative.lastIndexOf('/') + 1,
+          );
+          await copyFileAcrossTabs(
+            sourceTab,
+            file.path,
+            destTab,
+            fileDestDir,
+            name,
+            (received) => {
+              progress.update(
+                index,
+                items.length,
+                `${item.name}/${file.relative} · ${formatSize(
+                  copiedBytes + received,
+                )} / ${formatSize(totalBytes)}`,
+              );
+            },
+          );
+          copiedBytes += file.size;
+        }
+      } else {
         await copyFileAcrossTabs(
           sourceTab,
-          file.path,
+          item.path,
           destTab,
-          destDir,
-          name,
-          (received) => {
-            const overall = Math.min(totalBytes, copied + received);
+          destTab.cwd,
+          destName,
+          (received, total) => {
             progress.update(
-              overall,
-              totalBytes,
-              `${file.relative} · ${formatSize(overall)} / ${formatSize(totalBytes)}`,
+              index,
+              items.length,
+              `${item.name} · ${formatSize(received)} / ${formatSize(total)}`,
             );
           },
         );
-        copied += file.size;
       }
-      progress.done(
-        `已${clipboard.cut ? '移动' : '复制'} ${tree.files.length} 个文件`,
-      );
-    } else {
-      await copyFileAcrossTabs(
-        sourceTab,
-        clipboard.path,
-        destTab,
-        destTab.cwd,
-        destName,
-        (received, total) => progress.update(received, total),
-      );
-      progress.done(`已${clipboard.cut ? '移动' : '复制'} ${destName}`);
+      copied.push(item);
     }
 
-    if (clipboard.cut) {
-      await api(
-        '/api/delete',
-        { path: clipboard.path },
-        'POST',
-        sourceTab,
-      );
+    if (clipboard.cut && copied.length) {
+      for (const item of copied) {
+        await api('/api/delete', { path: item.path }, 'POST', sourceTab);
+      }
       state.clipboard = null;
       updatePasteButton();
-      refreshTab(sourceTab);
     }
+    progress.done(
+      `已${verb} ${copied.length} 项${skipped ? `，跳过 ${skipped} 项` : ''}`,
+    );
     refreshTab(destTab);
-    toast(clipboard.cut ? '移动完成' : '粘贴完成', 'success');
+    if (sourceTab !== destTab) refreshTab(sourceTab);
+    toast(
+      `${verb}完成${skipped ? `（跳过 ${skipped} 项）` : ''}`,
+      'success',
+    );
   } catch (error) {
     const message = error.message || '粘贴失败';
     progress.fail(message);
@@ -1474,15 +1758,16 @@ async function pasteClipboard() {
 
 function handleFileShortcuts(event) {
   if (event.defaultPrevented) return;
-  if (!(event.metaKey || event.ctrlKey)) return;
-  if (event.altKey || event.shiftKey) return;
   const target = event.target;
   const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
   if (
     tag === 'input' ||
     tag === 'textarea' ||
     tag === 'select' ||
-    (target && target.isContentEditable)
+    (target && target.isContentEditable) ||
+    (target &&
+      typeof target.closest === 'function' &&
+      target.closest('button, a, input, textarea, select'))
   ) {
     return;
   }
@@ -1490,16 +1775,223 @@ function handleFileShortcuts(event) {
   if (modal && modal.open) return;
   const overlay = $('#server-overlay');
   if (overlay && !overlay.hidden) return;
-  const key = event.key.toLowerCase();
-  if ((key === 'c' || key === 'x') && activeTab().selectedEntry) {
-    event.preventDefault();
-    copyEntry(activeTab().selectedEntry, key === 'x');
+  const hostkey = $('#hostkey-overlay');
+  if (hostkey && !hostkey.hidden) return;
+  const menu = $('#context-menu');
+  if (menu && !menu.hidden) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeContextMenu();
+    }
     return;
   }
-  if (key === 'v' && state.clipboard) {
+
+  const tab = activeTab();
+  if (!tab.session) return;
+
+  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    const entries = selectedEntries(tab);
+    if (!entries.length) return;
     event.preventDefault();
-    void pasteClipboard();
+    const row = findRow(tab.selectedPath);
+    const rect = row
+      ? row.getBoundingClientRect()
+      : { left: 16, top: 120, bottom: 120 };
+    openRowContextMenu(rect.left + 24, rect.bottom, tab);
+    return;
   }
+
+  const key = event.key.toLowerCase();
+  const mod = event.metaKey || event.ctrlKey;
+  if (mod && !event.altKey && !event.shiftKey) {
+    if (key === 'a') {
+      event.preventDefault();
+      selectAllEntries(tab);
+      return;
+    }
+    if (key === 'c' || key === 'x') {
+      const entries = selectedEntries(tab);
+      if (!entries.length) return;
+      event.preventDefault();
+      copyEntries(entries, key === 'x', tab);
+      return;
+    }
+    if (key === 'v') {
+      if (!clipboardItems().length) return;
+      event.preventDefault();
+      void pasteClipboard();
+    }
+    return;
+  }
+
+  if (event.altKey || event.metaKey || event.ctrlKey) return;
+
+  if (key === 'f2') {
+    const entries = selectedEntries(tab);
+    if (entries.length === 1) {
+      event.preventDefault();
+      void renameEntry(entries[0], tab);
+    }
+    return;
+  }
+  if (event.key === 'Delete') {
+    const entries = selectedEntries(tab);
+    if (!entries.length) return;
+    event.preventDefault();
+    void deleteEntries(entries, tab);
+    return;
+  }
+  if (event.key === 'Enter') {
+    const entries = selectedEntries(tab);
+    if (entries.length === 1) {
+      event.preventDefault();
+      void openEntry(entries[0], tab);
+    }
+    return;
+  }
+  if (event.key === 'Escape') {
+    if (tab.selectedPaths.size) {
+      event.preventDefault();
+      clearSelection(tab);
+    }
+    return;
+  }
+  if (event.key === 'F5') {
+    event.preventDefault();
+    void loadDir(tab.cwd, { tab });
+  }
+}
+
+/* ---------- Right-click menu ---------- */
+
+function menuButton(icon, label, handler, options = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'context-item' + (options.danger ? ' danger' : '');
+  button.setAttribute('role', 'menuitem');
+  button.disabled = Boolean(options.disabled);
+  button.append(icon ? iconNode(icon) : span('icon'));
+  const text = span('menu-label');
+  text.textContent = label;
+  button.append(text);
+  if (options.shortcut) {
+    const hint = span('menu-shortcut');
+    hint.textContent = options.shortcut;
+    button.append(hint);
+  }
+  button.addEventListener('click', () => {
+    closeContextMenu();
+    handler();
+  });
+  return button;
+}
+
+function menuSeparator() {
+  return div('context-sep');
+}
+
+function closeContextMenu() {
+  const menu = $('#context-menu');
+  if (!menu) return;
+  menu.hidden = true;
+  menu.replaceChildren();
+}
+
+function showContextMenuAt(menu, x, y) {
+  menu.hidden = false;
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function openRowContextMenu(x, y, tab = activeTab()) {
+  const menu = $('#context-menu');
+  if (!menu) return;
+  const entries = selectedEntries(tab);
+  if (!entries.length) return;
+  menu.replaceChildren();
+  const single = entries.length === 1 ? entries[0] : null;
+
+  if (single) {
+    const fullPath = entryPath(tab, single);
+    menu.append(menuButton('eye', '打开', () => void openEntry(single, tab)));
+    if (single.is_dir) {
+      menu.append(
+        menuButton('download', '下载文件夹 (.tar)', () =>
+          startFolderDownload(fullPath, single.name, tab),
+        ),
+      );
+    } else {
+      if (previewKindOf(single.name) !== 'none') {
+        menu.append(
+          menuButton('eye', '预览', () => openPreview(single, tab)),
+        );
+      }
+      menu.append(
+        menuButton('download', '下载', () =>
+          startDownload(fullPath, single.name, tab),
+        ),
+      );
+    }
+    menu.append(menuSeparator());
+  }
+
+  const count = entries.length;
+  const suffix = count > 1 ? ` ${count} 项` : '';
+  menu.append(
+    menuButton('copy', `复制${suffix}`, () => copyEntries(entries, false, tab), {
+      shortcut: 'Ctrl+C',
+    }),
+    menuButton('cut', `剪切${suffix}`, () => copyEntries(entries, true, tab), {
+      shortcut: 'Ctrl+X',
+    }),
+  );
+
+  if (single) {
+    menu.append(menuSeparator());
+    menu.append(
+      menuButton('edit', '重命名', () => void renameEntry(single, tab), {
+        shortcut: 'F2',
+      }),
+    );
+  } else {
+    menu.append(menuSeparator());
+  }
+  menu.append(
+    menuButton(
+      'trash',
+      count > 1 ? `删除 ${count} 项` : '删除',
+      () => void deleteEntries(entries, tab),
+      { shortcut: 'Delete', danger: true },
+    ),
+  );
+  showContextMenuAt(menu, x, y);
+}
+
+function openBackgroundContextMenu(x, y, tab = activeTab()) {
+  const menu = $('#context-menu');
+  if (!menu) return;
+  clearSelection(tab);
+  menu.replaceChildren();
+  menu.append(
+    menuButton('folder', '新建文件夹', () => void createFolder()),
+    menuButton('copy', '粘贴', () => void pasteClipboard(), {
+      shortcut: 'Ctrl+V',
+      disabled: clipboardItems().length === 0,
+    }),
+    menuSeparator(),
+    menuButton(null, '全选', () => selectAllEntries(tab), {
+      shortcut: 'Ctrl+A',
+    }),
+    menuButton('refresh', '刷新', () => void loadDir(tab.cwd, { tab }), {
+      shortcut: 'F5',
+    }),
+  );
+  showContextMenuAt(menu, x, y);
 }
 
 /* ---------- Download ---------- */
@@ -3325,7 +3817,6 @@ async function jumpToHistory(item) {
 function showAppView() {
   $('#login-view').hidden = true;
   $('#app-view').hidden = false;
-  $('#app-bar').hidden = !state.app;
 }
 
 function showTabLogin(tab, message = '') {
@@ -3460,7 +3951,6 @@ function updateTabChrome(tab) {
       : 'SSH 加密通道直连服务器，文件不经过第三方'
     : '会话密钥仅保存在本页内存，刷新后需重新登录';
   $('#local-root-wrap').hidden = !passwordless;
-  $('#app-bar').hidden = !state.app;
   renderRootSelect();
 }
 
@@ -3588,6 +4078,10 @@ async function boot() {
   }
 }
 
+function rootOptionLabel(value) {
+  return String(value || '').replace(/^\\\\\?\\/, '');
+}
+
 function renderRootSelect() {
   const info = state.app;
   const wrap = $('#local-root-wrap');
@@ -3610,7 +4104,7 @@ function renderRootSelect() {
   for (const root of roots) {
     const option = document.createElement('option');
     option.value = root.path;
-    option.textContent = root.name;
+    option.textContent = rootOptionLabel(root.name || root.path);
     if (root.path === current) {
       option.selected = true;
       matched = true;
@@ -3620,7 +4114,7 @@ function renderRootSelect() {
   if (!matched && current) {
     const option = document.createElement('option');
     option.value = current;
-    option.textContent = current;
+    option.textContent = rootOptionLabel(current);
     option.selected = true;
     select.append(option);
   }
@@ -4223,8 +4717,20 @@ function bindEvents() {
   $('#btn-refresh').addEventListener('click', () => loadDir(state.cwd));
   $('#btn-history').addEventListener('click', openHistoryDialog);
   $('#btn-add-server').addEventListener('click', openServersDialog);
-  $('#btn-servers').addEventListener('click', openServersDialog);
   $('#btn-paste').addEventListener('click', () => void pasteClipboard());
+  $('#toggle-hidden').checked = state.showHidden;
+  $('#toggle-hidden').addEventListener('change', (event) => {
+    state.showHidden = event.target.checked;
+    try {
+      localStorage.setItem(SHOW_HIDDEN_KEY, state.showHidden ? '1' : '0');
+    } catch {
+      /* storage can be unavailable in a hardened webview */
+    }
+    const tab = activeTab();
+    if (tab.session) {
+      void loadDir(tab.cwd, { tab, skipHistory: true });
+    }
+  });
   $('#server-overlay').addEventListener('click', (event) => {
     if (event.target.closest('[data-server-close]')) closeServerPanel();
   });
@@ -4233,6 +4739,31 @@ function bindEvents() {
     const overlay = $('#server-overlay');
     if (overlay && !overlay.hidden) closeServerPanel();
   });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest || !event.target.closest('#context-menu')) {
+      closeContextMenu();
+    }
+  });
+  $('#context-menu').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeContextMenu();
+    }
+  });
+  window.addEventListener('blur', closeContextMenu);
+  window.addEventListener('resize', closeContextMenu);
+  document.addEventListener('scroll', closeContextMenu, true);
+  for (const selector of ['#file-list', '#empty-state']) {
+    const area = $(selector);
+    if (!area) continue;
+    area.addEventListener('contextmenu', (event) => {
+      if (event.target.closest('#file-list .file-row')) return;
+      const tab = activeTab();
+      if (!tab.session) return;
+      event.preventDefault();
+      openBackgroundContextMenu(event.clientX, event.clientY, tab);
+    });
+  }
   $('#root-select').addEventListener('change', async (event) => {
     const path = event.target.value;
     const tab = activeTab();
@@ -4403,7 +4934,11 @@ async function checkForAppUpdate(force = false) {
   if (!state.app || !state.app.mode || updateCheckBusy) return;
   updateCheckBusy = true;
   const button = $('#btn-check-update');
+  const label = $('#update-check-label');
+  const spinner = $('#update-check-spinner');
   if (button) button.disabled = true;
+  if (label) label.textContent = '检查中…';
+  if (spinner) spinner.hidden = false;
   try {
     const info = await updateRequest(
       `/app/update/check${force ? '?force=1' : ''}`,
@@ -4426,6 +4961,8 @@ async function checkForAppUpdate(force = false) {
   } finally {
     updateCheckBusy = false;
     if (button) button.disabled = false;
+    if (label) label.textContent = '检查更新';
+    if (spinner) spinner.hidden = true;
   }
 }
 

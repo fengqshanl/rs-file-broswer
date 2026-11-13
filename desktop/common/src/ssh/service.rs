@@ -61,6 +61,13 @@ const UPLOAD_CHUNK_MAX: usize = 4 * 1024 * 1024;
 const CHUNK_BODY_LIMIT: usize = 4 + 12 + UPLOAD_CHUNK_MAX + 16 + 64;
 const LIST_PAGE_LIMIT: usize = 1_000;
 const LISTING_TTL: Duration = Duration::from_secs(15);
+const FOLDER_SIZE_TTL: Duration = Duration::from_secs(60);
+/// SFTP round-trips are slow, so the remote walk stops earlier than the local
+/// one; the UI marks truncated results with "≥".
+const FOLDER_SIZE_ENTRIES: usize = 5_000;
+const FOLDER_SIZE_DEPTH: usize = 64;
+const FOLDER_SIZE_BUDGET: Duration = Duration::from_secs(5);
+const MAX_CACHED_FOLDER_SIZES: usize = 128;
 const MAX_ACTIVE_UPLOADS: usize = 32;
 const MAX_ENSURE_DIRS: usize = 1_024;
 const ARCHIVE_CHUNK: usize = 64 * 1024;
@@ -76,11 +83,21 @@ struct CachedListing {
     built_at: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct CachedFolderSize {
+    size: u64,
+    files: u64,
+    dirs: u64,
+    truncated: bool,
+    built_at: Instant,
+}
+
 #[derive(Clone, Serialize)]
 struct Entry {
     name: String,
     is_dir: bool,
     is_symlink: bool,
+    hidden: bool,
     size: u64,
     modified: u64,
 }
@@ -108,6 +125,7 @@ pub struct SshState {
     root: RwLock<String>,
     home: RwLock<String>,
     listings: DashMap<String, CachedListing>,
+    folder_sizes: DashMap<String, CachedFolderSize>,
     uploads: DashMap<String, Arc<UploadSession>>,
     upload_sem: Arc<Semaphore>,
     download_sem: Arc<Semaphore>,
@@ -139,6 +157,7 @@ impl SshState {
             root: RwLock::new("/".to_string()),
             home: RwLock::new("/".to_string()),
             listings: DashMap::new(),
+            folder_sizes: DashMap::new(),
             uploads: DashMap::new(),
             upload_sem: Arc::new(Semaphore::new(2)),
             download_sem: Arc::new(Semaphore::new(2)),
@@ -172,10 +191,12 @@ impl SshState {
     fn set_root(&self, root: String) {
         *self.root.write().expect("root lock") = root;
         self.listings.clear();
+        self.folder_sizes.clear();
     }
 
     fn invalidate_listings(&self) {
         self.listings.clear();
+        self.folder_sizes.clear();
     }
 
     /// Connects on demand. The lock is held across the handshake so concurrent
@@ -318,6 +339,7 @@ pub fn router(state: Arc<SshState>) -> Router {
         .route("/app/ssh/forget", post(forget_host_key))
         .route("/api/local-login", get(local_login))
         .route("/api/list", post(list))
+        .route("/api/folder_size", post(folder_size))
         .route("/api/mkdir", post(mkdir))
         .route("/api/ensure_dirs", post(ensure_dirs))
         .route("/api/rename", post(rename))
@@ -607,6 +629,8 @@ struct ListRequest {
     offset: usize,
     #[serde(default = "default_page_size")]
     limit: usize,
+    #[serde(default)]
+    show_hidden: bool,
 }
 
 fn default_page_size() -> usize {
@@ -631,6 +655,12 @@ struct DeleteRequest {
 
 #[derive(Deserialize)]
 struct DownloadRequest {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct FolderSizeRequest {
+    #[serde(default)]
     path: String,
 }
 
@@ -663,11 +693,18 @@ async fn list(
     let fs = state.fs().await?;
     let clean = clean_rel(&request.path).map_err(map_fs)?;
     let (entries, truncated) = load_listing(&state, &fs, &clean).await?;
-    let total = entries.len();
+    let visible: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| request.show_hidden || !entry.hidden)
+        .collect();
+    let total = visible.len();
     let limit = request.limit.clamp(1, LIST_PAGE_LIMIT);
     let start = request.offset.min(total);
     let end = start.saturating_add(limit).min(total);
-    let page = entries[start..end].to_vec();
+    let page: Vec<Entry> = visible[start..end]
+        .iter()
+        .map(|entry| (*entry).clone())
+        .collect();
     let free_space = fs.available_space(&clean).await;
     let logical = if clean.is_empty() {
         "/".to_string()
@@ -709,6 +746,7 @@ async fn load_listing(
                 name: entry.name,
                 is_dir: entry.is_dir,
                 is_symlink: entry.is_symlink,
+                hidden: entry.hidden,
                 size: entry.size,
                 modified: entry.modified,
             })
@@ -723,6 +761,113 @@ async fn load_listing(
         },
     );
     Ok((entries, truncated))
+}
+
+async fn folder_size(
+    State(state): State<Arc<SshState>>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let session = state.auth_session();
+    let aad = crypto::request_aad(&method, &uri);
+    let request: FolderSizeRequest = read_encrypted(&session, &aad, body).await?;
+    let fs = state.fs().await?;
+    let clean = clean_rel(&request.path).map_err(map_fs)?;
+    if clean.is_empty() {
+        return Err(ApiError::bad("请选择文件夹"));
+    }
+    let attrs = fs
+        .stat(&clean)
+        .await
+        .map_err(map_fs)?
+        .ok_or_else(|| ApiError::not_found("文件夹不存在"))?;
+    if !attrs.is_dir {
+        return Err(ApiError::bad("该路径不是文件夹"));
+    }
+
+    let key = fs.join(&clean);
+    let cached = state
+        .folder_sizes
+        .get(&key)
+        .filter(|entry| entry.built_at.elapsed() < FOLDER_SIZE_TTL)
+        .map(|entry| *entry);
+    let measured = match cached {
+        Some(value) => value,
+        None => {
+            let value = measure_remote_folder(&fs, &clean).await?;
+            if state.folder_sizes.len() >= MAX_CACHED_FOLDER_SIZES {
+                state.folder_sizes.clear();
+            }
+            state.folder_sizes.insert(key, value);
+            value
+        }
+    };
+
+    encrypted_response(
+        &session,
+        &aad,
+        json!({
+            "path": format!("/{clean}"),
+            "size": measured.size,
+            "files": measured.files,
+            "dirs": measured.dirs,
+            "truncated": measured.truncated,
+        }),
+    )
+}
+
+/// Walks the remote tree over SFTP without following symlinks. SFTP round-trips
+/// are slow, so the budget is tighter than the local walker's.
+async fn measure_remote_folder(
+    fs: &SftpFs,
+    clean: &str,
+) -> Result<CachedFolderSize, ApiError> {
+    let started = Instant::now();
+    let mut size = 0u64;
+    let mut files = 0u64;
+    let mut dirs = 0u64;
+    let mut seen = 0usize;
+    let mut truncated = false;
+    let mut stack = vec![(clean.to_string(), 0usize)];
+
+    'walk: while let Some((directory, depth)) = stack.pop() {
+        if depth > FOLDER_SIZE_DEPTH {
+            truncated = true;
+            continue;
+        }
+        let (entries, listing_truncated) = fs.list(&directory).await.map_err(map_fs)?;
+        truncated |= listing_truncated;
+        for entry in entries {
+            if seen >= FOLDER_SIZE_ENTRIES || started.elapsed() > FOLDER_SIZE_BUDGET {
+                truncated = true;
+                break 'walk;
+            }
+            seen += 1;
+            if entry.is_symlink {
+                continue;
+            }
+            if entry.is_dir {
+                dirs += 1;
+                let child = if directory.is_empty() {
+                    entry.name
+                } else {
+                    format!("{directory}/{}", entry.name)
+                };
+                stack.push((child, depth + 1));
+            } else {
+                size = size.saturating_add(entry.size);
+                files += 1;
+            }
+        }
+    }
+    Ok(CachedFolderSize {
+        size,
+        files,
+        dirs,
+        truncated,
+        built_at: Instant::now(),
+    })
 }
 
 async fn mkdir(

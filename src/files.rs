@@ -49,6 +49,13 @@ const LISTING_TTL: Duration = Duration::from_secs(15);
 /// Caps how much memory cached folder scans may occupy (entries are ~100 B).
 const MAX_CACHED_LISTINGS: usize = 2;
 const LIST_PAGE_LIMIT: usize = 1_000;
+/// A measured directory size stays valid for this long; mutations clear it
+/// immediately, the TTL only bounds background changes made outside the app.
+const FOLDER_SIZE_TTL: Duration = Duration::from_secs(60);
+const MAX_FOLDER_SIZE_ENTRIES: usize = 100_000;
+const MAX_FOLDER_SIZE_DEPTH: usize = 64;
+const FOLDER_SIZE_BUDGET: Duration = Duration::from_secs(4);
+const MAX_CACHED_FOLDER_SIZES: usize = 512;
 
 #[derive(Deserialize)]
 struct ListRequest {
@@ -58,6 +65,10 @@ struct ListRequest {
     offset: usize,
     #[serde(default = "default_page_size")]
     limit: usize,
+    /// Hidden entries are filtered out unless the client asks for them, so
+    /// pagination and totals stay consistent with what the user sees.
+    #[serde(default)]
+    show_hidden: bool,
 }
 
 fn default_page_size() -> usize {
@@ -112,6 +123,7 @@ pub struct Entry {
     name: String,
     is_dir: bool,
     is_symlink: bool,
+    hidden: bool,
     size: u64,
     modified: u64,
 }
@@ -122,6 +134,21 @@ pub struct CachedListing {
     pub entries: Arc<Vec<Entry>>,
     pub truncated: bool,
     pub built_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+pub struct CachedFolderSize {
+    pub size: u64,
+    pub files: u64,
+    pub dirs: u64,
+    pub truncated: bool,
+    pub built_at: Instant,
+}
+
+#[derive(Deserialize)]
+struct FolderSizeRequest {
+    #[serde(default)]
+    path: String,
 }
 
 struct DownloadStream {
@@ -349,11 +376,18 @@ pub async fn list(
 
     let (entries, truncated) = load_listing(&state, &directory).await?;
 
-    let total = entries.len();
+    let visible: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| request.show_hidden || !entry.hidden)
+        .collect();
+    let total = visible.len();
     let limit = request.limit.clamp(1, LIST_PAGE_LIMIT);
     let start = request.offset.min(total);
     let end = start.saturating_add(limit).min(total);
-    let page = entries[start..end].to_vec();
+    let page: Vec<Entry> = visible[start..end]
+        .iter()
+        .map(|entry| (*entry).clone())
+        .collect();
 
     let response = json!({
         "path": logical_path(&clean),
@@ -426,6 +460,7 @@ fn scan_directory(root: &Path, tmp_root: &Path) -> io::Result<(Vec<Entry>, bool)
             continue;
         };
         let is_symlink = link_metadata.file_type().is_symlink();
+        let hidden = is_hidden(&name, &link_metadata);
         let effective = if is_symlink {
             std::fs::metadata(&path).unwrap_or(link_metadata)
         } else {
@@ -443,6 +478,7 @@ fn scan_directory(root: &Path, tmp_root: &Path) -> io::Result<(Vec<Entry>, bool)
             name,
             is_dir,
             is_symlink,
+            hidden,
             size,
             modified,
         });
@@ -461,6 +497,136 @@ fn scan_directory(root: &Path, tmp_root: &Path) -> io::Result<(Vec<Entry>, bool)
 
 fn invalidate_listings(state: &AppState) {
     state.listings.clear();
+    state.folder_sizes.clear();
+}
+
+pub async fn folder_size(
+    State(state): State<Arc<AppState>>,
+    session: AuthSession,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let aad = crypto::request_aad(&method, &uri);
+    let request: FolderSizeRequest = read_encrypted(&session, &aad, body).await?;
+    let (directory, clean) = resolve_dir(&state, &request.path).await?;
+
+    if let Some(cached) = state.folder_sizes.get(&directory) {
+        if cached.built_at.elapsed() < FOLDER_SIZE_TTL {
+            let cached = *cached;
+            return encrypted_response(
+                &session,
+                &aad,
+                json!({
+                    "path": logical_path(&clean),
+                    "size": cached.size,
+                    "files": cached.files,
+                    "dirs": cached.dirs,
+                    "truncated": cached.truncated,
+                }),
+            );
+        }
+    }
+
+    let root = directory.clone();
+    let tmp_root = state.cfg.tmp_root.clone();
+    let (size, files, dirs, truncated) =
+        tokio::task::spawn_blocking(move || measure_folder(&root, &tmp_root))
+            .await
+            .map_err(|err| ApiError::internal(err.to_string()))?
+            .map_err(|err| ApiError::internal(err.to_string()))?;
+
+    let measured = CachedFolderSize {
+        size,
+        files,
+        dirs,
+        truncated,
+        built_at: Instant::now(),
+    };
+    if state.folder_sizes.len() >= MAX_CACHED_FOLDER_SIZES {
+        state.folder_sizes.clear();
+    }
+    state.folder_sizes.insert(directory, measured);
+
+    encrypted_response(
+        &session,
+        &aad,
+        json!({
+            "path": logical_path(&clean),
+            "size": size,
+            "files": files,
+            "dirs": dirs,
+            "truncated": truncated,
+        }),
+    )
+}
+
+/// Walks a directory tree without following symlinks, stopping at a fixed
+/// entry/depth budget so a huge share cannot tie up a blocking thread.
+fn measure_folder(root: &Path, tmp_root: &Path) -> io::Result<(u64, u64, u64, bool)> {
+    let started = Instant::now();
+    let mut size = 0u64;
+    let mut files = 0u64;
+    let mut dirs = 0u64;
+    let mut seen = 0usize;
+    let mut truncated = false;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+
+    'walk: while let Some((directory, depth)) = stack.pop() {
+        if depth > MAX_FOLDER_SIZE_DEPTH {
+            truncated = true;
+            continue;
+        }
+        let Ok(reader) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for item in reader {
+            if seen >= MAX_FOLDER_SIZE_ENTRIES || started.elapsed() > FOLDER_SIZE_BUDGET {
+                truncated = true;
+                break 'walk;
+            }
+            let Ok(item) = item else {
+                continue;
+            };
+            let path = item.path();
+            if path == tmp_root {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            seen += 1;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                dirs += 1;
+                stack.push((path, depth + 1));
+            } else {
+                size = size.saturating_add(metadata.len());
+                files += 1;
+            }
+        }
+    }
+    Ok((size, files, dirs, truncated))
+}
+
+/// Dotfiles count as hidden everywhere; Windows also marks a file with the
+/// hidden attribute.
+fn is_hidden(name: &str, metadata: &std::fs::Metadata) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x2 != 0 {
+            return true;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = metadata;
+    false
 }
 
 pub async fn mkdir(
@@ -1146,5 +1312,35 @@ mod tests {
         assert_eq!(split_parent("a/b.txt").unwrap(), ("a", "b.txt"));
         assert_eq!(split_parent("b.txt").unwrap(), ("", "b.txt"));
         assert!(split_parent("a/").is_err());
+    }
+
+    #[test]
+    fn dotfiles_are_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let visible = dir.path().join("note.txt");
+        let hidden = dir.path().join(".env");
+        std::fs::write(&visible, b"x").unwrap();
+        std::fs::write(&hidden, b"x").unwrap();
+        assert!(!is_hidden(
+            "note.txt",
+            &std::fs::metadata(&visible).unwrap()
+        ));
+        assert!(is_hidden(".env", &std::fs::metadata(&hidden).unwrap()));
+    }
+
+    #[test]
+    fn folder_size_walks_files_and_skips_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("top.bin"), vec![0u8; 10]).unwrap();
+        std::fs::write(root.join("a/one.bin"), vec![0u8; 20]).unwrap();
+        std::fs::write(root.join("a/b/two.bin"), vec![0u8; 30]).unwrap();
+        let (size, files, dirs, truncated) =
+            measure_folder(root, &root.join("missing-tmp")).unwrap();
+        assert_eq!(size, 60);
+        assert_eq!(files, 3);
+        assert_eq!(dirs, 2);
+        assert!(!truncated);
     }
 }

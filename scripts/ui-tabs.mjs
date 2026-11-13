@@ -144,11 +144,17 @@ const rowAction = async (name, title) => {
       return label && label.textContent === ${JSON.stringify(name)};
     });
     if (!row) return false;
-    const button = [...row.querySelectorAll('button.action-btn')].find(
-      (node) => node.title === ${JSON.stringify(title)},
+    row.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 60,
+      clientY: 90,
+    }));
+    const item = [...document.querySelectorAll('#context-menu .context-item')].find(
+      (node) => node.textContent.includes(${JSON.stringify(title)}),
     );
-    if (!button) return false;
-    button.click();
+    if (!item) return false;
+    item.click();
     return true;
   })()`);
 };
@@ -328,7 +334,7 @@ try {
   );
   pass('second server tab added');
 
-  await evaluate("document.querySelector('#btn-servers').click(); true");
+  await evaluate("document.querySelector('#btn-add-server').click(); true");
   await waitFor(
     `[...document.querySelectorAll('#server-panel .server-row')].some((row) => row.textContent.includes(${JSON.stringify(secondServerName)}))`,
     5_000,

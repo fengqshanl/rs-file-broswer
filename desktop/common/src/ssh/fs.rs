@@ -66,6 +66,7 @@ pub struct RemoteEntry {
     pub name: String,
     pub is_dir: bool,
     pub is_symlink: bool,
+    pub hidden: bool,
     pub size: u64,
     pub modified: u64,
 }
@@ -219,6 +220,7 @@ impl SftpFs {
                 }
             }
             entries.push(RemoteEntry {
+                hidden: name.starts_with('.'),
                 name,
                 is_dir,
                 is_symlink,

@@ -10,7 +10,10 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
-    config::Config, credentials::Credentials, crypto::Crypto, files::CachedListing,
+    config::Config,
+    credentials::Credentials,
+    crypto::Crypto,
+    files::{CachedFolderSize, CachedListing},
     rate::RateLimiter,
 };
 
@@ -22,6 +25,9 @@ pub struct AppState {
     pub credentials_update: Mutex<()>,
     pub sessions: DashMap<String, Session>,
     pub listings: DashMap<PathBuf, CachedListing>,
+    /// Recursive directory sizes, measured on demand and invalidated whenever
+    /// the tree changes.
+    pub folder_sizes: DashMap<PathBuf, CachedFolderSize>,
     /// Mutable in desktop local mode (switch between home, filesystem root,
     /// drives); fixed to `cfg.data_root` for the standalone server.
     current_root: StdRwLock<PathBuf>,
@@ -260,6 +266,7 @@ impl AppState {
     pub fn set_data_root(&self, root: PathBuf) {
         *self.current_root.write().expect("data root lock poisoned") = root;
         self.listings.clear();
+        self.folder_sizes.clear();
     }
 
     pub fn new(
@@ -287,6 +294,7 @@ impl AppState {
             credentials_update: Mutex::new(()),
             sessions: DashMap::new(),
             listings: DashMap::new(),
+            folder_sizes: DashMap::new(),
             current_root: StdRwLock::new(cfg.data_root.clone()),
             uploads: DashMap::new(),
             login_guard: LoginGuard::new(cfg.login_max_failures, cfg.login_window),

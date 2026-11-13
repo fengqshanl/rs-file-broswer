@@ -13,6 +13,10 @@
   <div id="workspace-bar" class="workspace-bar" hidden>
     <div id="tabs" class="workspace-tabs" role="tablist" aria-label="连接目标"></div>
     <div class="workspace-actions">
+      <span id="local-root-wrap" class="app-root" hidden>
+        <span class="app-label">位置</span>
+        <select id="root-select" class="app-select" aria-label="选择文件位置"></select>
+      </span>
       <button id="btn-add-server" class="btn primary small" type="button">
         <span class="icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -27,8 +31,10 @@
             <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>
           </svg>
         </span>
-        检查更新
+        <span id="update-check-label">检查更新</span>
+        <span id="update-check-spinner" class="spinner" hidden></span>
       </button>
+      <span id="app-version" class="app-version"></span>
     </div>
   </div>
 
@@ -149,19 +155,6 @@
       </div>
     </header>
 
-    <div id="app-bar" class="app-bar" hidden>
-      <div class="app-connection">
-        <span id="local-root-wrap" class="app-root" hidden>
-          <span class="app-label">位置</span>
-          <select id="root-select" class="app-select" aria-label="选择文件位置"></select>
-        </span>
-      </div>
-      <div class="app-bar-right">
-        <button id="btn-servers" class="btn ghost small" type="button">连接管理</button>
-        <span id="app-version" class="app-version"></span>
-      </div>
-    </div>
-
     <div class="toolbar">
       <div class="toolbar-left">
         <span id="dir-summary" class="dir-summary">加载中…</span>
@@ -172,6 +165,10 @@
             </svg>
           </span>
           <input id="filter" type="search" placeholder="筛选当前目录" autocomplete="off">
+        </label>
+        <label class="toggle-check" title="显示以 . 开头或带隐藏属性的项目">
+          <input id="toggle-hidden" type="checkbox">
+          <span>显示隐藏文件</span>
         </label>
       </div>
       <div class="toolbar-right">
@@ -184,7 +181,6 @@
         <span>名称</span>
         <span class="col-size">大小</span>
         <span class="col-time">修改时间</span>
-        <span class="col-actions">操作</span>
       </div>
       <div id="list-skeleton" class="list-skeleton" hidden></div>
       <div id="file-list" class="file-list" role="list"></div>
@@ -233,6 +229,7 @@
     </div>
 
     <div id="toasts" class="toasts" aria-live="polite"></div>
+    <div id="context-menu" class="context-menu" role="menu" hidden></div>
     <input id="file-input" class="file-input-proxy" type="file" multiple tabindex="-1">
     <input id="dir-input" class="file-input-proxy" type="file" webkitdirectory multiple tabindex="-1">
     <dialog id="modal" class="modal"></dialog>

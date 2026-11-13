@@ -110,7 +110,7 @@ const setField = (label, value) =>
   })()`);
 
 const openPanel = () =>
-  evaluate("document.querySelector('#btn-servers').click(); true");
+  evaluate("document.querySelector('#btn-add-server').click(); true");
 
 const clickButton = (text) =>
   evaluate(`(() => {
