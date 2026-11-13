@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-desktop-common"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "agentgod-files",
  "anyhow",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -89,9 +89,10 @@ dependencies = [
 
 [[package]]
 name = "agentgod-files-local"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "agentgod-desktop-common",
+ "agentgod-files",
  "serde_json",
  "tauri",
  "tauri-build",

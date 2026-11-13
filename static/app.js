@@ -215,6 +215,19 @@ function randomBytes(length) {
   return bytes;
 }
 
+/** Blob.arrayBuffer() is missing in older WebKit builds shipped with macOS 10.15. */
+function readBlob(blob) {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer();
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
 function pemToDer(pem) {
   const body = pem
     .replace(/-----BEGIN [^-]+-----/g, '')
@@ -1569,15 +1582,12 @@ async function streamEncryptedDownload({
     if (expectEndMarker) progress.update(null, '正在打包…');
 
     const parts = target.usePicker ? null : [];
-    const reader = response.body.getReader();
     let pending = new Uint8Array(0);
     let sequence = 0;
     let received = 0;
     let ended = false;
 
-    outer: while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    outer: for await (const value of responseChunks(response)) {
       pending = concatBytes(pending, value);
       while (pending.length >= 4) {
         const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
@@ -1659,6 +1669,22 @@ async function streamEncryptedDownload({
     const message = error.message || '下载失败';
     progress.fail(message);
     toast(message, 'error');
+  }
+}
+
+/** Safari < 14.1 and the WKWebView builds shipped with older macOS versions
+ *  expose no streaming body on fetch responses. Buffer the whole response
+ *  instead: the blob path below has to hold it in memory anyway. */
+async function* responseChunks(response) {
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) yield value;
+    }
+  } else {
+    yield new Uint8Array(await response.arrayBuffer());
   }
 }
 
@@ -1817,7 +1843,7 @@ async function uploadFile(file, dir, display, tab = activeTab()) {
     let sequence = 0;
     while (offset < file.size) {
       const end = Math.min(offset + chunkSize, file.size);
-      const plaintext = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+      const plaintext = new Uint8Array(await readBlob(file.slice(offset, end)));
       const iv = randomBytes(12);
       const path = `/api/upload/chunk/${encodeURIComponent(uploadId)}/${sequence}`;
       const aad = `PUT ${path}`;
@@ -3753,7 +3779,16 @@ function bindEvents() {
     event.target.value = '';
     enqueueUploads(files, state.cwd);
   });
-  $('#btn-upload-folder').addEventListener('click', () => $('#dir-input').click());
+  $('#btn-upload-folder').addEventListener('click', () => {
+    // Safari / WKWebView older than 11.1 ignores `webkitdirectory` and would
+    // open a regular file picker (or nothing at all). Tell the user instead of
+    // failing silently.
+    if (!('webkitdirectory' in document.createElement('input'))) {
+      toast('当前浏览器不支持选择文件夹，请把文件夹直接拖到窗口中', 'error');
+      return;
+    }
+    $('#dir-input').click();
+  });
   $('#dir-input').addEventListener('change', (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = '';

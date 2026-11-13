@@ -9,9 +9,11 @@ on:
 permissions:
   contents: write
 
-# Publishing is macOS-only for now. The Windows/Linux matrix entries were
-# removed on purpose; re-add them here and a rule in
-# scripts/build-updater-manifest.mjs to publish those platforms again.
+# Publishing is Windows-only: each app ships an x64 MSI installer plus the
+# signed updater artifacts the in-app updater consumes. To publish another
+# platform again, add a matrix entry here and a rule in
+# scripts/build-updater-manifest.mjs, then re-enable it in
+# desktop/common/src/update.rs (SUPPORTED_PLATFORMS).
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -28,8 +30,8 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       # A signing key is optional. Without it the release still contains the
-      # macOS .dmg and users still see the "new version" prompt; only the
-      # one-click in-app update channel is unavailable.
+      # MSI and users still see the "new version" prompt; only the one-click
+      # in-app update channel is unavailable.
       - name: Check updater signing key
         id: signing
         shell: bash
@@ -44,7 +46,7 @@ jobs:
           fi
 
       # Validate the key once, up front, instead of discovering a problem after
-      # two 12-minute macOS builds. Two things are checked:
+      # two builds. Two things are checked:
       #   1. the key can actually sign (correct password, valid format)
       #   2. its key ID matches the pubkey compiled into both apps
       # Point 2 is what makes the difference between "update downloads" and
@@ -118,10 +120,10 @@ jobs:
           fi
           gh release view "$tag" --json databaseId --jq .databaseId
 
-      # Releases built before the macOS-only switch still carry Windows/Linux
-      # installers. Users must never pick one of those, so clean every release
-      # on each publish (the operation is idempotent).
-      - name: Prune non-macOS installers from all releases
+      # Releases built before the Windows-only switch still carry macOS
+      # installers and manifests. Users must never pick one of those, so clean
+      # every release on each publish (the operation is idempotent).
+      - name: Prune macOS installers from all releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -132,7 +134,7 @@ jobs:
             echo "::notice::deleting $tag/$name"
             gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null
           done < <(gh api "repos/$REPO/releases?per_page=100" --paginate \
-            --jq '.[] | .tag_name as $tag | .assets[] | select(.name | test("\\.(AppImage|deb|exe|msi)$"; "i")) | "\($tag)\t\(.id)\t\(.name)"')
+            --jq '.[] | .tag_name as $tag | .assets[] | select(.name | test("\\.(dmg|app\\.tar\\.gz)$|\\.app\\.tar\\.gz\\.sig$"; "i")) | "\($tag)\t\(.id)\t\(.name)"')
 
   build:
     needs: prepare
@@ -140,13 +142,11 @@ jobs:
       fail-fast: false
       matrix:
         app: [local, client]
-    runs-on: macos-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -173,19 +173,18 @@ jobs:
             echo "AGENTGOD_EOF"
           } >> "$GITHUB_ENV"
 
-      # Tauri 2 emits .app.tar.gz / .app.tar.gz.sig when this flag is on and a
-      # private key is present. Do NOT add `updater` to --bundles: it is not a
-      # bundle target and makes the build fail.
+      # MSI is the only published installer. Tauri emits `<name>.msi.sig` when
+      # this flag is on and a private key is present.
       - name: Enable signed updater artifacts
         if: needs.prepare.outputs.signing == 'true'
         shell: bash
         run: |
           node -e "const fs=require('fs');const p='desktop/${{ matrix.app }}/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
-          echo "updater artifacts enabled for ${{ matrix.app }} (macOS)"
+          echo "updater artifacts enabled for ${{ matrix.app }} (Windows MSI)"
 
       # No releaseId/tagName on purpose: the action only builds. Uploading is
       # done below with deterministic ASCII asset names, which keeps one
-      # updater bundle per app and lets the manifest job match assets exactly.
+      # installer per app and lets the manifest job match assets exactly.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -193,9 +192,9 @@ jobs:
           projectPath: desktop/${{ matrix.app }}
           retryAttempts: 3
           includeUpdaterJson: false
-          args: --target universal-apple-darwin
+          args: --bundles msi
 
-      - name: Upload macOS installer
+      - name: Upload Windows installer
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -208,20 +207,20 @@ jobs:
             client) product="AgentGod.Files.Client" ;;
             *) echo "::error::未知应用 ${APP}"; exit 1 ;;
           esac
-          dmg_dir="desktop/${APP}/target/universal-apple-darwin/release/bundle/dmg"
-          dmg="$(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' | sort | head -n 1)"
-          if [ -z "$dmg" ]; then
-            echo "::error::没有找到 macOS 安装包（$dmg_dir）"
+          msi_dir="desktop/${APP}/target/release/bundle/msi"
+          msi="$(find "$msi_dir" -maxdepth 1 -type f -name '*.msi' | sort | head -n 1)"
+          if [ -z "$msi" ]; then
+            echo "::error::没有找到 Windows 安装包（$msi_dir）"
             exit 1
           fi
-          upload="${RUNNER_TEMP}/${product}_${VERSION}_universal.dmg"
-          cp "$dmg" "$upload"
+          upload="${RUNNER_TEMP}/${product}_${VERSION}_x64.msi"
+          cp "$msi" "$upload"
           gh release upload "desktop-v${VERSION}" "$upload" --clobber
           echo "::notice::uploaded $(basename "$upload")"
 
       # Verify the exact bytes users will download against the pubkey compiled
       # into the app before publishing them.
-      - name: Verify and upload updater bundle
+      - name: Verify and upload updater package
         if: needs.prepare.outputs.signing == 'true'
         shell: bash
         env:
@@ -236,19 +235,18 @@ jobs:
             *) echo "::error::未知应用 ${APP}"; exit 1 ;;
           esac
           app_dir="desktop/${APP}"
-          macos_dir="${app_dir}/target/universal-apple-darwin/release/bundle/macos"
-          bundle="$(find "$macos_dir" -maxdepth 1 -type f -name '*.app.tar.gz' | sort | head -n 1)"
+          msi_dir="${app_dir}/target/release/bundle/msi"
+          bundle="$(find "$msi_dir" -maxdepth 1 -type f -name '*.msi' | sort | head -n 1)"
           if [ -z "$bundle" ] || [ ! -f "${bundle}.sig" ]; then
-            echo "::error::签名密钥已生效但没有产出 .app.tar.gz / .sig；请检查 createUpdaterArtifacts 与构建日志"
+            echo "::error::签名密钥已生效但没有产出 .msi / .msi.sig；请检查 createUpdaterArtifacts 与构建日志"
             exit 1
           fi
           node scripts/verify-updater-signature.mjs "$bundle" "${bundle}.sig" "${app_dir}/tauri.conf.json"
 
-          upload="${RUNNER_TEMP}/${product}_${VERSION}_universal.app.tar.gz"
-          cp "$bundle" "$upload"
+          upload="${RUNNER_TEMP}/${product}_${VERSION}_x64.msi"
           cp "${bundle}.sig" "${upload}.sig"
-          gh release upload "desktop-v${VERSION}" "$upload" "${upload}.sig" --clobber
-          echo "::notice::uploaded $(basename "$upload") and its signature"
+          gh release upload "desktop-v${VERSION}" "${upload}.sig" --clobber
+          echo "::notice::uploaded $(basename "$upload").sig"
 
   manifest:
     needs: [prepare, build]

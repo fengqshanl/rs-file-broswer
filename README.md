@@ -1,6 +1,6 @@
 # AgentGod Files
 
-一个用 Rust 编写的轻量级自托管文件服务器：单二进制、低内存占用，面向低功耗设备（ARM64 单板机、NAS、旧笔记本）设计。自带加密登录、应用层加密传输、在线预览、带宽与并发保护，用 Docker 一条命令即可部署；同时提供 macOS 桌面应用（Windows / Linux 桌面端暂不发布）。
+一个用 Rust 编写的轻量级自托管文件服务器：单二进制、低内存占用，面向低功耗设备（ARM64 单板机、NAS、旧笔记本）设计。自带加密登录、应用层加密传输、在线预览、带宽与并发保护，用 Docker 一条命令即可部署；同时提供 Windows 桌面应用（macOS / Linux 桌面端暂不发布）。
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.82%2B-orange)
@@ -52,11 +52,11 @@
 
 ![在线预览](docs/ui-preview.jpg)
 
-## 桌面应用（macOS）
+## 桌面应用（Windows）
 
 从 [GitHub Releases](https://github.com/fengqshanl/rs-file-broswer/releases) 下载安装包，无需 Docker、Node.js 或浏览器。
 
-> 当前只发布 macOS 通用包（Intel / Apple Silicon）。Windows 与 Linux 桌面端暂停发布，历史 Release 中的 `.exe` / `.msi` / `.deb` / `.AppImage` 也已移除；服务端仍可通过 Docker 或二进制在 Linux / Windows 上运行。
+> 当前只发布 Windows x64 MSI 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍可通过 Docker 或二进制在 Linux / Windows 上运行。
 
 | 应用 | 适用场景 | 行为 |
 | --- | --- | --- |
@@ -65,8 +65,8 @@
 
 安装包：
 
-- **macOS**：`*_universal.dmg`，Intel 与 Apple Silicon 通用
-- **应用内热更新包**：`*.app.tar.gz` + `.sig` 与 `latest-local.json` / `latest-client.json`（配置签名密钥后由发布工作流生成）
+- **Windows**：`*_x64.msi`，64 位 Windows 10 / 11（ARM64 系统通过系统模拟运行）
+- **应用内热更新包**：`*.msi.sig` 与 `latest-local.json` / `latest-client.json`（配置签名密钥后由发布工作流生成）
 
 两个桌面应用都采用「本机优先 + 多标签」工作区：启动后先显示本机文件，右上角「添加服务器」支持选择 **HTTPS / HTTP**、填写服务器地址并允许自签名证书；保存后自动生成服务器标签并进入加密登录。每个标签有独立的会话、路径、筛选和分页状态，切换标签不会打断另一个标签的浏览。
 
@@ -79,18 +79,38 @@
 
 桌面端的服务器连接目前面向同版本 AgentGod Files 服务端，支持 HTTPS 与明文 HTTP（HTTP 仅建议用于回环或可信内网）；SFTP、WebDAV、SMB 等通用文件协议尚未内置。
 
-安装包未做商业代码签名：macOS 首次打开请右键「打开」（或执行 `xattr -dr com.apple.quarantine`）。
+安装包未做商业代码签名：首次运行时 Windows SmartScreen 可能提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可。
 
 ### 应用内更新与热更新
 
-**0.1.3 起**，桌面应用启动后会在后台检查 GitHub Releases（不阻塞界面、离线时静默跳过，结果缓存 30 分钟）。发现新版本会弹出提示，并按**应用类型**（Local / Client）匹配 macOS 通用安装包：
+**0.1.3 起**，桌面应用启动后会在后台检查 GitHub Releases（不阻塞界面、离线时静默跳过，结果缓存 30 分钟）。发现新版本会弹出提示，并按**应用类型**（Local / Client）匹配 Windows MSI 安装包：
 
-- **应用内更新**：Release 附带已签名的 macOS 更新包与清单时，直接在应用内下载、校验签名、安装，完成后点「重启应用」生效
-- **下载安装包**：始终可用，由系统默认浏览器打开已匹配好的 `.dmg`；没有匹配包时打开发布页
+- **应用内更新**：Release 附带已签名的 MSI 更新包与清单时，直接在应用内下载、校验签名、安装，完成后点「重启应用」生效
+- **下载安装包**：始终可用，由系统默认浏览器打开已匹配好的 `.msi`；没有匹配包时打开发布页
 - **跳过此版本**：记录在 `localStorage`，下次启动不再提示同一版本；右上角「检查更新」可随时强制重查
-- **非 macOS 平台**：仍可正常检查更新，但会明确提示「当前仅发布 macOS 安装包」，不再给出无法下载的链接
+- **非 Windows 平台**：仍可正常检查更新，但会明确提示「当前仅发布 Windows 安装包」，不再给出无法下载的链接
 
-发布工作流在配置签名密钥后，会把 `*.app.tar.gz` / `.sig` 与 `latest-local.json` / `latest-client.json` 一起挂到 Release；未配置密钥时只发布 `.dmg`，用户可手动下载升级。
+发布工作流在配置签名密钥后，会把 `*.msi.sig` 与 `latest-local.json` / `latest-client.json` 一起挂到 Release；未配置密钥时只发布 `.msi`，用户可手动下载升级。
+
+#### 更新源无法访问时（镜像 / 代理）
+
+应用默认直连 `api.github.com` 与 `github.com`。在无法访问 GitHub 的网络里，「检查更新」会失败；此时可在系统数据目录放一个 `update-source.json`（macOS 为 `~/Library/Application Support/AgentGodFiles/`，Windows 为 `%APPDATA%\AgentGodFiles\`），把检查与下载都指向自建镜像：
+
+```json
+{
+  "api_url": "https://mirror.example.com/api/latest-release",
+  "download_prefix": "https://mirror.example.com/releases/latest/download/",
+  "release_page": "https://mirror.example.com/releases"
+}
+```
+
+- `api_url` 需要返回与 GitHub `releases/latest` 相同结构的 JSON（`tag_name`、`body`、`assets[]`）
+- `download_prefix` 用来拼出 `latest-local.json` / `latest-client.json`；清单里的签名包 URL 指向镜像即可
+- 可选 `updater_endpoints`：直接指定签名清单地址数组，覆盖默认拼接（适用于清单与实际文件不在同一前缀的镜像）
+- 也可用环境变量覆盖：`AGENTGOD_UPDATE_API`、`AGENTGOD_UPDATE_DOWNLOAD_PREFIX`、`AGENTGOD_UPDATE_RELEASE_PAGE`、`AGENTGOD_UPDATER_ENDPOINTS`（逗号分隔）
+- 除 `http://127.0.0.1` / `http://localhost` 外只接受 `https://`；配置无效时自动回退到 GitHub，不影响其他功能
+
+镜像站只需原样代理 GitHub 的 Release 资产（`.msi`、`.msi.sig`、`latest-*.json`）。签名仍在本地校验，镜像无法注入内容。检查失败时，界面提示会带上该配置文件的路径。
 
 > **从 0.1.2 及更早版本升级**：旧版安装包没有更新检查逻辑，且界面内嵌在二进制里、无法远程注入。这些用户需要手动下载一次 0.1.3 或更新版本的安装包；此后每次发版都会自动提示并可应用内更新。
 
@@ -101,7 +121,7 @@
 3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
    - `TAURI_SIGNING_PRIVATE_KEY`：`~/.tauri/agentgod-files.key` 的完整内容（base64 单行）。也接受解码后的两行文本，工作流会统一规范化
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：生成密钥时设置的密码；未设置密码则留空
-4. 推送 `desktop-v*` 标签：工作流在 macOS runner 上执行 `tauri build --target universal-apple-darwin`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.app.tar.gz` / `.sig`，再生成 `latest-local.json` / `latest-client.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
+4. 推送 `desktop-v*` 标签：工作流在 `windows-latest` 上执行 `tauri build --bundles msi`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.msi` / `.msi.sig`，再生成 `latest-local.json` / `latest-client.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
 
 发布流程在构建前会先用私钥签名一个测试文件，并用 `scripts/verify-updater-signature.mjs` 校验签名与仓库中的 `pubkey` 一致；构建后再对每个 `.app.tar.gz` 做同样校验。这样能避免“构建成功、用户下载后却因签名不匹配而安装失败”的情况。常见错误与处理：
 
@@ -111,7 +131,7 @@
 
 预检失败时，Actions 的错误摘要会写明签名材料类型（私钥 / 公钥 / 签名文件）、是否配置了密码，以及签名器返回的错误行。
 
-未配置签名 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 macOS 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
+未配置签名 secret 时发布流程照常进行，只是不含静默更新包：用户仍会收到新版提示，并能一键下载 Windows 安装包。**私钥丢失后无法再为已安装用户签发更新，请离线备份，绝不要提交到仓库。**
 
 ### 从源码构建桌面端
 
@@ -123,7 +143,7 @@ cd desktop/local && cargo tauri build
 cd desktop/client && cargo tauri build
 ```
 
-安装包输出在 `desktop/<app>/target/release/bundle/`。推送 `desktop-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 macOS 通用 `.dmg` 与签名更新包并上传到 Release；Windows / Linux 安装包暂不构建。
+安装包输出在 `desktop/<app>/target/release/bundle/msi`。推送 `desktop-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 Windows `.msi` 与签名更新包并上传到 Release；macOS / Linux 安装包暂不构建。
 
 服务器配置按应用分别保存在系统数据目录（macOS 为 `~/Library/Application Support/AgentGodFiles/`）下的 `servers-local.json` 或 `servers-client.json`。
 
@@ -348,7 +368,7 @@ src/
 static/          嵌入式 Web UI（原生 JS + WebCrypto，无外部依赖）
 static/vendor/   Word/Excel 本地解析库（仅预览时按需加载）
 desktop/common/  共享伴生运行时：回环前端、本机服务、远程反向代理
-  src/update.rs   版本检查、macOS 安装包匹配、静默更新状态桥接
+  src/update.rs   版本检查、Windows 安装包匹配、静默更新状态桥接
 desktop/local/   本机版 Tauri 2 应用
 desktop/client/  远程客户端 Tauri 2 应用
 desktop/web/     打包用占位页面（真实界面由伴生服务提供）
@@ -388,7 +408,7 @@ docker-compose.yml
 ```bash
 # Rust 单元测试
 cargo test
-cargo test --manifest-path desktop/common/Cargo.toml   # 版本比较与 macOS 安装包匹配
+cargo test --manifest-path desktop/common/Cargo.toml   # 版本比较与 Windows 安装包匹配
 
 # 更新清单生成逻辑自测（无需联网）
 node scripts/build-updater-manifest.mjs --self-test
@@ -522,13 +542,9 @@ node scripts/ui-tabs.mjs
 
 当前支持同版本 AgentGod Files 服务端的 HTTPS / HTTP 连接，每台服务器一个标签；HTTP 只建议用于本机回环或可信内网。SFTP、WebDAV、SMB、FTP 等通用协议尚未内置，不在当前版本的能力范围内。
 
-**macOS 提示「应用已损坏」或「无法验证开发者」？**
+**Windows 提示「Windows 已保护你的电脑」或 SmartScreen 拦截？**
 
-安装包未签名。请在 Finder 中右键应用选择「打开」，或执行：
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"
-```
+安装包未做商业代码签名。点「更多信息 → 仍要运行」即可；也可在文件属性中勾选「解除锁定」。企业环境可用组策略或 `Unblock-File` 批量解除。
 
 ## 已知限制
 

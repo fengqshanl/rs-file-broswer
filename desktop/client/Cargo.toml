@@ -1,6 +1,6 @@
 [package]
 name = "agentgod-files-client"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "AgentGod Files desktop client for remote servers"
 license = "MIT"
@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 agentgod-desktop-common = { path = "../common" }
+agentgod-files = { path = "../.." }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-updater = "2"

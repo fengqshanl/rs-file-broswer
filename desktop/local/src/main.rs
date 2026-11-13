@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use agentgod_desktop_common::{start_with_updater, AppMode, AutoInstaller, InstallStatus};
+use agentgod_desktop_common::{
+    data_dir, start_with_updater, AppMode, AutoInstaller, InstallStatus, UpdateSource,
+};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
 
@@ -11,9 +13,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            // The signed updater must follow the same (possibly mirrored)
+            // release source the update check uses, otherwise the manifest
+            // fetch still goes to github.com and fails on blocked networks.
+            let endpoints = UpdateSource::load(&data_dir()).endpoints(AppMode::Local.package_slug());
             let installer: Arc<dyn AutoInstaller> = Arc::new(DesktopUpdater {
                 app: app.handle().clone(),
                 status: status.clone(),
+                endpoints,
             });
             let runtime =
                 tauri::async_runtime::block_on(start_with_updater(AppMode::Local, installer))?;
@@ -26,6 +33,33 @@ fn main() {
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
                 .disable_drag_drop_handler()
+                // WKWebView cancels downloads unless the host application
+                // accepts them, which silently broke "save file" in the app.
+                // Accepting keeps the default destination (the user's
+                // Downloads folder) with a de-duplicated file name.
+                .on_download(|_webview, event| {
+                    match event {
+                        tauri::webview::DownloadEvent::Requested { url, destination } => {
+                            agentgod_files::error::log(&format!(
+                                "下载开始 {url} -> {}",
+                                destination.display()
+                            ));
+                        }
+                        tauri::webview::DownloadEvent::Finished {
+                            url,
+                            path,
+                            success,
+                        } => {
+                            agentgod_files::error::log(&format!(
+                                "下载结束 {url}: success={success} path={}",
+                                path.map(|value| value.display().to_string())
+                                    .unwrap_or_default()
+                            ));
+                        }
+                        _ => {}
+                    }
+                    true
+                })
                 .build()?;
             Ok(())
         })
@@ -49,6 +83,7 @@ fn set_status(
 struct DesktopUpdater {
     app: tauri::AppHandle,
     status: Arc<Mutex<InstallStatus>>,
+    endpoints: Vec<String>,
 }
 
 impl AutoInstaller for DesktopUpdater {
@@ -71,11 +106,23 @@ impl AutoInstaller for DesktopUpdater {
         }
         let app = self.app.clone();
         let status = self.status.clone();
+        let endpoints = self.endpoints.clone();
         tauri::async_runtime::spawn(async move {
             set_status(&status, "checking", 0, "正在检查签名更新包…");
             let outcome: Result<(), String> = async {
-                let update = app
-                    .updater_builder()
+                let mut builder = app.updater_builder();
+                if !endpoints.is_empty() {
+                    let urls: Vec<tauri::Url> = endpoints
+                        .iter()
+                        .filter_map(|raw| tauri::Url::parse(raw).ok())
+                        .collect();
+                    if !urls.is_empty() {
+                        builder = builder
+                            .endpoints(urls)
+                            .map_err(|err| format!("更新源地址无效：{err}"))?;
+                    }
+                }
+                let update = builder
                     .build()
                     .map_err(|err| format!("更新器初始化失败：{err}"))?
                     .check()

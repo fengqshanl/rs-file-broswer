@@ -9,7 +9,7 @@
 
 pub mod update;
 
-pub use update::{AutoInstaller, InstallStatus, NoopInstaller, UpdateHub};
+pub use update::{AutoInstaller, InstallStatus, NoopInstaller, UpdateHub, UpdateSource};
 
 use std::{
     collections::HashMap,
@@ -174,12 +174,13 @@ pub async fn start_with_updater(
     }
     save_config(&config_path, &config)?;
 
+    let update_source = UpdateSource::load(&data_dir);
     let front = Arc::new(FrontState {
         mode,
         config_path,
         config: RwLock::new(config),
         local_url,
-        update: UpdateHub::new(mode, installer),
+        update: UpdateHub::new(mode, installer, update_source, data_dir.clone()),
         clients: Mutex::new(HashMap::new()),
     });
 

@@ -15,6 +15,7 @@
 //!   updater plugin then downloads, verifies and installs the update in place.
 
 use std::{
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,17 +28,164 @@ use crate::AppMode;
 
 pub const REPOSITORY: &str = "fengqshanl/rs-file-broswer";
 pub const CURRENT_VERSION: &str = agentgod_files::VERSION;
-const RELEASE_API: &str = "https://api.github.com/repos/fengqshanl/rs-file-broswer/releases/latest";
-const RELEASE_PAGE: &str = "https://github.com/fengqshanl/rs-file-broswer/releases/latest";
-const DOWNLOAD_PREFIX: &str =
+pub const DEFAULT_API_URL: &str =
+    "https://api.github.com/repos/fengqshanl/rs-file-broswer/releases/latest";
+pub const DEFAULT_RELEASE_PAGE: &str =
+    "https://github.com/fengqshanl/rs-file-broswer/releases/latest";
+pub const DEFAULT_DOWNLOAD_PREFIX: &str =
     "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/";
+const ENV_API_URL: &str = "AGENTGOD_UPDATE_API";
+const ENV_DOWNLOAD_PREFIX: &str = "AGENTGOD_UPDATE_DOWNLOAD_PREFIX";
+const ENV_RELEASE_PAGE: &str = "AGENTGOD_UPDATE_RELEASE_PAGE";
+const ENV_ENDPOINTS: &str = "AGENTGOD_UPDATER_ENDPOINTS";
+const UPDATE_SOURCE_FILE: &str = "update-source.json";
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Platforms with published installers. Older Windows/Linux builds still work,
-/// but the update check must not offer a download that is no longer released.
+fn default_api_url() -> String {
+    DEFAULT_API_URL.to_string()
+}
+
+fn default_download_prefix() -> String {
+    DEFAULT_DOWNLOAD_PREFIX.to_string()
+}
+
+fn default_release_page() -> String {
+    DEFAULT_RELEASE_PAGE.to_string()
+}
+
+fn https_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")
+}
+
+/// Where the desktop apps look for releases and updater manifests.
+///
+/// GitHub is not reachable from every network (mainland China in particular),
+/// so both the release check and the signed updater channel can be pointed at
+/// a mirror. Values are read from `<app data>/update-source.json` and can be
+/// overridden with environment variables. Every field keeps its GitHub default
+/// when omitted, so an absent file changes nothing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateSource {
+    #[serde(default = "default_api_url")]
+    pub api_url: String,
+    #[serde(default = "default_download_prefix")]
+    pub download_prefix: String,
+    #[serde(default = "default_release_page")]
+    pub release_page: String,
+    /// Explicit Tauri updater manifest URLs. Empty means derive them from
+    /// `download_prefix` as `latest-<app>.json`.
+    #[serde(default)]
+    pub updater_endpoints: Vec<String>,
+}
+
+impl Default for UpdateSource {
+    fn default() -> Self {
+        Self {
+            api_url: DEFAULT_API_URL.to_string(),
+            download_prefix: DEFAULT_DOWNLOAD_PREFIX.to_string(),
+            release_page: DEFAULT_RELEASE_PAGE.to_string(),
+            updater_endpoints: Vec::new(),
+        }
+    }
+}
+
+impl UpdateSource {
+    pub fn config_path(data_dir: &Path) -> PathBuf {
+        data_dir.join(UPDATE_SOURCE_FILE)
+    }
+
+    /// Reads the optional config file, then applies environment overrides.
+    /// Invalid values fall back to the defaults instead of blocking startup.
+    pub fn load(data_dir: &Path) -> Self {
+        let path = Self::config_path(data_dir);
+        let mut source = match std::fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str::<UpdateSource>(&raw).unwrap_or_else(|err| {
+                agentgod_files::error::log(&format!(
+                    "更新源配置解析失败，使用默认 GitHub 源: {} ({err})",
+                    path.display()
+                ));
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        };
+        if let Some(value) = env_value(ENV_API_URL) {
+            source.api_url = value;
+        }
+        if let Some(value) = env_value(ENV_DOWNLOAD_PREFIX) {
+            source.download_prefix = value;
+        }
+        if let Some(value) = env_value(ENV_RELEASE_PAGE) {
+            source.release_page = value;
+        }
+        if let Some(value) = env_value(ENV_ENDPOINTS) {
+            source.updater_endpoints = value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+
+        source.normalize();
+        source
+    }
+
+    /// Rejects plaintext or non-HTTP override values and normalizes the
+    /// download prefix so `manifest_url` never emits a doubled slash.
+    fn normalize(&mut self) {
+        let fallback = Self::default();
+        if !https_url(&self.api_url) {
+            agentgod_files::error::log("更新源 api_url 必须是 https 地址，已回退到 GitHub");
+            self.api_url = fallback.api_url;
+        }
+        if !https_url(&self.download_prefix) {
+            agentgod_files::error::log("更新源 download_prefix 必须是 https 地址，已回退到 GitHub");
+            self.download_prefix = fallback.download_prefix;
+        }
+        if !https_url(&self.release_page) {
+            self.release_page = fallback.release_page;
+        }
+        self.updater_endpoints.retain(|url| https_url(url));
+        self.download_prefix = format!("{}/", self.download_prefix.trim_end_matches('/'));
+    }
+
+    pub fn manifest_url(&self, slug: &str) -> String {
+        format!("{}latest-{}.json", self.download_prefix, slug)
+    }
+
+    pub fn endpoints(&self, slug: &str) -> Vec<String> {
+        if self.updater_endpoints.is_empty() {
+            vec![self.manifest_url(slug)]
+        } else {
+            self.updater_endpoints.clone()
+        }
+    }
+
+    /// Short, actionable hint shown when the release check fails.
+    pub fn hint(&self, data_dir: &Path) -> String {
+        if self.api_url == DEFAULT_API_URL {
+            format!(
+                "如无法访问 GitHub，可在 {} 中配置镜像源（api_url / download_prefix）",
+                Self::config_path(data_dir).display()
+            )
+        } else {
+            String::new()
+        }
+    }
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Platforms with published installers. Only Windows MSI packages are built
+/// today; the update check must not offer a download that is not released.
 /// Add an entry here (plus a manifest rule) to re-enable a platform.
-pub const SUPPORTED_PLATFORMS: &[&str] = &["macos"];
+pub const SUPPORTED_PLATFORMS: &[&str] = &["windows"];
 
 impl AppMode {
     /// Slug used for release asset prefixes and updater manifest filenames.
@@ -119,7 +267,7 @@ pub struct UpdateCheck {
 }
 
 impl UpdateCheck {
-    fn failed(app: AppMode, message: impl Into<String>) -> Self {
+    fn failed(app: AppMode, release_url: String, message: impl Into<String>) -> Self {
         Self {
             current_version: CURRENT_VERSION.to_string(),
             latest_version: String::new(),
@@ -129,7 +277,7 @@ impl UpdateCheck {
             arch: platform().1.to_string(),
             asset: None,
             download_url: None,
-            release_url: RELEASE_PAGE.to_string(),
+            release_url,
             notes: String::new(),
             silent: false,
             checked_at: now_seconds(),
@@ -157,21 +305,35 @@ pub struct UpdateHub {
     app: AppMode,
     client: reqwest::Client,
     installer: Arc<dyn AutoInstaller>,
+    source: UpdateSource,
+    data_dir: PathBuf,
     cached: Mutex<Option<(Instant, UpdateCheck)>>,
 }
 
 impl UpdateHub {
-    pub fn new(app: AppMode, installer: Arc<dyn AutoInstaller>) -> Arc<Self> {
+    pub fn new(
+        app: AppMode,
+        installer: Arc<dyn AutoInstaller>,
+        source: UpdateSource,
+        data_dir: PathBuf,
+    ) -> Arc<Self> {
         Arc::new(Self {
             app,
             client: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
-                .connect_timeout(Duration::from_secs(5))
+                .connect_timeout(Duration::from_secs(8))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             installer,
+            source,
+            data_dir,
             cached: Mutex::new(None),
         })
+    }
+
+    /// The source is also consumed by the Tauri updater shell, so expose it.
+    pub fn source(&self) -> &UpdateSource {
+        &self.source
     }
 
     pub async fn check(&self, force: bool) -> UpdateCheck {
@@ -186,7 +348,15 @@ impl UpdateHub {
         }
         let result = match self.fetch_check().await {
             Ok(value) => value,
-            Err(err) => UpdateCheck::failed(self.app, format!("检查更新失败：{err}")),
+            Err(err) => {
+                let hint = self.source.hint(&self.data_dir);
+                let message = if hint.is_empty() {
+                    format!("检查更新失败：{err}")
+                } else {
+                    format!("检查更新失败：{err}。{hint}")
+                };
+                UpdateCheck::failed(self.app, self.source.release_page.clone(), message)
+            }
         };
         if let Ok(mut guard) = self.cached.lock() {
             *guard = Some((Instant::now(), result.clone()));
@@ -195,16 +365,7 @@ impl UpdateHub {
     }
 
     async fn fetch_check(&self) -> anyhow::Result<UpdateCheck> {
-        let release: GitHubRelease = self
-            .client
-            .get(RELEASE_API)
-            .header("User-Agent", format!("AgentGodFiles/{}", CURRENT_VERSION))
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let release = self.fetch_release().await?;
 
         let latest = normalize_version(&release.tag_name)
             .ok_or_else(|| anyhow::anyhow!("无法解析发布版本 {}", release.tag_name))?;
@@ -224,12 +385,39 @@ impl UpdateHub {
                 .as_ref()
                 .map(|value| value.browser_download_url.clone()),
             asset: asset.map(|value| value.name),
-            release_url: RELEASE_PAGE.to_string(),
+            release_url: self.source.release_page.clone(),
             notes: truncate(release.body.as_deref().unwrap_or("").trim(), 600),
             silent,
             checked_at: now_seconds(),
             error: None,
         })
+    }
+
+    /// One retry covers transient DNS/TLS failures on flaky networks without
+    /// making a manual "check now" wait a minute.
+    async fn fetch_release(&self) -> anyhow::Result<GitHubRelease> {
+        let mut last_error = None;
+        for attempt in 0..2 {
+            let result = self
+                .client
+                .get(&self.source.api_url)
+                .header("User-Agent", format!("AgentGodFiles/{}", CURRENT_VERSION))
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await
+                .and_then(|response| response.error_for_status())
+                .map_err(anyhow::Error::from);
+            match result {
+                Ok(response) => return Ok(response.json().await?),
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt == 0 {
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                    }
+                }
+            }
+        }
+        Err(last_error.expect("retry loop always assigns an error"))
     }
 
     /// A signed static manifest must exist and cover this machine's target,
@@ -238,7 +426,7 @@ impl UpdateHub {
         if !self.installer.available() {
             return false;
         }
-        let url = format!("{}latest-{}.json", DOWNLOAD_PREFIX, self.app.package_slug());
+        let url = self.source.manifest_url(self.app.package_slug());
         let Ok(response) = self.client.get(url).send().await else {
             return false;
         };
@@ -273,8 +461,8 @@ impl UpdateHub {
                     .and_then(|(_, check)| check.download_url.clone())
             })
             // No platform-matched installer: fall back to the release page.
-            .unwrap_or_else(|| RELEASE_PAGE.to_string());
-        if !url.starts_with("https://github.com/fengqshanl/rs-file-broswer/releases/") {
+            .unwrap_or_else(|| self.source.release_page.clone());
+        if !https_url(&url) {
             return Err("下载地址无效".to_string());
         }
         open_external(&url)
@@ -327,16 +515,24 @@ pub fn platform() -> (&'static str, &'static str) {
     (os, std::env::consts::ARCH)
 }
 
-/// Tauri updater uses `darwin-x86_64` style keys; a universal macOS package
-/// covers both Apple architectures.
+/// Tauri updater target keys. The published MSI is x64, which also covers
+/// Windows on ARM because the OS runs x64 binaries through emulation, so a
+/// `windows-x86_64` entry is a valid update for both.
 fn updater_targets(os: &str, arch: &str) -> Vec<String> {
     if !SUPPORTED_PLATFORMS.contains(&os) {
         return Vec::new();
     }
-    if os == "macos" {
-        return vec![format!("darwin-{arch}"), "darwin-universal".to_string()];
+    match os {
+        "windows" => {
+            if arch == "aarch64" {
+                vec!["windows-aarch64".to_string(), "windows-x86_64".to_string()]
+            } else {
+                vec![format!("windows-{arch}")]
+            }
+        }
+        "macos" => vec![format!("darwin-{arch}"), "darwin-universal".to_string()],
+        _ => vec![format!("{os}-{arch}")],
     }
-    vec![format!("{os}-{arch}")]
 }
 
 /// `desktop-v0.1.3` / `v0.1.3` / `0.1.3` -> `0.1.3`.
@@ -390,12 +586,11 @@ fn pick_asset(assets: &[ReleaseAsset], app: AppMode, os: &str, arch: &str) -> Op
         })
         .collect();
 
-    // Ordered by preference: an installer the OS can run directly first.
-    // Windows/Linux rules stay here for a quick re-enable; the guard above is
-    // the single switch that disables them today.
+    // Ordered by preference. Windows uses the MSI package because that is the
+    // only desktop installer the release workflow publishes.
     let extensions: &[&str] = match os {
+        "windows" => &[".msi"],
         "macos" => &[".dmg"],
-        "windows" => &["-setup.exe", ".msi"],
         "linux" => &[".appimage", ".deb"],
         _ => &[],
     };
@@ -454,14 +649,17 @@ mod tests {
 
     fn release_assets() -> Vec<ReleaseAsset> {
         vec![
-            asset("AgentGod.Files.Local_0.1.2_amd64.AppImage"),
-            asset("AgentGod.Files.Local_0.1.2_amd64.deb"),
-            asset("AgentGod.Files.Local_0.1.2_universal.dmg"),
-            asset("AgentGod.Files.Local_0.1.2_x64-setup.exe"),
-            asset("AgentGod.Files.Local_0.1.2_x64_en-US.msi"),
-            asset("AgentGod.Files.Local_0.1.2_x64-setup.exe.sig"),
+            asset("AgentGod.Files.Local_0.1.6_x64_en-US.msi"),
+            asset("AgentGod.Files.Local_0.1.6_x64_en-US.msi.sig"),
+            // Assets from the retired macOS / Linux / NSIS channels must be
+            // ignored even while they are still present on old releases.
+            asset("AgentGod.Files.Local_0.1.6_universal.dmg"),
+            asset("AgentGod.Files.Local_0.1.6_universal.app.tar.gz"),
+            asset("AgentGod.Files.Local_0.1.6_amd64.AppImage"),
+            asset("AgentGod.Files.Local_0.1.6_amd64.deb"),
+            asset("AgentGod.Files.Local_0.1.6_x64-setup.exe"),
             asset("latest-local.json"),
-            asset("AgentGod.Files.Client_0.1.2_x64-setup.exe"),
+            asset("AgentGod.Files.Client_0.1.6_x64_en-US.msi"),
         ]
     }
 
@@ -485,38 +683,92 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_installer_for_this_machine() {
+    fn picks_the_msi_for_windows() {
         let assets = release_assets();
         assert_eq!(
-            pick_asset(&assets, AppMode::Local, "macos", "aarch64")
+            pick_asset(&assets, AppMode::Local, "windows", "x86_64")
                 .unwrap()
                 .name,
-            "AgentGod.Files.Local_0.1.2_universal.dmg"
+            "AgentGod.Files.Local_0.1.6_x64_en-US.msi"
         );
         assert_eq!(
-            pick_asset(&assets, AppMode::Local, "macos", "x86_64")
+            pick_asset(&assets, AppMode::Client, "windows", "x86_64")
                 .unwrap()
                 .name,
-            "AgentGod.Files.Local_0.1.2_universal.dmg"
+            "AgentGod.Files.Client_0.1.6_x64_en-US.msi"
+        );
+        // Windows on ARM runs the x64 MSI through emulation.
+        assert_eq!(
+            pick_asset(&assets, AppMode::Local, "windows", "aarch64")
+                .unwrap()
+                .name,
+            "AgentGod.Files.Local_0.1.6_x64_en-US.msi"
         );
     }
 
     #[test]
-    fn unsupported_platforms_never_get_an_installer() {
+    fn macos_and_linux_get_no_installer() {
         let assets = release_assets();
-        assert!(pick_asset(&assets, AppMode::Local, "windows", "x86_64").is_none());
+        assert!(pick_asset(&assets, AppMode::Local, "macos", "aarch64").is_none());
+        assert!(pick_asset(&assets, AppMode::Local, "macos", "x86_64").is_none());
         assert!(pick_asset(&assets, AppMode::Local, "linux", "x86_64").is_none());
-        assert!(pick_asset(&assets, AppMode::Client, "windows", "x86_64").is_none());
-        assert!(pick_asset(&assets, AppMode::Client, "linux", "x86_64").is_none());
-        assert_eq!(updater_targets("windows", "x86_64"), Vec::<String>::new());
+        assert_eq!(updater_targets("macos", "aarch64"), Vec::<String>::new());
         assert_eq!(updater_targets("linux", "x86_64"), Vec::<String>::new());
     }
 
     #[test]
-    fn updater_targets_cover_universal_macos() {
+    fn updater_targets_cover_windows() {
+        assert_eq!(updater_targets("windows", "x86_64"), vec!["windows-x86_64"]);
         assert_eq!(
-            updater_targets("macos", "aarch64"),
-            vec!["darwin-aarch64", "darwin-universal"]
+            updater_targets("windows", "aarch64"),
+            vec!["windows-aarch64", "windows-x86_64"]
         );
+    }
+
+    #[test]
+    fn update_source_defaults_to_github() {
+        let source = UpdateSource::default();
+        assert_eq!(source.api_url, DEFAULT_API_URL);
+        assert_eq!(
+            source.manifest_url("local"),
+            "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/latest-local.json"
+        );
+        assert_eq!(source.endpoints("client"), vec![source.manifest_url("client")]);
+        assert!(source.hint(std::path::Path::new(".")).contains("update-source.json"));
+    }
+
+    #[test]
+    fn update_source_accepts_a_mirror() {
+        let mut source = UpdateSource {
+            api_url: "https://mirror.example/releases/latest".to_string(),
+            download_prefix: "https://mirror.example/releases/latest/download".to_string(),
+            release_page: "https://mirror.example/releases".to_string(),
+            updater_endpoints: vec!["https://mirror.example/updater/latest-local.json".to_string()],
+        };
+        source.normalize();
+        assert_eq!(
+            source.manifest_url("local"),
+            "https://mirror.example/releases/latest/download/latest-local.json"
+        );
+        assert_eq!(
+            source.endpoints("local"),
+            vec!["https://mirror.example/updater/latest-local.json"]
+        );
+        assert!(source.hint(std::path::Path::new(".")).is_empty());
+    }
+
+    #[test]
+    fn update_source_rejects_non_https_overrides() {
+        let mut source = UpdateSource {
+            api_url: "http://evil.example/api".to_string(),
+            download_prefix: "file:///tmp/".to_string(),
+            release_page: "http://evil.example/page".to_string(),
+            updater_endpoints: vec!["http://evil.example/manifest.json".to_string()],
+        };
+        source.normalize();
+        assert_eq!(source.api_url, DEFAULT_API_URL);
+        assert_eq!(source.download_prefix, DEFAULT_DOWNLOAD_PREFIX);
+        assert_eq!(source.release_page, DEFAULT_RELEASE_PAGE);
+        assert!(source.updater_endpoints.is_empty());
     }
 }

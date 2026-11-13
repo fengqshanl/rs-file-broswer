@@ -92,6 +92,7 @@ name = "agentgod-files-client"
 version = "0.1.5"
 dependencies = [
  "agentgod-desktop-common",
+ "agentgod-files",
  "serde_json",
  "tauri",
  "tauri-build",

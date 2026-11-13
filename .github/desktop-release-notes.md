@@ -7,7 +7,16 @@
 | **AgentGod Files Local** | 打开即可浏览本机文件；右上角「添加服务器」连接多台远程服务器 |
 | **AgentGod Files Client** | 同样默认显示本机文件，支持添加多台服务器并在同一窗口内用标签切换 |
 
-> **发布范围**：当前只提供 macOS 通用 `.dmg`（Intel / Apple Silicon）。Windows 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
+> **发布范围**：当前只提供 Windows x64 `.msi` 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
+
+## 0.1.6 更新
+
+- 发布渠道改为 **Windows x64 MSI**：每次发版产出 `AgentGod.Files.Local_*_x64.msi` 与 `AgentGod.Files.Client_*_x64.msi`
+- 应用内热更新在 Windows 上可用：Release 附带 `*.msi.sig`，`latest-local.json` / `latest-client.json` 提供 `windows-x86_64` 与 `windows-aarch64` 两个平台条目（ARM64 系统通过模拟运行 x64 包）
+- 修复 Web 与桌面端上传：文件/文件夹选择框不再因 `display:none` 被 Safari / WKWebView 拦截，单文件与整目录上传均可正常触发
+- 修复桌面端下载：WKWebView 默认会取消下载，现由应用显式接受并保存到系统「下载」目录（同名自动去重）；并为旧版 WebKit 增加无流式响应体时的回退
+- 桌面端新增可配置更新源（`update-source.json` / `AGENTGOD_UPDATE_*` 环境变量）：GitHub 不可达时可指向镜像，检查与签名更新都走同一地址；检查失败会直接提示配置文件位置
+- 服务端无需同步升级；旧版 macOS / Windows 用户需手动下载一次本版本
 
 ## 0.1.5 更新
 
@@ -52,14 +61,14 @@
 
 ## 安装包
 
-- **macOS（Intel / Apple Silicon 通用）**：下载 `*_universal.dmg`
-- **应用内更新**：配置签名密钥后，Release 还会附带 `*.app.tar.gz` / `.sig` 与 `latest-local.json` / `latest-client.json`
-- **Windows / Linux**：暂停发布，历史安装包已移除
+- **Windows x64**：下载 `AgentGod.Files.Local_*_x64.msi` 或 `AgentGod.Files.Client_*_x64.msi`
+- **应用内更新**：配置签名密钥后，Release 还会附带 `*.msi.sig` 与 `latest-local.json` / `latest-client.json`
+- **macOS / Linux**：暂停发布，历史安装包已移除
 
 ## 说明
 
-- 安装包未做商业代码签名。macOS 首次打开如被拦截，请右键「打开」，或执行
-  `xattr -dr com.apple.quarantine "/Applications/AgentGod Files Local.app"`。
+- 安装包未做商业代码签名。Windows SmartScreen 首次运行可能拦截，点「更多信息 → 仍要运行」，
+  或在下载目录执行 `Get-ChildItem *.msi | Unblock-File`。
 - 客户端连接自签名证书服务器时，请在服务器设置中勾选「允许自签名证书」。
 - 服务器标签当前支持同版本 AgentGod Files 服务端的 HTTPS / HTTP；SFTP、WebDAV、SMB 等协议尚未内置。
 - 从 0.1.1 起，预览内容同样使用 AES-256-GCM 加密；请将服务端与桌面端升级到同一版本。

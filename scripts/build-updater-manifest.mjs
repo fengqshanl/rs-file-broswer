@@ -4,10 +4,10 @@
 // Both apps are published into ONE GitHub Release, so they cannot share a
 // single `latest.json`. This script reads the release assets, pairs each signed
 // updater bundle with its `.sig`, and writes `latest-local.json` and
-// `latest-client.json` into OUTPUT_DIR. Only macOS updater bundles are
-// considered. When no signed macOS artifacts are present (e.g. the signing
+// `latest-client.json` into OUTPUT_DIR. Only Windows MSI packages are
+// considered. When no signed MSI artifacts are present (e.g. the signing
 // secret has not been configured yet) it writes nothing, and the apps simply
-// fall back to the "download matching .dmg" channel.
+// fall back to the "download matching .msi" channel.
 
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -17,13 +17,16 @@ import { pathToFileURL } from 'node:url';
 const REPO = 'fengqshanl/rs-file-broswer';
 const APPS = ['local', 'client'];
 
-// Only macOS installers are published for now. Add a rule here when another
-// platform is re-enabled in the release workflow. Order matters: the first
-// matching bundle wins for a platform.
+// Only Windows MSI installers are published for now. Add a rule here when
+// another platform is re-enabled in the release workflow. Order matters: the
+// first matching bundle wins for a platform.
 const PLATFORM_RULES = [
   {
-    keys: ['darwin-x86_64', 'darwin-aarch64'],
-    patterns: [/\.app\.tar\.gz$/i],
+    // The MSI is x64; Windows on ARM installs it through emulation and its
+    // updater reports windows-x86_64, but some Tauri versions look up the
+    // native key first, so publish both entries pointing at the same package.
+    keys: ['windows-x86_64', 'windows-aarch64'],
+    patterns: [/\.msi$/i],
   },
 ];
 
@@ -175,67 +178,70 @@ async function selfTest() {
   const release = {
     published_at: '2026-11-12T06:00:00Z',
     assets: [
-      asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz'),
-      asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz.sig'),
-      // Legacy Windows/Linux bundles are ignored even when they are signed.
-      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe'),
-      asset('AgentGod.Files.Local_0.1.3_x64-setup.exe.sig'),
-      asset('AgentGod.Files.Local_0.1.3_amd64.AppImage'),
-      asset('AgentGod.Files.Local_0.1.3_amd64.AppImage.sig'),
-      asset('AgentGod.Files.Client_0.1.3_universal.app.tar.gz'),
-      asset('AgentGod.Files.Client_0.1.3_universal.app.tar.gz.sig'),
+      asset('AgentGod.Files.Local_0.1.6_x64.msi'),
+      asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
+      // Retired macOS/Linux/NSIS bundles are ignored even when signed.
+      asset('AgentGod.Files.Local_0.1.6_universal.dmg'),
+      asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz'),
+      asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz.sig'),
+      asset('AgentGod.Files.Local_0.1.6_x64-setup.exe'),
+      asset('AgentGod.Files.Local_0.1.6_x64-setup.exe.sig'),
+      asset('AgentGod.Files.Local_0.1.6_amd64.AppImage'),
+      asset('AgentGod.Files.Local_0.1.6_amd64.AppImage.sig'),
+      asset('AgentGod.Files.Client_0.1.6_x64.msi'),
+      asset('AgentGod.Files.Client_0.1.6_x64.msi.sig'),
       asset('latest-local.json'),
     ],
   };
-  const darwinKeys = ['darwin-aarch64', 'darwin-x86_64'];
+  const windowsKeys = ['windows-aarch64', 'windows-x86_64'];
   const specs = buildManifestSpecs(release);
-  assert.deepEqual(Object.keys(specs.local).sort(), darwinKeys);
-  assert.deepEqual(Object.keys(specs.client).sort(), darwinKeys);
-  assert.match(specs.local['darwin-aarch64'].url, /universal\.app\.tar\.gz$/);
+  assert.deepEqual(Object.keys(specs.local).sort(), windowsKeys);
+  assert.deepEqual(Object.keys(specs.client).sort(), windowsKeys);
+  assert.match(specs.local['windows-x86_64'].url, /AgentGod\.Files\.Local_0\.1\.6_x64\.msi$/);
   assert.equal(
-    specs.local['darwin-x86_64'].signature_url,
-    'https://example.com/AgentGod.Files.Local_0.1.3_universal.app.tar.gz.sig',
+    specs.local['windows-aarch64'].signature_url,
+    'https://example.com/AgentGod.Files.Local_0.1.6_x64.msi.sig',
   );
-  // A macOS bundle without its .sig must not produce a manifest entry.
+  // An MSI without its .sig must not produce a manifest entry.
   assert.deepEqual(
     buildManifestSpecs({
-      assets: [asset('AgentGod.Files.Local_0.1.3_universal.app.tar.gz')],
+      assets: [asset('AgentGod.Files.Local_0.1.6_x64.msi')],
     }),
     { local: {}, client: {} },
   );
-  assert.equal(versionFromTag('desktop-v0.1.3'), '0.1.3');
+  assert.equal(versionFromTag('desktop-v0.1.6'), '0.1.6');
   assert.equal(appSlug('latest-local.json'), null);
-  assert.equal(appSlug('AgentGod.Files.Local_universal.app.tar.gz'), 'local');
-  assert.equal(appSlug('AgentGod Files Local_universal.app.tar.gz'), 'local');
-  assert.equal(appSlug('AgentGod.Files.Local_0.1.5_universal.app.tar.gz'), 'local');
-  assert.equal(appSlug('AgentGod.Files.Client.app.tar.gz'), 'client');
-  assert.equal(appSlug('AgentGod Files Client_universal.app.tar.gz.sig'), 'client');
+  assert.equal(appSlug('AgentGod.Files.Local_0.1.6_x64.msi'), 'local');
+  assert.equal(appSlug('AgentGod.Files.Local_0.1.6_x64.msi.sig'), 'local');
+  assert.equal(appSlug('AgentGod.Files.Client_0.1.6_x64.msi'), 'client');
+  assert.equal(appSlug('AgentGod Files Client_0.1.6_x64.msi'), 'client');
   assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
-  // When the same bundle exists under a spaced and an ASCII name, the ASCII
+  // When the same package exists under a spaced and an ASCII name, the ASCII
   // asset wins so the manifest URL stays stable.
   const duplicated = buildManifestSpecs({
     assets: [
-      asset('AgentGod Files Local_universal.app.tar.gz'),
-      asset('AgentGod Files Local_universal.app.tar.gz.sig'),
-      asset('AgentGod.Files.Local_0.1.5_universal.app.tar.gz'),
-      asset('AgentGod.Files.Local_0.1.5_universal.app.tar.gz.sig'),
+      asset('AgentGod Files Local_0.1.6_x64.msi'),
+      asset('AgentGod Files Local_0.1.6_x64.msi.sig'),
+      asset('AgentGod.Files.Local_0.1.6_x64.msi'),
+      asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
     ],
   });
   assert.match(
-    duplicated.local['darwin-aarch64'].url,
-    /AgentGod\.Files\.Local_0\.1\.5_universal\.app\.tar\.gz$/,
+    duplicated.local['windows-x86_64'].url,
+    /AgentGod\.Files\.Local_0\.1\.6_x64\.msi$/,
   );
   assert.equal(hasSignedAssets(release), true);
   assert.equal(
     hasSignedAssets({
       assets: [
-        asset('AgentGod.Files.Local_0.1.3_x64-setup.exe'),
-        asset('AgentGod.Files.Local_0.1.3_x64-setup.exe.sig'),
+        asset('AgentGod.Files.Local_0.1.6_universal.dmg'),
+        asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz'),
+        asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz.sig'),
       ],
     }),
     false,
   );
-  console.log('updater manifest self-test OK (macOS only)');
+  console.log('updater manifest self-test OK (Windows MSI only)');
 }
 
 async function main() {
