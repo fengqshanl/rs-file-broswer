@@ -38,6 +38,30 @@ jobs:
             --jq '.[] | .tag_name as $tag | .assets[] | select(.name | test("\\.(dmg|app\\.tar\\.gz)(\\.sig)?$"; "i")) | "\($tag)\t\(.id)\t\(.name)"')
           echo "deleted ${found} macOS asset(s)"
 
+      # Old releases still carry updater manifests whose only entries are
+      # darwin-* and whose packages no longer exist. Keep a manifest only if it
+      # advertises at least one Windows target, so the Windows release that is
+      # published right after this workflow keeps its own manifests.
+      - name: Delete macOS-only updater manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/releases?per_page=100" --paginate \
+            --jq '.[] | .id as $rid | .assets[] | select(.name | test("^latest-(local|client)\\.json$")) | "\($rid)\t\(.id)\t\(.name)"' > manifests.tsv
+          while IFS=$'\t' read -r rid aid name; do
+            [ -n "${aid:-}" ] || continue
+            gh api -H 'Accept: application/vnd.github.raw' \
+              "repos/$REPO/releases/assets/$aid" > manifest.json
+            if node -e 'const m=require("./manifest.json");const keys=Object.keys(m.platforms||{});process.exit(keys.some(k=>k.startsWith("windows-"))?0:1)'; then
+              echo "::notice::keeping $name (has Windows targets)"
+            else
+              echo "::notice::deleting stale macOS-only manifest $name"
+              gh api -X DELETE "repos/$REPO/releases/assets/$aid" >/dev/null
+            fi
+          done < manifests.tsv
+
       # Keep the public description consistent with what is actually published.
       - name: Refresh release notes to Windows-only wording
         env:
