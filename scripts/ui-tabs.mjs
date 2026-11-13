@@ -4,10 +4,12 @@
  *
  * Covers the local-first boot, the add-server panel (the old WKWebView freeze
  * path), per-tab encrypted login, remote previews, cross-tab copy/move, second
- * server removal and reload behaviour. Run it against `dev_client`:
+ * server removal and reload behaviour. Run it against `dev_app`:
  *
- *   HOME=/tmp/agentgod-tabs-home \
- *     ./desktop/common/target/debug/dev_client
+ *   AGENTGOD_DATA_DIR=/tmp/agentgod-tabs-data \
+ *     AGENTGOD_LOCAL_ROOT=/tmp/agentgod-tabs-home \
+ *     AGENTGOD_MEMORY_SECRETS=1 \
+ *     ./desktop/common/target/release/dev_app
  *
  *   FRONT_URL=http://127.0.0.1:<printed-port>/ \
  *   REMOTE_URL=https://127.0.0.1:18443 \
@@ -16,7 +18,7 @@
  *   CHROME_DEBUG_URL=http://127.0.0.1:9223 \
  *   node scripts/ui-tabs.mjs
  *
- * Create LOCAL_DIR/本地文件.txt before starting dev_client (the script also
+ * Create LOCAL_DIR/本地文件.txt before starting dev_app (the script also
  * creates it when missing), and use a dedicated empty data directory for the
  * remote test server.
  */

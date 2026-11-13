@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AgentGod Files Local",
-  "mainBinaryName": "agentgod-files-local",
-  "version": "0.1.6",
-  "identifier": "com.agentgod.files.local",
+  "productName": "AgentGod Files",
+  "mainBinaryName": "agentgod-files",
+  "version": "0.2.0",
+  "identifier": "com.agentgod.files",
   "build": {
     "frontendDist": "../web"
   },
@@ -21,8 +21,8 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "浏览本机与远程服务器文件",
-    "longDescription": "AgentGod Files 本机版：无需登录即可浏览、上传、下载和预览本机文件，也可以连接多台远程 AgentGod Files 服务器。",
+    "shortDescription": "浏览本机、服务器与 SSH 主机文件",
+    "longDescription": "AgentGod Files：无需登录即可浏览、上传、下载和预览本机文件，也可以通过 URL 添加 AgentGod Files 服务器，或用 SSH 连接远程主机直接管理其文件系统。",
     "copyright": "MIT License",
     "macOS": {
       "minimumSystemVersion": "10.15"
@@ -47,7 +47,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU3NEM1RjM5ODlGREIzNTkKUldSWnMvMkpPVjlNNTNRRmNldk9uT1dqWXN2VjA0Uk9UUjNkT3R0U1ZlYyttMUdWN0ZMRmpGYjQK",
       "endpoints": [
-        "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/latest-local.json"
+        "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

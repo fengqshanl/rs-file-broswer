@@ -1,13 +1,18 @@
 # AgentGod Files 桌面版
 
-两种应用，按需下载：
-
-| 应用 | 用途 |
-| --- | --- |
-| **AgentGod Files Local** | 打开即可浏览本机文件；右上角「添加服务器」连接多台远程服务器 |
-| **AgentGod Files Client** | 同样默认显示本机文件，支持添加多台服务器并在同一窗口内用标签切换 |
+**AgentGod Files** 是合并后的单一桌面应用：默认展示本机文件系统；右上角「连接管理」可添加 AgentGod Files 服务器（HTTPS / HTTP）或 SSH / SFTP 主机，每个目标生成独立标签。
 
 > **发布范围**：当前只提供 Windows x64 `.msi` 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
+
+## 0.2.0 更新
+
+- 合并原 Local / Client 两个应用为 **AgentGod Files**，只发布一个安装包
+- 新增 **SSH / SFTP** 目标：浏览、上传、下载、预览、新建文件夹、重命名、删除与文件夹 tar 下载
+- SSH 支持密码与私钥；密码和私钥口令只写入 Windows 凭据管理器 / macOS 钥匙串，`targets.json` 不保存明文凭据
+- SSH 主机密钥采用 TOFU：首次连接展示 SHA256 指纹待确认，记住后指纹变化会拒绝连接；可在「连接管理」中测试连接或清除旧指纹
+- 首次启动自动把旧 `servers-local.json` / `servers-client.json` 合并为 `targets.json`（按 URL 去重，原文件保留备份）
+- 更新清单统一为 `latest.json`，安装包名为 `AgentGod.Files_0.2.0_x64.msi`
+- **升级说明**：应用标识与 UpgradeCode 已变化，0.1.6 的 Local / Client 用户需手动卸载旧版后安装 0.2.0；此后可正常应用内更新
 
 ## 0.1.6 更新
 
@@ -61,18 +66,18 @@
 
 ## 安装包
 
-- **Windows x64**：下载 `AgentGod.Files.Local_*_x64.msi` 或 `AgentGod.Files.Client_*_x64.msi`
-- **应用内更新**：配置签名密钥后，Release 还会附带 `*.msi.sig` 与 `latest-local.json` / `latest-client.json`
+- **Windows x64**：下载 `AgentGod.Files_*_x64.msi`
+- **应用内更新**：配置签名密钥后，Release 还会附带 `*.msi.sig` 与 `latest.json`
 - **macOS / Linux**：暂停发布，历史安装包已移除
 
 ## 说明
 
 - 安装包未做商业代码签名。Windows SmartScreen 首次运行可能拦截，点「更多信息 → 仍要运行」，
   或在下载目录执行 `Get-ChildItem *.msi | Unblock-File`。
-- 客户端连接自签名证书服务器时，请在服务器设置中勾选「允许自签名证书」。
-- 服务器标签当前支持同版本 AgentGod Files 服务端的 HTTPS / HTTP；SFTP、WebDAV、SMB 等协议尚未内置。
+- 连接自签名证书的 AgentGod 服务器时，请在连接设置中勾选「允许自签名证书」。
+- 服务器目标面向同版本 AgentGod Files 服务端的 HTTPS / HTTP；SSH / SFTP 目标直接连接 OpenSSH 等标准服务器。
 - 从 0.1.1 起，预览内容同样使用 AES-256-GCM 加密；请将服务端与桌面端升级到同一版本。
-- 桌面端会在本机回环地址启动一个仅本机可访问的伴生服务，用于加载界面和代理请求；
+- 桌面端会在本机回环地址启动一个仅本机可访问的伴生服务，用于加载界面、代理请求和承载 SSH 服务；
   不监听局域网，也不会上传任何数据到第三方。0.1.3 起会读取公开的 GitHub Releases 元数据检查新版本，
   不发送任何本机文件或凭据；离线时自动跳过。
 - 服务端继续使用 Docker 部署；桌面端与其共用同一套加密登录与传输协议。

@@ -1,13 +1,11 @@
 #!/usr/bin/env node
-// Builds the static Tauri updater manifests for both desktop apps.
+// Builds the static Tauri updater manifest for the desktop app.
 //
-// Both apps are published into ONE GitHub Release, so they cannot share a
-// single `latest.json`. This script reads the release assets, pairs each signed
-// updater bundle with its `.sig`, and writes `latest-local.json` and
-// `latest-client.json` into OUTPUT_DIR. Only Windows MSI packages are
-// considered. When no signed MSI artifacts are present (e.g. the signing
-// secret has not been configured yet) it writes nothing, and the apps simply
-// fall back to the "download matching .msi" channel.
+// The app publishes one MSI per release. This script reads the release assets,
+// pairs the MSI with its `.sig`, and writes `latest.json` into OUTPUT_DIR. Only
+// Windows MSI packages are considered. When no signed MSI is present (e.g. the
+// signing secret has not been configured yet) it writes nothing, and users
+// simply download the MSI manually.
 
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -15,7 +13,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const REPO = 'fengqshanl/rs-file-broswer';
-const APPS = ['local', 'client'];
+const MANIFEST_NAME = 'latest.json';
 
 // Only Windows MSI installers are published for now. Add a rule here when
 // another platform is re-enabled in the release workflow. Order matters: the
@@ -30,17 +28,13 @@ const PLATFORM_RULES = [
   },
 ];
 
-export function appSlug(name) {
-  const lower = name.toLowerCase();
-  // tauri-cli names updater bundles without a version suffix and keeps the
-  // product name (`AgentGod Files Local.app.tar.gz`). tauri-action renames
-  // them to `AgentGod Files Local_universal.app.tar.gz`, while our release
-  // step uploads `AgentGod.Files.Local_0.1.5_universal.app.tar.gz`. Compare a
-  // compact form so spaces, dots, underscores and dashes are all equivalent.
-  const compact = lower.replace(/[\s._-]+/g, '');
-  if (compact.startsWith('agentgodfileslocal')) return 'local';
-  if (compact.startsWith('agentgodfilesclient')) return 'client';
-  return null;
+/** True for assets produced by this app (`AgentGod.Files_0.2.0_x64.msi`). */
+export function isAppAsset(name) {
+  const compact = String(name).toLowerCase().replace(/[\s._-]+/g, '');
+  // Reject the retired per-app builds (`AgentGod.Files.Local_...`).
+  if (compact.startsWith('agentgodfileslocal')) return false;
+  if (compact.startsWith('agentgodfilesclient')) return false;
+  return compact.startsWith('agentgodfiles');
 }
 
 export function versionFromTag(tag) {
@@ -49,44 +43,39 @@ export function versionFromTag(tag) {
 }
 
 /** Pure asset-pairing logic, exercised by `--self-test`. */
-export function buildManifestSpecs(release) {
+export function buildManifestSpec(release) {
   const assets = Array.isArray(release.assets) ? release.assets : [];
   const byName = new Map(assets.map((asset) => [asset.name, asset]));
-  const specs = { local: {}, client: {} };
-  for (const app of APPS) {
-    for (const rule of PLATFORM_RULES) {
-      let bundle = null;
-      for (const pattern of rule.patterns) {
-        const candidates = assets.filter(
-          (asset) =>
-            appSlug(asset.name) === app &&
-            pattern.test(asset.name) &&
-            byName.has(`${asset.name}.sig`),
-        );
-        if (!candidates.length) continue;
-        // Older releases may contain the same bundle twice: once with the
-        // product name (spaces) from tauri-action, once with our ASCII name.
-        // Prefer the ASCII asset so the manifest URL is stable and readable.
-        candidates.sort(
-          (a, b) =>
-            (a.name.match(/\s/g) || []).length -
-              (b.name.match(/\s/g) || []).length ||
-            a.name.localeCompare(b.name),
-        );
-        bundle = candidates[0];
-        break;
-      }
-      if (!bundle) continue;
-      const signature = byName.get(`${bundle.name}.sig`);
-      for (const key of rule.keys) {
-        specs[app][key] = {
-          url: bundle.browser_download_url,
-          signature_url: signature.browser_download_url,
-        };
-      }
+  const platforms = {};
+  for (const rule of PLATFORM_RULES) {
+    let bundle = null;
+    for (const pattern of rule.patterns) {
+      const candidates = assets.filter(
+        (asset) =>
+          isAppAsset(asset.name) &&
+          pattern.test(asset.name) &&
+          byName.has(`${asset.name}.sig`),
+      );
+      if (!candidates.length) continue;
+      // Prefer the ASCII asset name so the manifest URL stays stable.
+      candidates.sort(
+        (a, b) =>
+          (a.name.match(/\s/g) || []).length - (b.name.match(/\s/g) || []).length ||
+          a.name.localeCompare(b.name),
+      );
+      bundle = candidates[0];
+      break;
+    }
+    if (!bundle) continue;
+    const signature = byName.get(`${bundle.name}.sig`);
+    for (const key of rule.keys) {
+      platforms[key] = {
+        url: bundle.browser_download_url,
+        signature_url: signature.browser_download_url,
+      };
     }
   }
-  return specs;
+  return platforms;
 }
 
 async function github(pathname) {
@@ -129,45 +118,36 @@ async function readSignature(url) {
 
 /** Only a signed bundle for a currently published platform counts. */
 export function hasSignedAssets(release) {
-  const specs = buildManifestSpecs(release);
-  return Object.values(specs).some((targets) => Object.keys(targets).length > 0);
+  return Object.keys(buildManifestSpec(release)).length > 0;
 }
 
-export async function buildManifests(release, tag, outputDir) {
+export async function buildManifest(release, tag, outputDir) {
   const version = versionFromTag(tag);
   if (!version) throw new Error(`无法从 tag 解析版本号：${tag}`);
-  const specs = buildManifestSpecs(release);
-  await mkdir(outputDir, { recursive: true });
-  const written = [];
-
-  for (const app of APPS) {
-    const entries = Object.entries(specs[app]);
-    if (entries.length === 0) {
-      console.log(`skip latest-${app}.json: 该应用没有已签名的更新包`);
-      continue;
-    }
-    const platforms = {};
-    for (const [target, spec] of entries) {
-      platforms[target] = {
-        signature: await readSignature(spec.signature_url),
-        url: spec.url,
-      };
-    }
-    const manifest = {
-      version,
-      notes: `AgentGod Files 桌面版 v${version}`,
-      pub_date: release.published_at || new Date().toISOString(),
-      platforms,
+  const specs = buildManifestSpec(release);
+  const entries = Object.entries(specs);
+  if (entries.length === 0) {
+    console.log(`skip ${MANIFEST_NAME}: 没有已签名的更新包`);
+    return [];
+  }
+  const platforms = {};
+  for (const [target, spec] of entries) {
+    platforms[target] = {
+      signature: await readSignature(spec.signature_url),
+      url: spec.url,
     };
-    const file = path.join(outputDir, `latest-${app}.json`);
-    await writeFile(file, `${JSON.stringify(manifest, null, 2)}\n`);
-    console.log(`wrote ${file} (${entries.length} platforms)`);
-    written.push(file);
   }
-  if (written.length === 0) {
-    console.log('未找到签名更新包，跳过静默更新清单；普通安装包仍可正常下载。');
-  }
-  return written;
+  const manifest = {
+    version,
+    notes: `AgentGod Files 桌面版 v${version}`,
+    pub_date: release.published_at || new Date().toISOString(),
+    platforms,
+  };
+  await mkdir(outputDir, { recursive: true });
+  const file = path.join(outputDir, MANIFEST_NAME);
+  await writeFile(file, `${JSON.stringify(manifest, null, 2)}\n`);
+  console.log(`wrote ${file} (${entries.length} platforms)`);
+  return [file];
 }
 
 async function selfTest() {
@@ -176,72 +156,66 @@ async function selfTest() {
     browser_download_url: `https://example.com/${name}`,
   });
   const release = {
-    published_at: '2026-11-12T06:00:00Z',
+    published_at: '2026-11-13T06:00:00Z',
     assets: [
+      asset('AgentGod.Files_0.2.0_x64.msi'),
+      asset('AgentGod.Files_0.2.0_x64.msi.sig'),
+      // Retired macOS/Linux/NSIS bundles and pre-merge per-app builds are
+      // ignored even when signed.
+      asset('AgentGod.Files_0.2.0_universal.dmg'),
+      asset('AgentGod.Files_0.2.0_universal.app.tar.gz'),
+      asset('AgentGod.Files_0.2.0_universal.app.tar.gz.sig'),
+      asset('AgentGod.Files_0.2.0_x64-setup.exe'),
+      asset('AgentGod.Files_0.2.0_x64-setup.exe.sig'),
       asset('AgentGod.Files.Local_0.1.6_x64.msi'),
       asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
-      // Retired macOS/Linux/NSIS bundles are ignored even when signed.
-      asset('AgentGod.Files.Local_0.1.6_universal.dmg'),
-      asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz'),
-      asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz.sig'),
-      asset('AgentGod.Files.Local_0.1.6_x64-setup.exe'),
-      asset('AgentGod.Files.Local_0.1.6_x64-setup.exe.sig'),
-      asset('AgentGod.Files.Local_0.1.6_amd64.AppImage'),
-      asset('AgentGod.Files.Local_0.1.6_amd64.AppImage.sig'),
       asset('AgentGod.Files.Client_0.1.6_x64.msi'),
       asset('AgentGod.Files.Client_0.1.6_x64.msi.sig'),
+      asset('latest.json'),
       asset('latest-local.json'),
     ],
   };
   const windowsKeys = ['windows-aarch64', 'windows-x86_64'];
-  const specs = buildManifestSpecs(release);
-  assert.deepEqual(Object.keys(specs.local).sort(), windowsKeys);
-  assert.deepEqual(Object.keys(specs.client).sort(), windowsKeys);
-  assert.match(specs.local['windows-x86_64'].url, /AgentGod\.Files\.Local_0\.1\.6_x64\.msi$/);
+  const specs = buildManifestSpec(release);
+  assert.deepEqual(Object.keys(specs).sort(), windowsKeys);
+  assert.match(specs['windows-x86_64'].url, /AgentGod\.Files_0\.2\.0_x64\.msi$/);
   assert.equal(
-    specs.local['windows-aarch64'].signature_url,
-    'https://example.com/AgentGod.Files.Local_0.1.6_x64.msi.sig',
+    specs['windows-aarch64'].signature_url,
+    'https://example.com/AgentGod.Files_0.2.0_x64.msi.sig',
   );
   // An MSI without its .sig must not produce a manifest entry.
   assert.deepEqual(
-    buildManifestSpecs({
-      assets: [asset('AgentGod.Files.Local_0.1.6_x64.msi')],
+    buildManifestSpec({ assets: [asset('AgentGod.Files_0.2.0_x64.msi')] }),
+    {},
+  );
+  // Pre-merge per-app assets must never be offered to the merged app.
+  assert.deepEqual(
+    buildManifestSpec({
+      assets: [
+        asset('AgentGod.Files.Local_0.1.6_x64.msi'),
+        asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
+      ],
     }),
-    { local: {}, client: {} },
+    {},
   );
-  assert.equal(versionFromTag('desktop-v0.1.6'), '0.1.6');
-  assert.equal(appSlug('latest-local.json'), null);
-  assert.equal(appSlug('AgentGod.Files.Local_0.1.6_x64.msi'), 'local');
-  assert.equal(appSlug('AgentGod.Files.Local_0.1.6_x64.msi.sig'), 'local');
-  assert.equal(appSlug('AgentGod.Files.Client_0.1.6_x64.msi'), 'client');
-  assert.equal(appSlug('AgentGod Files Client_0.1.6_x64.msi'), 'client');
-  assert.deepEqual(buildManifestSpecs({ assets: [] }), { local: {}, client: {} });
-  // When the same package exists under a spaced and an ASCII name, the ASCII
-  // asset wins so the manifest URL stays stable.
-  const duplicated = buildManifestSpecs({
-    assets: [
-      asset('AgentGod Files Local_0.1.6_x64.msi'),
-      asset('AgentGod Files Local_0.1.6_x64.msi.sig'),
-      asset('AgentGod.Files.Local_0.1.6_x64.msi'),
-      asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
-    ],
-  });
-  assert.match(
-    duplicated.local['windows-x86_64'].url,
-    /AgentGod\.Files\.Local_0\.1\.6_x64\.msi$/,
-  );
+  assert.equal(versionFromTag('desktop-v0.2.0'), '0.2.0');
+  assert.equal(isAppAsset('AgentGod.Files_0.2.0_x64.msi'), true);
+  assert.equal(isAppAsset('AgentGod.Files_0.2.0_x64.msi.sig'), true);
+  assert.equal(isAppAsset('AgentGod.Files.Local_0.1.6_x64.msi'), false);
+  assert.equal(isAppAsset('latest-local.json'), false);
+  assert.deepEqual(buildManifestSpec({ assets: [] }), {});
   assert.equal(hasSignedAssets(release), true);
   assert.equal(
     hasSignedAssets({
       assets: [
-        asset('AgentGod.Files.Local_0.1.6_universal.dmg'),
-        asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz'),
-        asset('AgentGod.Files.Local_0.1.6_universal.app.tar.gz.sig'),
+        asset('AgentGod.Files_0.2.0_universal.dmg'),
+        asset('AgentGod.Files_0.2.0_universal.app.tar.gz'),
+        asset('AgentGod.Files_0.2.0_universal.app.tar.gz.sig'),
       ],
     }),
     false,
   );
-  console.log('updater manifest self-test OK (Windows MSI only)');
+  console.log('updater manifest self-test OK (single app, Windows MSI only)');
 }
 
 async function main() {
@@ -263,13 +237,13 @@ async function main() {
     }
     if (!hasSignedAssets(release)) {
       throw new Error(
-        '已配置 TAURI_SIGNING_PRIVATE_KEY，但 Release 中没有 macOS 签名更新包，' +
+        '已配置 TAURI_SIGNING_PRIVATE_KEY，但 Release 中没有签名的 Windows 更新包，' +
           '请检查构建日志中的签名步骤',
       );
     }
   }
 
-  await buildManifests(release, tag, outputDir);
+  await buildManifest(release, tag, outputDir);
 }
 
 const invokedDirectly =

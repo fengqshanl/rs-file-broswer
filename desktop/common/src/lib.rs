@@ -1,21 +1,29 @@
-//! Shared runtime for both desktop companions.
+//! Shared runtime for the desktop app.
 //!
-//! Each app hosts a tiny loopback HTTP server. It serves the same web UI as the
-//! standalone server and routes API, preview and asset requests either to an
-//! embedded local file service (desktop local app) or to the currently selected
-//! remote AgentGod Files server. Because the webview loads `http://127.0.0.1:<port>/`,
-//! the existing same-origin frontend works unchanged and streaming is preserved
-//! by proxying response bodies with backpressure.
+//! The app hosts a tiny loopback HTTP server. It serves the same web UI as the
+//! standalone server and routes API, preview and asset requests to the selected
+//! target: the embedded local file service, a remote AgentGod Files server, or
+//! a per-target SSH/SFTP service. Because the webview loads
+//! `http://127.0.0.1:<port>/`, the existing same-origin frontend works
+//! unchanged and streaming is preserved by proxying response bodies with
+//! backpressure.
 
+pub mod config;
+pub mod known_hosts;
+pub mod secrets;
+pub mod ssh;
 pub mod update;
 
+pub use config::{HttpTarget, SshAuth, SshTarget, TargetEntry, TargetsConfig};
+pub use known_hosts::KnownHosts;
+pub use secrets::{KeyringSecrets, MemorySecrets, Secrets};
 pub use update::{AutoInstaller, InstallStatus, NoopInstaller, UpdateHub, UpdateSource};
 
 use std::{
     collections::HashMap,
     net::IpAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock as StdRwLock},
     time::Duration,
 };
 
@@ -23,20 +31,22 @@ use anyhow::Context;
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderName, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 
 use agentgod_files::{
     config::Config,
     server::{start_http, HttpServer},
 };
+
+use ssh::service::SshService;
 
 const FORWARD_REQUEST_HEADERS: &[&str] = &[
     "authorization",
@@ -68,44 +78,14 @@ const FORWARD_RESPONSE_HEADERS: &[&str] = &[
     "www-authenticate",
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppMode {
-    Local,
-    Client,
-}
-
-impl AppMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AppMode::Local => "local",
-            AppMode::Client => "remote",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ServerEntry {
-    pub id: String,
-    pub name: String,
-    pub url: String,
-    #[serde(default)]
-    pub allow_invalid_certs: bool,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ServersConfig {
-    #[serde(default)]
-    pub active: Option<String>,
-    #[serde(default)]
-    pub servers: Vec<ServerEntry>,
-}
-
-pub struct FrontState {
-    pub mode: AppMode,
-    pub config_path: PathBuf,
-    pub config: RwLock<ServersConfig>,
-    pub local_url: Option<String>,
-    pub update: Arc<UpdateHub>,
+struct FrontState {
+    config: StdRwLock<TargetsConfig>,
+    data_dir: PathBuf,
+    local_url: Option<String>,
+    update: Arc<UpdateHub>,
+    secrets: Arc<dyn Secrets>,
+    known_hosts: Arc<Mutex<KnownHosts>>,
+    ssh: AsyncMutex<HashMap<String, SshService>>,
     clients: Mutex<HashMap<String, reqwest::Client>>,
 }
 
@@ -125,7 +105,7 @@ impl FrontState {
     }
 
     fn save(&self) {
-        let _ = save_config(&self.config_path, &self.config.read().expect("config lock"));
+        let _ = config::save(&self.data_dir, &self.config.read().expect("config lock"));
     }
 }
 
@@ -136,52 +116,86 @@ pub struct Runtime {
 }
 
 pub fn data_dir() -> PathBuf {
+    // Tests and portable installs can redirect the whole profile.
+    if let Some(dir) = std::env::var_os("AGENTGOD_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("AgentGodFiles")
 }
 
-/// Headless entry point (used by the `dev_local` / `dev_client` binaries).
-pub async fn start(mode: AppMode) -> anyhow::Result<Runtime> {
-    start_with_updater(mode, Arc::new(NoopInstaller)).await
+/// Headless entry point (used by the `dev_app` binary).
+pub async fn start() -> anyhow::Result<Runtime> {
+    start_with_updater(Arc::new(NoopInstaller)).await
 }
 
 /// Tauri shells pass an updater implementation; the companion exposes a small
 /// same-origin HTTP API so the webview never needs a JS plugin or capability.
-pub async fn start_with_updater(
-    mode: AppMode,
-    installer: Arc<dyn AutoInstaller>,
-) -> anyhow::Result<Runtime> {
+pub async fn start_with_updater(installer: Arc<dyn AutoInstaller>) -> anyhow::Result<Runtime> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("无法创建数据目录: {}", data_dir.display()))?;
 
-    // Both desktop shells are local-first: the machine's filesystem is always
-    // available, and remote servers are additional workspace tabs.
+    // The app is local-first: the machine's filesystem is always available,
+    // and remote targets are additional workspace tabs.
     let cfg = local_config(&data_dir)?;
     let local = Some(start_http(Arc::new(cfg)).await?);
     let local_url = local
         .as_ref()
         .map(|server| format!("http://{}", server.addr));
 
-    let config_path = data_dir.join(config_filename(mode));
-    let mut config = load_config(&config_path);
-    normalize_active(&mut config, local_url.is_some());
-    // The local app always opens on this machine's files; saved remote
-    // servers stay one dropdown away and are never the startup target.
-    if mode == AppMode::Local {
+    let (mut config, notes) = config::load_or_migrate(&data_dir);
+    for note in notes {
+        agentgod_files::error::log(&note);
+    }
+    config.normalize_active(local_url.is_some());
+    // Always open on this machine's files; saved targets stay one dropdown
+    // away and are never the startup target.
+    if local_url.is_some() {
         config.active = Some("local".to_string());
     }
-    save_config(&config_path, &config)?;
+    config::save(&data_dir, &config)?;
+
+    let secrets: Arc<dyn Secrets> = if std::env::var("AGENTGOD_MEMORY_SECRETS").is_ok() {
+        Arc::new(MemorySecrets::default())
+    } else {
+        Arc::new(KeyringSecrets::default())
+    };
+    let known_hosts = Arc::new(Mutex::new(KnownHosts::load(&data_dir)));
 
     let update_source = UpdateSource::load(&data_dir);
     let front = Arc::new(FrontState {
-        mode,
-        config_path,
-        config: RwLock::new(config),
+        config: StdRwLock::new(config),
+        data_dir: data_dir.clone(),
         local_url,
-        update: UpdateHub::new(mode, installer, update_source, data_dir.clone()),
+        update: UpdateHub::new(installer, update_source, data_dir.clone()),
+        secrets,
+        known_hosts,
+        ssh: AsyncMutex::new(HashMap::new()),
         clients: Mutex::new(HashMap::new()),
+    });
+
+    // Prepare SSH targets in the background: a slow or unreachable host must
+    // never delay the window.
+    let boot = front.clone();
+    tokio::spawn(async move {
+        let targets: Vec<SshTarget> = boot
+            .config
+            .read()
+            .expect("config lock")
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetEntry::Ssh(ssh) => Some(ssh.clone()),
+                _ => None,
+            })
+            .collect();
+        for target in targets {
+            if let Err(err) = ensure_ssh(&boot, &target).await {
+                agentgod_files::error::log(&format!("SSH 目标 {} 启动失败: {err}", target.name));
+            }
+        }
     });
 
     let app = router(front.clone());
@@ -202,8 +216,30 @@ pub async fn start_with_updater(
     })
 }
 
+async fn ensure_ssh(front: &Arc<FrontState>, target: &SshTarget) -> anyhow::Result<String> {
+    let mut guard = front.ssh.lock().await;
+    if let Some(service) = guard.get(&target.id) {
+        return Ok(service.base_url.clone());
+    }
+    ssh::service::clean_orphan_uploads(&front.data_dir.join("ssh-tmp").join(&target.id));
+    let service = ssh::service::start(
+        target.clone(),
+        &front.data_dir,
+        front.secrets.clone(),
+        front.known_hosts.clone(),
+    )
+    .await?;
+    let url = service.base_url.clone();
+    guard.insert(target.id.clone(), service);
+    Ok(url)
+}
+
 fn local_config(data_dir: &Path) -> anyhow::Result<Config> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    // Tests pin the visible local tree; the shipped app opens the home folder.
+    let home = std::env::var_os("AGENTGOD_LOCAL_ROOT")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/"));
     let data_root = std::fs::canonicalize(&home).unwrap_or(home);
     let tmp_root = data_dir.join("tmp-local");
     let state_dir = data_dir.join("local-state");
@@ -242,98 +278,53 @@ fn local_config(data_dir: &Path) -> anyhow::Result<Config> {
     })
 }
 
-fn load_config(path: &Path) -> ServersConfig {
-    std::fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
+struct Route {
+    base_url: String,
+    allow_invalid_certs: bool,
 }
 
-fn save_config(path: &Path, config: &ServersConfig) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+async fn route_for(front: &FrontState, id: &str) -> Option<Route> {
+    if id == "local" {
+        return front.local_url.as_ref().map(|url| Route {
+            base_url: url.clone(),
+            allow_invalid_certs: false,
+        });
     }
-    let raw = serde_json::to_vec_pretty(config)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, raw)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn config_filename(mode: AppMode) -> &'static str {
-    match mode {
-        AppMode::Local => "servers-local.json",
-        AppMode::Client => "servers-client.json",
-    }
-}
-
-fn normalize_active(config: &mut ServersConfig, has_local: bool) {
-    let valid = config.active.as_deref().map(|active| {
-        (has_local && active == "local") || config.servers.iter().any(|server| server.id == active)
-    });
-    let needs_fix = !matches!(valid, Some(true));
-    if needs_fix {
-        config.active = if has_local {
-            Some("local".to_string())
-        } else {
-            config.servers.first().map(|server| server.id.clone())
-        };
+    let target = front
+        .config
+        .read()
+        .expect("config lock")
+        .find(id)
+        .cloned()?;
+    match target {
+        TargetEntry::Http(http) => Some(Route {
+            base_url: http.url,
+            allow_invalid_certs: http.allow_invalid_certs,
+        }),
+        TargetEntry::Ssh(_) => front.ssh.lock().await.get(id).map(|service| Route {
+            base_url: service.base_url.clone(),
+            allow_invalid_certs: false,
+        }),
     }
 }
 
-fn pick_active(config: &ServersConfig, local_url: Option<&str>) -> Option<(String, String, bool)> {
+async fn resolve_active(front: &FrontState) -> Option<(String, Route)> {
+    let config = front.config.read().expect("config lock").clone();
     if let Some(active) = config.active.as_deref() {
-        if active == "local" {
-            if let Some(local_url) = local_url {
-                return Some(("local".to_string(), local_url.to_string(), false));
-            }
-        } else if let Some(server) = config.servers.iter().find(|server| server.id == active) {
-            return Some((
-                server.id.clone(),
-                server.url.clone(),
-                server.allow_invalid_certs,
-            ));
+        if let Some(route) = route_for(front, active).await {
+            return Some((active.to_string(), route));
         }
     }
-    if let Some(local_url) = local_url {
-        return Some(("local".to_string(), local_url.to_string(), false));
+    if front.local_url.is_some() {
+        if let Some(route) = route_for(front, "local").await {
+            return Some(("local".to_string(), route));
+        }
     }
-    config.servers.first().map(|server| {
-        (
-            server.id.clone(),
-            server.url.clone(),
-            server.allow_invalid_certs,
-        )
-    })
+    let first = config.targets.first()?.id().to_string();
+    route_for(front, &first).await.map(|route| (first, route))
 }
 
-fn resolve_active(front: &FrontState) -> Option<(String, String, bool)> {
-    let config = front.config.read().expect("config lock").clone();
-    pick_active(&config, front.local_url.as_deref())
-}
-
-fn resolve_target(front: &FrontState, id: &str) -> Option<(String, String, bool)> {
-    if id == "local" {
-        return front
-            .local_url
-            .as_ref()
-            .map(|url| ("local".to_string(), url.clone(), false));
-    }
-    let config = front.config.read().expect("config lock");
-    config
-        .servers
-        .iter()
-        .find(|server| server.id == id)
-        .map(|server| {
-            (
-                server.id.clone(),
-                server.url.clone(),
-                server.allow_invalid_certs,
-            )
-        })
-}
-
-pub fn router(front: Arc<FrontState>) -> Router {
+fn router(front: Arc<FrontState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(agentgod_files::web::app_js))
@@ -417,7 +408,16 @@ async fn index() -> Response {
     response
 }
 
-async fn app_info(State(front): State<Arc<FrontState>>) -> Response {
+async fn app_info(State(front): State<Arc<FrontState>>, headers: HeaderMap) -> Response {
+    // A tab asking for its own info (SSH roots, local roots) must reach that
+    // target's service; only the header-less bootstrap call builds the list.
+    if let Some(id) = headers
+        .get("x-agentgod-target")
+        .and_then(|value| value.to_str().ok())
+        .filter(|id| !id.is_empty())
+    {
+        return forward_target(&front, id, Method::GET, "/app/info", None).await;
+    }
     let config = front.config.read().expect("config lock").clone();
     let mut targets = Vec::new();
     if front.local_url.is_some() {
@@ -427,23 +427,46 @@ async fn app_info(State(front): State<Arc<FrontState>>) -> Response {
             "kind": "local"
         }));
     }
-    for server in &config.servers {
-        targets.push(json!({
-            "id": server.id,
-            "name": server.name,
-            "kind": "remote",
-            "url": server.url,
-            "allow_invalid_certs": server.allow_invalid_certs,
-        }));
+    for target in &config.targets {
+        match target {
+            TargetEntry::Http(http) => targets.push(json!({
+                "id": http.id,
+                "name": http.name,
+                "kind": "http",
+                "url": http.url,
+                "allow_invalid_certs": http.allow_invalid_certs,
+            })),
+            TargetEntry::Ssh(ssh) => {
+                let mut roots = vec![json!({ "name": "根目录", "path": "/" })];
+                if let Some(root) = ssh.root.as_deref().filter(|root| *root != "/") {
+                    roots.push(json!({ "name": "配置的目录", "path": root }));
+                }
+                targets.push(json!({
+                    "id": ssh.id,
+                    "name": ssh.name,
+                    "kind": "ssh",
+                    "host": ssh.host,
+                    "port": ssh.port,
+                    "user": ssh.username,
+                    "auth": match ssh.auth {
+                        SshAuth::Password => "password",
+                        SshAuth::Key => "key",
+                    },
+                    "key_path": ssh.key_path,
+                    "root": ssh.root,
+                    "roots": roots,
+                }));
+            }
+        }
     }
-    let active = resolve_active(&front).map(|(id, _, _)| id);
+    let active = resolve_active(&front).await.map(|(id, _)| id);
     let local = match front.local_url.as_ref() {
         Some(url) => fetch_local_info(url).await,
         None => Value::Null,
     };
 
     Json(json!({
-        "mode": front.mode.as_str(),
+        "mode": "desktop",
         "version": agentgod_files::VERSION,
         "platform": std::env::consts::OS,
         "active": active,
@@ -528,6 +551,7 @@ async fn update_restart(State(front): State<Arc<FrontState>>) -> Response {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum ServerAction {
+    /// HTTP target; the old name is kept so existing UI builds keep working.
     Add {
         name: String,
         url: String,
@@ -541,137 +565,592 @@ enum ServerAction {
         #[serde(default)]
         allow_invalid_certs: bool,
     },
+    AddSsh {
+        name: String,
+        host: String,
+        #[serde(default = "default_ssh_port")]
+        port: u16,
+        username: String,
+        #[serde(default)]
+        auth: Option<SshAuth>,
+        #[serde(default)]
+        key_path: Option<String>,
+        #[serde(default)]
+        root: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        passphrase: Option<String>,
+    },
+    UpdateSsh {
+        id: String,
+        name: String,
+        host: String,
+        #[serde(default = "default_ssh_port")]
+        port: u16,
+        username: String,
+        #[serde(default)]
+        auth: Option<SshAuth>,
+        #[serde(default)]
+        key_path: Option<String>,
+        #[serde(default)]
+        root: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        passphrase: Option<String>,
+        #[serde(default)]
+        clear_secrets: bool,
+    },
     Remove {
         id: String,
     },
+    TrustHost {
+        id: String,
+        fingerprint: String,
+    },
+    ForgetHost {
+        id: String,
+    },
+    Test {
+        id: String,
+    },
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+struct ActionFailure {
+    status: StatusCode,
+    payload: Value,
+}
+
+impl ActionFailure {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            payload: json!({ "error": message.into() }),
+        }
+    }
+
+    fn bad(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message)
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, message)
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
+
+    fn gateway(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, message)
+    }
+
+    /// Keeps the structured error from an SSH service (`code`, `host_key`, …)
+    /// so the UI can drive the fingerprint dialog, and adds the `error` alias
+    /// the generic error banner reads.
+    fn from_service(status: StatusCode, mut body: Value) -> Self {
+        if body.is_null() {
+            return Self::gateway(format!("目标服务返回错误（{status}）"));
+        }
+        if body.get("error").is_none() {
+            let message = body
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let (Some(message), Value::Object(map)) = (message, &mut body) {
+                map.insert("error".to_string(), Value::String(message));
+            }
+        }
+        Self {
+            status,
+            payload: body,
+        }
+    }
+}
+
+fn clean_name(name: &str) -> Result<String, ActionFailure> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ActionFailure::bad("名称不能为空"));
+    }
+    if name.chars().count() > 60 {
+        return Err(ActionFailure::bad("名称过长"));
+    }
+    Ok(name.to_string())
+}
+
+fn clean_host(host: &str) -> Result<String, ActionFailure> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(ActionFailure::bad("主机地址不能为空"));
+    }
+    if host.contains(char::is_whitespace) || host.contains(['/', '@']) {
+        return Err(ActionFailure::bad("主机地址不合法"));
+    }
+    Ok(host.to_string())
+}
+
+fn clean_username(username: &str) -> Result<String, ActionFailure> {
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(ActionFailure::bad("用户名不能为空"));
+    }
+    if username.contains(char::is_whitespace) || username.contains([':', '/', '@']) {
+        return Err(ActionFailure::bad("用户名不合法"));
+    }
+    Ok(username.to_string())
+}
+
+fn clean_remote_root(root: Option<String>) -> Result<Option<String>, ActionFailure> {
+    match root
+        .as_deref()
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+    {
+        None => Ok(None),
+        Some("/") => Ok(None),
+        Some(path) => {
+            if !path.starts_with('/') {
+                return Err(ActionFailure::bad("起始目录必须是绝对路径"));
+            }
+            Ok(Some(path.trim_end_matches('/').to_string()))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_ssh_target(
+    id: String,
+    name: String,
+    host: String,
+    port: u16,
+    username: String,
+    auth: Option<SshAuth>,
+    key_path: Option<String>,
+    root: Option<String>,
+) -> Result<SshTarget, ActionFailure> {
+    if port == 0 {
+        return Err(ActionFailure::bad("端口不合法"));
+    }
+    let key_path = key_path
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+    let auth = auth.unwrap_or(if key_path.is_some() {
+        SshAuth::Key
+    } else {
+        SshAuth::Password
+    });
+    if auth == SshAuth::Key && key_path.is_none() {
+        return Err(ActionFailure::bad("请选择私钥文件"));
+    }
+    Ok(SshTarget {
+        id,
+        name: clean_name(&name)?,
+        host: clean_host(&host)?,
+        port,
+        username: clean_username(&username)?,
+        auth,
+        key_path,
+        root: clean_remote_root(root)?,
+    })
+}
+
+fn ssh_target_json(target: &SshTarget) -> Value {
+    json!({
+        "ok": true,
+        "id": target.id,
+        "kind": "ssh",
+        "name": target.name,
+        "host": target.host,
+        "port": target.port,
+        "user": target.username,
+        "auth": target.auth,
+        "key_path": target.key_path,
+        "root": target.root,
+    })
+}
+
+async fn ensure_route(front: &Arc<FrontState>, id: &str) -> Result<Route, ActionFailure> {
+    if let Some(route) = route_for(front, id).await {
+        return Ok(route);
+    }
+    if id == "local" {
+        return Err(ActionFailure::not_found("本机文件服务不可用"));
+    }
+    let target = {
+        let config = front.config.read().expect("config lock");
+        config.find(id).cloned()
+    };
+    match target {
+        Some(TargetEntry::Ssh(target)) => {
+            let url = ensure_ssh(front, &target)
+                .await
+                .map_err(|err| ActionFailure::gateway(format!("SSH 服务启动失败: {err}")))?;
+            Ok(Route {
+                base_url: url,
+                allow_invalid_certs: false,
+            })
+        }
+        Some(TargetEntry::Http(_)) => Err(ActionFailure::not_found("目标地址尚未就绪")),
+        None => Err(ActionFailure::not_found("连接目标不存在")),
+    }
 }
 
 async fn servers_action(
     State(front): State<Arc<FrontState>>,
     Json(action): Json<ServerAction>,
 ) -> Response {
-    let mut config = front.config.write().expect("config lock");
-    let result = match action {
+    match handle_action(&front, action).await {
+        Ok(value) => Json(value).into_response(),
+        Err(failure) => (failure.status, Json(failure.payload)).into_response(),
+    }
+}
+
+async fn handle_action(
+    front: &Arc<FrontState>,
+    action: ServerAction,
+) -> Result<Value, ActionFailure> {
+    match action {
         ServerAction::Add {
             name,
             url,
             allow_invalid_certs,
-        } => match normalize_server(&name, &url) {
-            Ok(url) => {
-                let id = format!("{:016x}", rand::random::<u64>());
-                config.servers.push(ServerEntry {
+        } => {
+            let name = clean_name(&name)?;
+            let url = config::normalize_http_url(&url)
+                .ok_or_else(|| ActionFailure::bad("服务器地址无效"))?;
+            let id = config::new_id();
+            {
+                let mut config = front.config.write().expect("config lock");
+                config.targets.push(TargetEntry::Http(HttpTarget {
                     id: id.clone(),
-                    name: name.trim().to_string(),
+                    name,
                     url,
                     allow_invalid_certs,
-                });
-                if config.active.is_none() {
-                    config.active = Some(id.clone());
-                }
-                Ok(json!({ "ok": true, "id": id }))
+                }));
+                config.active = Some(id.clone());
             }
-            Err(message) => Err(message),
-        },
+            front.save();
+            Ok(json!({ "ok": true, "id": id }))
+        }
         ServerAction::Update {
             id,
             name,
             url,
             allow_invalid_certs,
-        } => match normalize_server(&name, &url) {
-            Ok(url) => {
-                if let Some(server) = config.servers.iter_mut().find(|server| server.id == id) {
-                    server.name = name.trim().to_string();
-                    server.url = url;
-                    server.allow_invalid_certs = allow_invalid_certs;
-                    Ok(json!({ "ok": true, "id": id }))
-                } else {
-                    Err("服务器不存在".to_string())
+        } => {
+            let name = clean_name(&name)?;
+            let url = config::normalize_http_url(&url)
+                .ok_or_else(|| ActionFailure::bad("服务器地址无效"))?;
+            {
+                let mut config = front.config.write().expect("config lock");
+                match config.find_mut(&id) {
+                    Some(TargetEntry::Http(target)) => {
+                        target.name = name;
+                        target.url = url;
+                        target.allow_invalid_certs = allow_invalid_certs;
+                    }
+                    Some(TargetEntry::Ssh(_)) => {
+                        return Err(ActionFailure::bad("该目标不是服务器地址"));
+                    }
+                    None => return Err(ActionFailure::not_found("目标不存在")),
                 }
             }
-            Err(message) => Err(message),
-        },
-        ServerAction::Remove { id } => {
-            config.servers.retain(|server| server.id != id);
-            if config.active.as_deref() == Some(id.as_str()) {
-                config.active = if front.local_url.is_some() {
-                    Some("local".to_string())
-                } else {
-                    config.servers.first().map(|server| server.id.clone())
-                };
+            front.save();
+            Ok(json!({ "ok": true, "id": id }))
+        }
+        ServerAction::AddSsh {
+            name,
+            host,
+            port,
+            username,
+            auth,
+            key_path,
+            root,
+            password,
+            passphrase,
+        } => {
+            let target = build_ssh_target(
+                config::new_id(),
+                name,
+                host,
+                port,
+                username,
+                auth,
+                key_path,
+                root,
+            )?;
+            if target.auth == SshAuth::Password
+                && password.as_deref().map(str::is_empty).unwrap_or(true)
+            {
+                return Err(ActionFailure::bad("请输入登录密码"));
             }
+            store_secret(front, &target.id, "password", &password)?;
+            store_secret(front, &target.id, "passphrase", &passphrase)?;
+            {
+                let mut config = front.config.write().expect("config lock");
+                config.targets.push(TargetEntry::Ssh(target.clone()));
+                config.active = Some(target.id.clone());
+            }
+            front.save();
+            ensure_ssh(front, &target)
+                .await
+                .map_err(|err| ActionFailure::gateway(format!("SSH 服务启动失败: {err}")))?;
+            Ok(ssh_target_json(&target))
+        }
+        ServerAction::UpdateSsh {
+            id,
+            name,
+            host,
+            port,
+            username,
+            auth,
+            key_path,
+            root,
+            password,
+            passphrase,
+            clear_secrets,
+        } => {
+            let existing = {
+                let config = front.config.read().expect("config lock");
+                config.find(&id).cloned()
+            };
+            let Some(TargetEntry::Ssh(old)) = existing else {
+                return Err(ActionFailure::not_found("SSH 目标不存在"));
+            };
+            let target = build_ssh_target(
+                old.id.clone(),
+                name,
+                host,
+                port,
+                username,
+                auth.or(Some(old.auth)),
+                key_path.or_else(|| old.key_path.clone()),
+                root.or_else(|| old.root.clone().or(Some(String::new()))),
+            )?;
+            if target.auth == SshAuth::Password {
+                let supplied = password
+                    .as_deref()
+                    .map(|value| !value.is_empty())
+                    .unwrap_or(false);
+                let stored = front
+                    .secrets
+                    .get(&secrets::account(&id, "password"))
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !supplied && (!stored || clear_secrets) {
+                    return Err(ActionFailure::bad("请输入登录密码"));
+                }
+            }
+            if clear_secrets {
+                clear_secret(front, &id, "password");
+                clear_secret(front, &id, "passphrase");
+            } else {
+                store_secret(front, &id, "password", &password)?;
+                store_secret(front, &id, "passphrase", &passphrase)?;
+            }
+            {
+                let mut config = front.config.write().expect("config lock");
+                match config.find_mut(&id) {
+                    Some(slot) => *slot = TargetEntry::Ssh(target.clone()),
+                    None => return Err(ActionFailure::not_found("SSH 目标不存在")),
+                }
+            }
+            front.save();
+            // Rebuild the service so the new host/credentials take effect and
+            // any cached connection is dropped.
+            front.ssh.lock().await.remove(&id);
+            ensure_ssh(front, &target)
+                .await
+                .map_err(|err| ActionFailure::gateway(format!("SSH 服务启动失败: {err}")))?;
+            Ok(ssh_target_json(&target))
+        }
+        ServerAction::Remove { id } => {
+            if id == "local" {
+                return Err(ActionFailure::bad("不能删除本机"));
+            }
+            let removed = {
+                let mut config = front.config.write().expect("config lock");
+                let before = config.targets.len();
+                config.targets.retain(|target| target.id() != id);
+                let removed = config.targets.len() != before;
+                if removed {
+                    config.normalize_active(front.local_url.is_some());
+                }
+                removed
+            };
+            if !removed {
+                return Err(ActionFailure::not_found("目标不存在"));
+            }
+            front.save();
+            front.ssh.lock().await.remove(&id);
+            clear_secret(front, &id, "password");
+            clear_secret(front, &id, "passphrase");
             Ok(json!({ "ok": true }))
         }
-    };
-    drop(config);
-    match result {
-        Ok(body) => {
-            front.save();
-            Json(body).into_response()
+        ServerAction::TrustHost { id, fingerprint } => {
+            let route = ensure_route(front, &id).await?;
+            post_service(
+                &route,
+                "/app/ssh/trust",
+                json!({ "fingerprint": fingerprint }),
+            )
+            .await
         }
-        Err(message) => {
-            (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+        ServerAction::ForgetHost { id } => {
+            let route = ensure_route(front, &id).await?;
+            post_service(&route, "/app/ssh/forget", json!({})).await
+        }
+        ServerAction::Test { id } => {
+            let target = {
+                let config = front.config.read().expect("config lock");
+                config.find(&id).cloned()
+            };
+            match target {
+                Some(TargetEntry::Ssh(_)) => {
+                    let route = ensure_route(front, &id).await?;
+                    post_service(&route, "/app/ssh/test", json!({})).await
+                }
+                Some(TargetEntry::Http(http)) => {
+                    let client = front.client(&id, http.allow_invalid_certs);
+                    let response = client
+                        .get(format!("{}/app/info", http.url))
+                        .timeout(Duration::from_secs(10))
+                        .send()
+                        .await
+                        .map_err(|err| ActionFailure::gateway(format!("无法连接服务器: {err}")))?;
+                    let status = response.status();
+                    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+                    if status.is_success() {
+                        Ok(json!({ "ok": true, "info": body }))
+                    } else {
+                        Err(ActionFailure::from_service(status, body))
+                    }
+                }
+                None => Err(ActionFailure::not_found("目标不存在")),
+            }
         }
     }
 }
 
-fn normalize_server(name: &str, url: &str) -> Result<String, String> {
-    if name.trim().is_empty() {
-        return Err("请填写名称".to_string());
-    }
-    let trimmed = url.trim();
-    let candidate = if trimmed.contains("://") {
-        trimmed.to_string()
-    } else {
-        format!("https://{trimmed}")
+fn store_secret(
+    front: &FrontState,
+    id: &str,
+    field: &str,
+    value: &Option<String>,
+) -> Result<(), ActionFailure> {
+    let Some(value) = value.as_deref().filter(|value| !value.is_empty()) else {
+        return Ok(());
     };
-    let parsed = reqwest::Url::parse(&candidate).map_err(|_| "URL 格式不正确".to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("只支持 http 或 https".to_string());
-    }
-    if parsed.host_str().is_none() {
-        return Err("URL 缺少主机名".to_string());
-    }
-    Ok(candidate.trim_end_matches('/').to_string())
+    front
+        .secrets
+        .set(&secrets::account(id, field), value)
+        .map_err(|err| ActionFailure::internal(err.to_string()))
 }
 
-async fn local_set_root(State(front): State<Arc<FrontState>>, body: Bytes) -> Response {
-    let Some(local_url) = front.local_url.as_ref() else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "本机模式不可用" })),
-        )
-            .into_response();
-    };
-    let client = front.client("local-admin", false);
-    match client
-        .post(format!("{local_url}/app/local/root"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(body)
+fn clear_secret(front: &FrontState, id: &str, field: &str) {
+    let _ = front.secrets.delete(&secrets::account(id, field));
+}
+
+async fn post_service(route: &Route, path: &str, payload: Value) -> Result<Value, ActionFailure> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .danger_accept_invalid_certs(route.allow_invalid_certs)
+        .build()
+        .map_err(|err| ActionFailure::internal(err.to_string()))?;
+    let response = client
+        .post(format!("{}{}", route.base_url, path))
+        .json(&payload)
         .send()
         .await
-    {
-        Ok(response) => {
-            let status = response.status();
-            let content_type = response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("application/json")
-                .to_string();
-            let bytes = response.bytes().await.unwrap_or_default();
-            let mut out = Response::new(Body::from(bytes));
-            *out.status_mut() = status;
-            if let Ok(value) = HeaderValue::from_str(&content_type) {
-                out.headers_mut().insert(header::CONTENT_TYPE, value);
-            }
-            out
-        }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("本机服务不可用: {err}") })),
-        )
-            .into_response(),
+        .map_err(|err| ActionFailure::gateway(format!("无法连接目标服务: {err}")))?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(ActionFailure::from_service(status, body))
     }
+}
+
+/// Sends one request to a target's loopback service, starting an SSH service
+/// on demand. Used for `/app/info` and root switching, which the companion
+/// itself also serves and therefore cannot route through `proxy`.
+async fn forward_target(
+    front: &Arc<FrontState>,
+    id: &str,
+    method: Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Response {
+    let route = match ensure_route(front, id).await {
+        Ok(route) => route,
+        Err(failure) => return (failure.status, Json(failure.payload)).into_response(),
+    };
+    let client = front.client(&format!("forward:{id}"), route.allow_invalid_certs);
+    let url = format!("{}{}", route.base_url.trim_end_matches('/'), path);
+    let mut builder = client.request(to_reqwest_method(&method), url);
+    if let Some(body) = body {
+        builder = builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body);
+    }
+    let response = match builder.timeout(Duration::from_secs(20)).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("目标服务不可用: {err}") })),
+            )
+                .into_response()
+        }
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    let stream = response.bytes_stream();
+    let mut out = Response::new(Body::from_stream(stream));
+    *out.status_mut() = status;
+    for name in FORWARD_RESPONSE_HEADERS {
+        if let Some(value) = headers.get(*name) {
+            if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
+                out.headers_mut().insert(header_name, value.clone());
+            }
+        }
+    }
+    out
+}
+
+async fn local_set_root(State(front): State<Arc<FrontState>>, request: Request) -> Response {
+    let target = request
+        .headers()
+        .get("x-agentgod-target")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let id = match target {
+        Some(id) => id,
+        None => match resolve_active(&front).await {
+            Some((id, _)) => id,
+            None => "local".to_string(),
+        },
+    };
+    let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid body").into_response(),
+    };
+    forward_target(
+        &front,
+        &id,
+        Method::POST,
+        "/app/local/root",
+        Some(body.to_vec()),
+    )
+    .await
 }
 
 async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Response {
@@ -680,25 +1159,27 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
         .get("x-agentgod-target")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let target = match requested {
-        Some(id) => match resolve_target(&front, &id) {
-            Some(target) => Some(target),
+    let (target_id, route) = match requested {
+        Some(id) => match route_for(&front, &id).await {
+            Some(route) => (id, route),
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "连接目标不存在，请刷新服务器列表" })),
+                    Json(json!({ "error": "连接目标不存在或尚未就绪，请刷新服务器列表" })),
                 )
                     .into_response()
             }
         },
-        None => resolve_active(&front),
-    };
-    let Some((target_id, base_url, allow_invalid_certs)) = target else {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "尚未配置服务器，请先在连接设置中添加" })),
-        )
-            .into_response();
+        None => match resolve_active(&front).await {
+            Some(pair) => pair,
+            None => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "尚未配置服务器，请先在连接设置中添加" })),
+                )
+                    .into_response()
+            }
+        },
     };
 
     let path_and_query = request
@@ -706,7 +1187,7 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let url = format!("{}{}", base_url.trim_end_matches('/'), path_and_query);
+    let url = format!("{}{}", route.base_url.trim_end_matches('/'), path_and_query);
     let method = request.method().clone();
     let headers = request.headers().clone();
 
@@ -721,7 +1202,7 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
         }
     };
 
-    let client = front.client(&target_id, allow_invalid_certs);
+    let client = front.client(&target_id, route.allow_invalid_certs);
     let mut builder = client.request(to_reqwest_method(&method), &url);
     for name in FORWARD_REQUEST_HEADERS {
         if let Some(value) = headers.get(*name) {
@@ -729,7 +1210,7 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
         }
     }
 
-    let response = match builder.body(body).send().await {
+    let response = match builder.body(body.to_vec()).send().await {
         Ok(response) => response,
         Err(err) => {
             return (
@@ -763,105 +1244,41 @@ fn to_reqwest_method(method: &Method) -> reqwest::Method {
 mod tests {
     use super::*;
 
-    fn server(id: &str, url: &str, allow_invalid_certs: bool) -> ServerEntry {
-        ServerEntry {
-            id: id.to_string(),
-            name: id.to_string(),
-            url: url.to_string(),
-            allow_invalid_certs,
-        }
-    }
-
-    #[test]
-    fn config_files_are_per_app() {
-        assert_eq!(config_filename(AppMode::Local), "servers-local.json");
-        assert_eq!(config_filename(AppMode::Client), "servers-client.json");
-    }
-
-    #[test]
-    fn server_urls_are_normalized() {
-        assert_eq!(
-            normalize_server("NAS", "192.168.1.10:8090").unwrap(),
-            "https://192.168.1.10:8090"
-        );
-        assert_eq!(
-            normalize_server("NAS", " http://127.0.0.1:8090/ ").unwrap(),
-            "http://127.0.0.1:8090"
-        );
-        assert!(normalize_server("  ", "https://example.com").is_err());
-        assert!(normalize_server("NAS", "ftp://example.com").is_err());
-        assert!(normalize_server("NAS", "https://").is_err());
-    }
-
-    #[test]
-    fn active_target_is_repaired_when_stale() {
-        let mut config = ServersConfig {
-            active: Some("missing".to_string()),
-            servers: vec![server("a", "https://a.example", false)],
-        };
-        normalize_active(&mut config, true);
-        assert_eq!(config.active.as_deref(), Some("local"));
-
-        normalize_active(&mut config, false);
-        assert_eq!(config.active.as_deref(), Some("a"));
-
-        let mut empty = ServersConfig::default();
-        normalize_active(&mut empty, false);
-        assert!(empty.active.is_none());
-    }
-
-    #[test]
-    fn explicit_active_server_wins_without_local_mode() {
-        let config = ServersConfig {
-            active: Some("b".to_string()),
-            servers: vec![
-                server("a", "https://a.example", false),
-                server("b", "https://b.example", true),
-            ],
-        };
-        assert_eq!(
-            pick_active(&config, None),
-            Some(("b".to_string(), "https://b.example".to_string(), true))
-        );
-    }
-
-    #[test]
-    fn local_target_is_used_when_selected_or_when_no_remote_is_active() {
-        let config = ServersConfig {
-            active: Some("local".to_string()),
-            servers: vec![server("a", "https://a.example", false)],
-        };
-        assert_eq!(
-            pick_active(&config, Some("http://127.0.0.1:1234")),
-            Some((
-                "local".to_string(),
-                "http://127.0.0.1:1234".to_string(),
-                false
-            ))
-        );
-
-        let fallback = ServersConfig {
-            active: None,
-            servers: vec![server("a", "https://a.example", false)],
-        };
-        assert_eq!(
-            pick_active(&fallback, None),
-            Some(("a".to_string(), "https://a.example".to_string(), false))
-        );
-        assert_eq!(pick_active(&ServersConfig::default(), None), None);
-    }
-
     #[test]
     fn loopback_origins_are_accepted() {
         for origin in [
-            "http://127.0.0.1:8090",
-            "http://localhost:8090",
-            "https://[::1]:8090",
+            "http://127.0.0.1:1234",
+            "http://localhost:9000",
+            "https://[::1]:8443",
         ] {
             assert!(is_loopback_origin(origin), "{origin}");
         }
-        for origin in ["https://evil.example", "null", "file:///tmp/x"] {
+        for origin in ["https://evil.example", "file:///tmp/x", "null"] {
             assert!(!is_loopback_origin(origin), "{origin}");
         }
+    }
+
+    #[test]
+    fn config_file_is_shared() {
+        assert_eq!(config::CONFIG_FILENAME, "targets.json");
+    }
+
+    #[test]
+    fn ssh_targets_store_no_secrets() {
+        let target = SshTarget {
+            id: "t1".to_string(),
+            name: "VPS".to_string(),
+            host: "203.0.113.7".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth: SshAuth::Password,
+            key_path: None,
+            root: Some("/var/www".to_string()),
+        };
+        let raw = serde_json::to_string(&TargetEntry::Ssh(target)).unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("password").is_none());
+        assert!(value.get("passphrase").is_none());
+        assert!(raw.contains("\"kind\":\"ssh\""));
     }
 }

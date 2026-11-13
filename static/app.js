@@ -100,7 +100,21 @@ function getTab(id) {
 function targetLabel(target) {
   if (!target) return '服务器';
   if (target.kind === 'local') return '本机';
-  return target.name || target.url || '服务器';
+  return target.name || target.host || target.url || '服务器';
+}
+
+/// Local files and SSH hosts both authenticate through /api/local-login.
+function isPasswordless(target) {
+  return Boolean(target) && (target.kind === 'local' || target.kind === 'ssh');
+}
+
+function targetDetail(target) {
+  if (!target) return '';
+  if (target.kind === 'ssh') {
+    const port = target.port && target.port !== 22 ? `:${target.port}` : '';
+    return `${target.user || ''}@${target.host || ''}${port}`;
+  }
+  return target.url || '';
 }
 
 function targetHeaders(tab) {
@@ -486,9 +500,9 @@ function handleSessionLost(message, tab = activeTab()) {
     updatePasteButton();
     return;
   }
-  if (tab.target.kind === 'local') {
+  if (isPasswordless(tab.target)) {
     void enterLocalTab(tab).catch((error) => {
-      showTabLogin(tab, error.message || '本机服务未就绪');
+      showTabLogin(tab, error.message || '连接失败');
     });
     return;
   }
@@ -508,16 +522,17 @@ async function onLogin(event) {
   showLoginError('');
   const tab = loginTab || activeTab();
   const button = $('#login-btn');
-  if (tab.target.kind === 'local') {
+  if (isPasswordless(tab.target)) {
     button.disabled = true;
-    button.textContent = '正在连接本机…';
+    button.textContent = '正在连接…';
     try {
       await enterLocalTab(tab);
     } catch (error) {
-      showLoginError(error.message || '本机服务不可用');
+      showLoginError(error.message || '连接失败');
     } finally {
       button.disabled = false;
-      button.textContent = '重新连接本机';
+      button.textContent =
+        tab.target.kind === 'local' ? '重新连接本机' : '连接服务器';
     }
     return;
   }
@@ -544,7 +559,7 @@ async function onLogin(event) {
 
 async function onLogout() {
   const tab = activeTab();
-  if (!tab.session || tab.target.kind === 'local') return;
+  if (!tab.session || isPasswordless(tab.target)) return;
   try {
     await api('/api/logout', {}, 'POST', tab);
   } catch {
@@ -3315,20 +3330,28 @@ function showAppView() {
 
 function showTabLogin(tab, message = '') {
   loginTab = tab;
-  const local = tab.target.kind === 'local';
+  const passwordless = isPasswordless(tab.target);
   $('#app-view').hidden = true;
   $('#login-view').hidden = false;
-  $('#login-desc').textContent = local
-    ? '本机文件服务未就绪。点击下方按钮重新连接本机。'
+  $('#login-desc').textContent = passwordless
+    ? tab.target.kind === 'local'
+      ? '本机文件服务未就绪。点击下方按钮重新连接本机。'
+      : `连接 ${targetLabel(tab.target)}（${targetDetail(tab.target)}），文件会显示在当前标签中。`
     : tab.target.kind === 'standalone'
       ? '登录后即可安全地浏览、上传与下载文件。'
       : `登录 ${targetLabel(tab.target)}，文件会显示在当前标签中。`;
-  for (const field of document.querySelectorAll('#login-form .field')) field.hidden = local;
-  $('#login-btn').textContent = local ? '重新连接本机' : '加密登录';
+  for (const field of document.querySelectorAll('#login-form .field')) {
+    field.hidden = passwordless;
+  }
+  $('#login-btn').textContent = passwordless
+    ? tab.target.kind === 'local'
+      ? '重新连接本机'
+      : '连接服务器'
+    : '加密登录';
   $('#username').value = '';
   $('#password').value = '';
   showLoginError(message || '');
-  if (!local) setTimeout(() => $('#username').focus(), 30);
+  if (!passwordless) setTimeout(() => $('#username').focus(), 30);
 }
 
 function ensureTab(target) {
@@ -3367,9 +3390,13 @@ function renderTabs() {
     const active = target.id === state.activeTabId;
     const button = buttonEl(
       '',
-      `workspace-tab ${target.kind === 'local' ? 'local' : 'remote'}${
-        tab.session ? '' : ' locked'
-      }${active ? ' active' : ''}`,
+      `workspace-tab ${
+        target.kind === 'local'
+          ? 'local'
+          : target.kind === 'ssh'
+            ? 'ssh'
+            : 'remote'
+      }${tab.session ? '' : ' locked'}${active ? ' active' : ''}`,
     );
     button.dataset.tabId = target.id;
     button.setAttribute('role', 'tab');
@@ -3381,7 +3408,7 @@ function renderTabs() {
     button.title =
       target.kind === 'local'
         ? '本机文件系统'
-        : `${target.url || ''}${tab.session ? '' : '（未登录）'}`;
+        : `${targetDetail(target)}${tab.session ? '' : '（未连接）'}`;
     button.addEventListener('click', () => void activateTab(target.id));
     container.append(button);
   }
@@ -3398,6 +3425,14 @@ async function activateTab(id, options = {}) {
   renderRootSelect();
   updatePasteButton();
   if (!tab.session) {
+    if (isPasswordless(tab.target)) {
+      try {
+        await enterLocalTab(tab);
+      } catch (error) {
+        showTabLogin(tab, error.message || '连接失败');
+      }
+      return;
+    }
     showTabLogin(tab);
     return;
   }
@@ -3411,16 +3446,20 @@ async function activateTab(id, options = {}) {
 }
 
 function updateTabChrome(tab) {
-  const local = tab.target.kind === 'local';
-  $('#user-badge').textContent = local
-    ? '本机'
+  const passwordless = isPasswordless(tab.target);
+  $('#user-badge').textContent = passwordless
+    ? tab.target.kind === 'local'
+      ? '本机'
+      : targetDetail(tab.target)
     : tab.session?.user || targetLabel(tab.target);
-  $('#btn-account').hidden = local || !tab.session;
-  $('#btn-logout').hidden = local || !tab.session;
-  $('#session-note').textContent = local
-    ? '本机文件通过回环服务访问，不上传任何数据'
+  $('#btn-account').hidden = passwordless || !tab.session;
+  $('#btn-logout').hidden = passwordless || !tab.session;
+  $('#session-note').textContent = passwordless
+    ? tab.target.kind === 'local'
+      ? '本机文件通过回环服务访问，不上传任何数据'
+      : 'SSH 加密通道直连服务器，文件不经过第三方'
     : '会话密钥仅保存在本页内存，刷新后需重新登录';
-  $('#local-root-wrap').hidden = !local;
+  $('#local-root-wrap').hidden = !passwordless;
   $('#app-bar').hidden = !state.app;
   renderRootSelect();
 }
@@ -3439,17 +3478,67 @@ async function enterLocalTab(tab) {
     cache: 'no-store',
     headers: targetHeaders(tab),
   });
-  if (!response.ok) throw new Error('本机服务未就绪');
+  if (!response.ok) {
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    if (
+      data &&
+      data.host_key &&
+      (data.code === 'host_key_unknown' || data.code === 'host_key_mismatch')
+    ) {
+      const accepted = await confirmHostKey(
+        tab.target,
+        data.host_key,
+        data.previous_fingerprint,
+      );
+      if (accepted) return enterLocalTab(tab);
+    }
+    const failure = new Error(
+      (data && (data.error || data.message)) ||
+        (response.status === 401 ? '用户名或密码错误' : '连接失败'),
+    );
+    failure.data = data;
+    throw failure;
+  }
   const data = await response.json();
   tab.session = {
     key: await importAesKey(base64ToBytes(data.key)),
     token: data.token,
     user: data.user || 'local',
   };
+  await refreshTargetRoots(tab);
+  renderTabs();
   if (tab === activeTab()) {
     showAppView();
     updateTabChrome(tab);
     await loadDir(tab.cwd || '/', { tab, skipHistory: true });
+  }
+}
+
+/// SSH roots live in the per-target service, so ask it directly; the local
+/// service reports its roots through /app/info.
+async function refreshTargetRoots(tab) {
+  if (tab.target.kind === 'local') {
+    tab.roots = state.app?.local?.roots || null;
+    tab.rootPath = state.app?.local?.root || null;
+    return;
+  }
+  if (tab.target.kind !== 'ssh') return;
+  try {
+    const response = await fetch('/app/info', {
+      cache: 'no-store',
+      headers: targetHeaders(tab),
+    });
+    if (!response.ok) return;
+    const info = await response.json();
+    if (Array.isArray(info.roots)) tab.roots = info.roots;
+    if (typeof info.root === 'string') tab.rootPath = info.root;
+  } catch {
+    /* keep whatever roots we already had */
   }
 }
 
@@ -3488,11 +3577,11 @@ async function boot() {
   const tab = ensureTab(initial);
   renderTabs();
   renderRootSelect();
-  if (tab.target.kind === 'local') {
+  if (isPasswordless(tab.target)) {
     try {
       await enterLocalTab(tab);
     } catch (error) {
-      showTabLogin(tab, error.message || '无法进入本机模式');
+      showTabLogin(tab, error.message || '无法连接');
     }
   } else {
     showTabLogin(tab);
@@ -3503,23 +3592,36 @@ function renderRootSelect() {
   const info = state.app;
   const wrap = $('#local-root-wrap');
   const tab = activeTab();
-  if (
-    !info ||
-    !info.local ||
-    tab.target.kind !== 'local' ||
-    !Array.isArray(info.local.roots)
-  ) {
+  if (!info || !tab || !isPasswordless(tab.target)) {
+    wrap.hidden = true;
+    return;
+  }
+  const local = tab.target.kind === 'local';
+  const roots = local ? info.local && info.local.roots : tab.roots;
+  const current = local ? info.local && info.local.root : tab.rootPath;
+  if (!Array.isArray(roots) || roots.length === 0) {
     wrap.hidden = true;
     return;
   }
   wrap.hidden = false;
   const select = $('#root-select');
   select.replaceChildren();
-  for (const root of info.local.roots) {
+  let matched = false;
+  for (const root of roots) {
     const option = document.createElement('option');
     option.value = root.path;
     option.textContent = root.name;
-    if (root.path === info.local.root) option.selected = true;
+    if (root.path === current) {
+      option.selected = true;
+      matched = true;
+    }
+    select.append(option);
+  }
+  if (!matched && current) {
+    const option = document.createElement('option');
+    option.value = current;
+    option.textContent = current;
+    option.selected = true;
     select.append(option);
   }
 }
@@ -3551,9 +3653,108 @@ async function serversAction(payload) {
     data = null;
   }
   if (!response.ok) {
-    throw new Error(data && data.error ? data.error : '操作失败');
+    const error = new Error(
+      data && (data.error || data.message) ? data.error || data.message : '操作失败',
+    );
+    error.data = data;
+    error.code = data && data.code;
+    throw error;
   }
   return data;
+}
+
+/* ---------- Host key confirmation (TOFU) ---------- */
+
+/// Shows the SHA256 fingerprint and resolves true only after the user trusts
+/// it. Mismatches offer to forget the old pin instead of silently replacing it.
+function confirmHostKey(target, info, previousFingerprint) {
+  return new Promise((resolve) => {
+    const overlay = $('#hostkey-overlay');
+    const panel = $('#hostkey-panel');
+    if (!overlay || !panel) {
+      resolve(false);
+      return;
+    }
+    const mismatch = Boolean(previousFingerprint);
+    const body = div('modal-body');
+    const heading = document.createElement('h2');
+    heading.textContent = mismatch ? '主机密钥已变更' : '确认主机指纹';
+
+    const text = document.createElement('p');
+    text.className = 'modal-text';
+    text.textContent = mismatch
+      ? `${info.host}:${info.port} 出示的密钥与之前保存的不一致。这可能意味着服务器重装过，也可能有人正在拦截连接。`
+      : `首次连接 ${info.host}:${info.port}。请与服务器管理员核对下面的 SHA256 指纹，确认一致后再继续。`;
+
+    const fingerprint = div('hostkey-fingerprint');
+    const fingerprintLabel = span('hostkey-label');
+    fingerprintLabel.textContent = `SHA256 指纹 · ${info.algorithm || ''}`;
+    const code = document.createElement('code');
+    code.textContent = info.fingerprint || '';
+    fingerprint.append(fingerprintLabel, code);
+
+    if (mismatch && previousFingerprint) {
+      const previous = div('hostkey-fingerprint previous');
+      const previousLabel = span('hostkey-label');
+      previousLabel.textContent = '之前保存的指纹';
+      const old = document.createElement('code');
+      old.textContent = previousFingerprint;
+      previous.append(previousLabel, old);
+      body.append(heading, text, fingerprint, previous);
+    } else {
+      body.append(heading, text, fingerprint);
+    }
+
+    const error = div('form-error inline-error');
+    const actions = div('form-actions');
+    const cancel = buttonEl('取消', 'btn ghost');
+    const confirm = buttonEl(mismatch ? '清除旧指纹并重试' : '信任并连接', 'btn primary');
+    actions.append(confirm, cancel);
+    body.append(error, actions);
+    panel.replaceChildren(body);
+    overlay.hidden = false;
+
+    let settled = false;
+    let onKey = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (onKey) document.removeEventListener('keydown', onKey);
+      overlay.onclick = null;
+      overlay.hidden = true;
+      panel.replaceChildren();
+      resolve(value);
+    };
+    cancel.addEventListener('click', () => finish(false));
+    overlay.onclick = (event) => {
+      if (event.target.closest('[data-hostkey-cancel]')) finish(false);
+    };
+    onKey = (event) => {
+      if (event.key === 'Escape') finish(false);
+    };
+    document.addEventListener('keydown', onKey);
+    confirm.addEventListener('click', async () => {
+      error.textContent = '';
+      confirm.disabled = true;
+      try {
+        if (mismatch) {
+          await serversAction({ action: 'forget_host', id: target.id });
+          finish(true);
+          return;
+        }
+        await serversAction({
+          action: 'trust_host',
+          id: target.id,
+          fingerprint: info.fingerprint,
+        });
+        finish(true);
+      } catch (failure) {
+        error.textContent = failure.message || '操作失败';
+        confirm.disabled = false;
+      }
+    });
+    setTimeout(() => confirm.focus(), 30);
+  });
 }
 
 /* ---------- Add / manage servers (custom overlay, WKWebView safe) ---------- */
@@ -3576,11 +3777,11 @@ function openServersDialog() {
 
   const body = div('modal-body');
   const heading = document.createElement('h2');
-  heading.textContent = '服务器连接';
+  heading.textContent = '连接管理';
   const hint = document.createElement('p');
   hint.className = 'modal-text';
   hint.textContent =
-    '本机文件默认显示在第一个标签。这里可以添加 AgentGod Files 服务器（HTTPS / HTTP），添加后会生成独立标签，可同时登录多台服务器。';
+    '本机文件始终显示在第一个标签。这里可以添加 AgentGod Files 服务器（HTTPS / HTTP），或通过 SSH/SFTP 直接管理远程服务器的文件。';
 
   const close = buttonEl('', 'btn ghost icon-only panel-close');
   close.innerHTML = ICONS.close;
@@ -3592,10 +3793,25 @@ function openServersDialog() {
   const form = div('server-form');
 
   const nameField = labeledInput('名称', 'text', 'off');
+  nameField.input.placeholder = '例如：办公室 NAS';
+
+  const kindField = document.createElement('label');
+  kindField.className = 'field protocol';
+  const kindLabel = span('类型');
+  const kindSelect = document.createElement('select');
+  kindSelect.className = 'app-select';
+  kindSelect.innerHTML =
+    '<option value="http">AgentGod 服务器</option><option value="ssh">SSH / SFTP</option>';
+  kindField.append(kindLabel, kindSelect);
+
+  const kindRow = div('form-row');
+  kindRow.append(kindField, nameField.field);
+
+  /* ---------- AgentGod server fields ---------- */
+  const httpGroup = div('server-group');
   const protocolField = document.createElement('label');
   protocolField.className = 'field protocol';
-  const protocolLabel = document.createElement('span');
-  protocolLabel.textContent = '协议';
+  const protocolLabel = span('协议');
   const protocolSelect = document.createElement('select');
   protocolSelect.className = 'app-select';
   protocolSelect.innerHTML =
@@ -3603,8 +3819,8 @@ function openServersDialog() {
   protocolField.append(protocolLabel, protocolSelect);
   const urlField = labeledInput('服务器地址', 'text', 'off');
   urlField.input.placeholder = '192.168.1.10:8090 或完整 URL';
-  const formRow = div('form-row');
-  formRow.append(protocolField, urlField.field);
+  const httpRow = div('form-row');
+  httpRow.append(protocolField, urlField.field);
 
   const checkRow = document.createElement('label');
   checkRow.className = 'check';
@@ -3614,13 +3830,58 @@ function openServersDialog() {
   checkText.textContent = '允许自签名证书（首次连接常见）';
   checkRow.append(checkBox, checkText);
 
+  httpGroup.append(httpRow, checkRow);
+
+  /* ---------- SSH / SFTP fields ---------- */
+  const sshGroup = div('server-group');
+  const hostField = labeledInput('主机', 'text', 'off');
+  hostField.input.placeholder = '192.168.1.20 或 example.com';
+  hostField.field.classList.add('grow');
+  const portField = labeledInput('端口', 'number', 'off');
+  portField.input.value = '22';
+  portField.input.min = '1';
+  portField.input.max = '65535';
+  portField.field.classList.add('port');
+  const hostRow = div('form-row');
+  hostRow.append(hostField.field, portField.field);
+
+  const userField = labeledInput('用户名', 'text', 'username');
+  userField.input.placeholder = 'root';
+  const authField = document.createElement('label');
+  authField.className = 'field protocol';
+  const authLabel = span('认证方式');
+  const authSelect = document.createElement('select');
+  authSelect.className = 'app-select';
+  authSelect.innerHTML =
+    '<option value="password">密码</option><option value="key">私钥</option>';
+  authField.append(authLabel, authSelect);
+  const userRow = div('form-row');
+  userRow.append(userField.field, authField);
+
+  const passwordField = labeledInput('密码', 'password', 'current-password');
+  const keyField = labeledInput('私钥文件', 'text', 'off');
+  keyField.input.placeholder = 'C:\\Users\\you\\.ssh\\id_ed25519';
+  const passphraseField = labeledInput('私钥口令（可选）', 'password', 'off');
+  const rootField = labeledInput('起始目录（可选）', 'text', 'off');
+  rootField.input.placeholder = '/var/www（留空进入主目录）';
+
+  sshGroup.append(
+    hostRow,
+    userRow,
+    passwordField.field,
+    keyField.field,
+    passphraseField.field,
+    rootField.field,
+  );
+
   const errorEl = div('form-error inline-error');
   const formActions = div('form-actions');
   const saveButton = buttonEl('添加服务器', 'btn primary');
   const cancelEdit = buttonEl('取消编辑', 'btn ghost small');
   cancelEdit.hidden = true;
   formActions.append(saveButton, cancelEdit);
-  form.append(nameField.field, formRow, checkRow, errorEl, formActions);
+
+  form.append(kindRow, httpGroup, sshGroup, errorEl, formActions);
 
   const footer = div('modal-actions');
   const done = buttonEl('关闭', 'btn ghost');
@@ -3630,25 +3891,91 @@ function openServersDialog() {
   body.append(heading, hint, close, list, form, footer);
   panel.replaceChildren(body);
 
+  let editingTarget = null;
+
+  const updateAuthFields = () => {
+    const usesKey = authSelect.value === 'key';
+    passwordField.field.hidden = usesKey;
+    keyField.field.hidden = !usesKey;
+    passphraseField.field.hidden = !usesKey;
+  };
+
+  const applyKind = (kind) => {
+    httpGroup.hidden = kind !== 'http';
+    sshGroup.hidden = kind !== 'ssh';
+    if (kind === 'ssh') updateAuthFields();
+    if (!editingTarget) {
+      saveButton.textContent = kind === 'ssh' ? '添加 SSH 连接' : '添加服务器';
+    }
+  };
+
+  const setKind = (kind) => {
+    kindSelect.value = kind;
+    kindSelect.disabled = Boolean(serverPanelEditing);
+    applyKind(kind);
+  };
+
   const resetForm = () => {
     serverPanelEditing = null;
+    editingTarget = null;
     nameField.input.value = '';
     urlField.input.value = '';
     protocolSelect.value = 'https';
     checkBox.checked = false;
+    hostField.input.value = '';
+    portField.input.value = '22';
+    userField.input.value = '';
+    authSelect.value = 'password';
+    passwordField.input.value = '';
+    passwordField.input.placeholder = '';
+    keyField.input.value = '';
+    passphraseField.input.value = '';
+    passphraseField.input.placeholder = '';
+    rootField.input.value = '';
     saveButton.textContent = '添加服务器';
     cancelEdit.hidden = true;
     errorEl.textContent = '';
+    setKind('http');
+  };
+
+  const beginEdit = (target) => {
+    serverPanelEditing = target.id;
+    editingTarget = target;
+    errorEl.textContent = '';
+    nameField.input.value = target.name || '';
+    if (target.kind === 'ssh') {
+      setKind('ssh');
+      hostField.input.value = target.host || '';
+      portField.input.value = String(target.port || 22);
+      userField.input.value = target.user || '';
+      authSelect.value = target.auth === 'key' ? 'key' : 'password';
+      keyField.input.value = target.key_path || '';
+      rootField.input.value = target.root || '';
+      passwordField.input.value = '';
+      passphraseField.input.value = '';
+      passwordField.input.placeholder = '留空保持不变';
+      passphraseField.input.placeholder = '留空保持不变';
+      updateAuthFields();
+    } else {
+      setKind('http');
+      const url = String(target.url || '');
+      protocolSelect.value = url.startsWith('http://') ? 'http' : 'https';
+      urlField.input.value = url.replace(/^https?:\/\//, '');
+      checkBox.checked = Boolean(target.allow_invalid_certs);
+    }
+    saveButton.textContent = '保存修改';
+    cancelEdit.hidden = false;
+    nameField.input.focus();
   };
 
   const drawList = () => {
     list.replaceChildren();
     const remotes = (state.app.targets || []).filter(
-      (target) => target.kind === 'remote',
+      (target) => target.kind !== 'local',
     );
     if (!remotes.length) {
       const empty = div('servers-empty');
-      empty.textContent = '还没有保存的服务器，请在下方添加。';
+      empty.textContent = '还没有保存的连接，请在下方添加。';
       list.append(empty);
       return;
     }
@@ -3656,31 +3983,28 @@ function openServersDialog() {
       const row = div('server-row');
       const info = div('server-info');
       const title = span('server-name');
-      title.textContent = target.name || target.url;
+      title.textContent = target.name || targetDetail(target);
       if (target.id === state.activeTabId) {
         const badge = span('server-badge');
         badge.textContent = '当前';
         title.append(badge);
       }
+      const kindBadge = span('server-badge kind');
+      kindBadge.textContent = target.kind === 'ssh' ? 'SSH' : 'HTTP';
+      title.append(kindBadge);
+
       const meta = span('server-url');
-      meta.textContent = target.url;
+      meta.textContent =
+        target.kind === 'ssh'
+          ? `${targetDetail(target)}${target.root ? ` · ${target.root}` : ''}`
+          : target.url || '';
       info.append(title, meta);
 
       const actions = div('server-actions');
+      const test = buttonEl('测试', 'btn ghost small');
+      test.addEventListener('click', () => void testTarget(target));
       const edit = buttonEl('编辑', 'btn ghost small');
-      edit.addEventListener('click', () => {
-        serverPanelEditing = target.id;
-        nameField.input.value = target.name || '';
-        urlField.input.value = target.url || '';
-        protocolSelect.value = String(target.url || '').startsWith('http://')
-          ? 'http'
-          : 'https';
-        checkBox.checked = Boolean(target.allow_invalid_certs);
-        saveButton.textContent = '保存修改';
-        cancelEdit.hidden = false;
-        errorEl.textContent = '';
-        nameField.input.focus();
-      });
+      edit.addEventListener('click', () => beginEdit(target));
       const remove = buttonEl('删除', 'btn ghost small danger-text');
       remove.addEventListener('click', async () => {
         errorEl.textContent = '';
@@ -3702,43 +4026,128 @@ function openServersDialog() {
           errorEl.textContent = error.message || '删除失败';
         }
       });
-      actions.append(edit, remove);
+      actions.append(test, edit, remove);
       row.append(info, actions);
       list.append(row);
     }
   };
 
+  const testTarget = async (target, attempt = 0) => {
+    errorEl.textContent = '';
+    try {
+      await serversAction({ action: 'test', id: target.id });
+      toast(
+        target.kind === 'ssh'
+          ? `SSH 连接成功：${targetDetail(target)}`
+          : '服务器连接成功',
+        'info',
+      );
+      return true;
+    } catch (failure) {
+      const data = failure.data || {};
+      const hostKeyIssue =
+        data.code === 'host_key_unknown' || data.code === 'host_key_mismatch';
+      if (hostKeyIssue && data.host_key && attempt < 2) {
+        const accepted = await confirmHostKey(
+          target,
+          data.host_key,
+          data.previous_fingerprint,
+        );
+        if (accepted) return testTarget(target, attempt + 1);
+        return false;
+      }
+      errorEl.textContent = failure.message || '连接失败';
+      return false;
+    }
+  };
+
   const submit = async () => {
     errorEl.textContent = '';
+    const kind = kindSelect.value;
     const name = nameField.input.value.trim();
-    let url = urlField.input.value.trim();
-    if (!name || !url) {
-      errorEl.textContent = '请填写名称和服务器地址';
+    if (!name) {
+      errorEl.textContent = '请填写名称';
       return;
     }
-    if (!url.includes('://')) url = `${protocolSelect.value}://${url}`;
-    saveButton.disabled = true;
-    try {
-      const payload = {
+
+    let payload;
+    if (kind === 'ssh') {
+      const host = hostField.input.value.trim();
+      const username = userField.input.value.trim();
+      const port = Number(portField.input.value);
+      const auth = authSelect.value === 'key' ? 'key' : 'password';
+      const keyPath = keyField.input.value.trim();
+      const root = rootField.input.value.trim();
+      if (!host) {
+        errorEl.textContent = '请填写主机地址';
+        return;
+      }
+      if (!username) {
+        errorEl.textContent = '请填写用户名';
+        return;
+      }
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        errorEl.textContent = '端口必须在 1-65535 之间';
+        return;
+      }
+      if (auth === 'key' && !keyPath) {
+        errorEl.textContent = '请选择私钥文件';
+        return;
+      }
+      if (
+        auth === 'password' &&
+        !serverPanelEditing &&
+        !passwordField.input.value
+      ) {
+        errorEl.textContent = '请输入登录密码';
+        return;
+      }
+      payload = {
         name,
-        url,
-        allow_invalid_certs: checkBox.checked,
+        host,
+        port,
+        username,
+        auth,
+        key_path: keyPath,
+        root: root,
+        password: auth === 'password' ? passwordField.input.value : '',
+        passphrase: auth === 'key' ? passphraseField.input.value : '',
       };
-      let id = serverPanelEditing;
-      if (id) {
+      if (serverPanelEditing) {
+        payload.action = 'update_ssh';
+        payload.id = serverPanelEditing;
+      } else {
+        payload.action = 'add_ssh';
+      }
+    } else {
+      let url = urlField.input.value.trim();
+      if (!url) {
+        errorEl.textContent = '请填写服务器地址';
+        return;
+      }
+      if (!url.includes('://')) url = `${protocolSelect.value}://${url}`;
+      payload = { name, url, allow_invalid_certs: checkBox.checked };
+      if (serverPanelEditing) {
         payload.action = 'update';
-        payload.id = id;
+        payload.id = serverPanelEditing;
       } else {
         payload.action = 'add';
       }
+    }
+
+    const editing = serverPanelEditing;
+    saveButton.disabled = true;
+    try {
       const result = await serversAction(payload);
-      if (!id) id = result.id;
+      const id = editing || result.id;
       await refreshAppInfo();
       const tab = getTab(id);
       if (tab) {
         tab.session = null;
         tab.loaded = false;
         tab.needsRefresh = false;
+        tab.roots = null;
+        tab.rootPath = null;
       }
       resetForm();
       drawList();
@@ -3754,16 +4163,32 @@ function openServersDialog() {
 
   saveButton.addEventListener('click', () => void submit());
   cancelEdit.addEventListener('click', resetForm);
-  for (const field of [nameField, urlField]) {
+  kindSelect.addEventListener('change', () => applyKind(kindSelect.value));
+  authSelect.addEventListener('change', updateAuthFields);
+  for (const field of [
+    nameField,
+    urlField,
+    hostField,
+    portField,
+    userField,
+    passwordField,
+    keyField,
+    passphraseField,
+    rootField,
+  ]) {
     field.input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
         void submit();
       }
     });
+    field.input.addEventListener('input', () => {
+      if (errorEl.textContent) errorEl.textContent = '';
+    });
   }
 
   drawList();
+  resetForm();
   setTimeout(() => nameField.input.focus(), 30);
 }
 
@@ -3811,10 +4236,14 @@ function bindEvents() {
   $('#root-select').addEventListener('change', async (event) => {
     const path = event.target.value;
     const tab = activeTab();
+    if (!isPasswordless(tab.target)) return;
     try {
       const response = await fetch('/app/local/root', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...targetHeaders(tab),
+        },
         body: JSON.stringify({ path }),
       });
       let data = null;
@@ -3826,15 +4255,15 @@ function bindEvents() {
       if (!response.ok) {
         throw new Error(data && data.error ? data.error : '切换目录失败');
       }
-      await refreshAppInfo();
-      if (tab.target.kind === 'local') {
-        tab.cwd = '/';
-        tab.entries = [];
-        tab.list = emptyList();
-        tab.loaded = false;
-        tab.needsRefresh = true;
-        await loadDir('/', { tab, skipHistory: true });
-      }
+      if (tab.target.kind === 'local') await refreshAppInfo();
+      await refreshTargetRoots(tab);
+      tab.cwd = '/';
+      tab.entries = [];
+      tab.list = emptyList();
+      tab.loaded = false;
+      tab.needsRefresh = true;
+      await loadDir('/', { tab, skipHistory: true });
+      renderRootSelect();
     } catch (error) {
       toast(error.message || '切换目录失败', 'error');
       renderRootSelect();

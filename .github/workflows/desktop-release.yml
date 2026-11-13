@@ -26,7 +26,7 @@ jobs:
       - name: Read desktop version
         id: version
         run: |
-          version="$(node -p "require('./desktop/local/tauri.conf.json').version")"
+          version="$(node -p "require('./desktop/app/tauri.conf.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       # A signing key is optional. Without it the release still contains the
@@ -95,13 +95,8 @@ jobs:
           fi
 
           node scripts/verify-updater-signature.mjs \
-            "$preflight" "${preflight}.sig" desktop/local/tauri.conf.json || {
-            echo "::error::私钥与 desktop/local/tauri.conf.json 的 pubkey 不匹配"
-            exit 1
-          }
-          node scripts/verify-updater-signature.mjs \
-            "$preflight" "${preflight}.sig" desktop/client/tauri.conf.json || {
-            echo "::error::私钥与 desktop/client/tauri.conf.json 的 pubkey 不匹配"
+            "$preflight" "${preflight}.sig" desktop/app/tauri.conf.json || {
+            echo "::error::私钥与 desktop/app/tauri.conf.json 的 pubkey 不匹配"
             exit 1
           }
 
@@ -138,10 +133,6 @@ jobs:
 
   build:
     needs: prepare
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [local, client]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -150,7 +141,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktop/${{ matrix.app }}
+          workspaces: desktop/app
 
       # The bundler reads TAURI_SIGNING_PRIVATE_KEY as either key contents or a
       # file path. A path keeps the secret out of the environment of every
@@ -179,17 +170,17 @@ jobs:
         if: needs.prepare.outputs.signing == 'true'
         shell: bash
         run: |
-          node -e "const fs=require('fs');const p='desktop/${{ matrix.app }}/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
-          echo "updater artifacts enabled for ${{ matrix.app }} (Windows MSI)"
+          node -e "const fs=require('fs');const p='desktop/app/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          echo "updater artifacts enabled (Windows MSI)"
 
       # No releaseId/tagName on purpose: the action only builds. Uploading is
       # done below with deterministic ASCII asset names, which keeps one
-      # installer per app and lets the manifest job match assets exactly.
+      # installer per release and lets the manifest job match assets exactly.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: desktop/${{ matrix.app }}
+          projectPath: desktop/app
           retryAttempts: 3
           includeUpdaterJson: false
           args: --bundles msi
@@ -199,21 +190,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
-          APP: ${{ matrix.app }}
         run: |
           set -euo pipefail
-          case "$APP" in
-            local) product="AgentGod.Files.Local" ;;
-            client) product="AgentGod.Files.Client" ;;
-            *) echo "::error::未知应用 ${APP}"; exit 1 ;;
-          esac
-          msi_dir="desktop/${APP}/target/release/bundle/msi"
+          msi_dir="desktop/app/target/release/bundle/msi"
           msi="$(find "$msi_dir" -maxdepth 1 -type f -name '*.msi' | sort | head -n 1)"
           if [ -z "$msi" ]; then
             echo "::error::没有找到 Windows 安装包（$msi_dir）"
             exit 1
           fi
-          upload="${RUNNER_TEMP}/${product}_${VERSION}_x64.msi"
+          upload="${RUNNER_TEMP}/AgentGod.Files_${VERSION}_x64.msi"
           cp "$msi" "$upload"
           gh release upload "desktop-v${VERSION}" "$upload" --clobber
           echo "::notice::uploaded $(basename "$upload")"
@@ -226,15 +211,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
-          APP: ${{ matrix.app }}
         run: |
           set -euo pipefail
-          case "$APP" in
-            local) product="AgentGod.Files.Local" ;;
-            client) product="AgentGod.Files.Client" ;;
-            *) echo "::error::未知应用 ${APP}"; exit 1 ;;
-          esac
-          app_dir="desktop/${APP}"
+          app_dir="desktop/app"
           msi_dir="${app_dir}/target/release/bundle/msi"
           bundle="$(find "$msi_dir" -maxdepth 1 -type f -name '*.msi' | sort | head -n 1)"
           if [ -z "$bundle" ] || [ ! -f "${bundle}.sig" ]; then
@@ -243,7 +222,7 @@ jobs:
           fi
           node scripts/verify-updater-signature.mjs "$bundle" "${bundle}.sig" "${app_dir}/tauri.conf.json"
 
-          upload="${RUNNER_TEMP}/${product}_${VERSION}_x64.msi"
+          upload="${RUNNER_TEMP}/AgentGod.Files_${VERSION}_x64.msi"
           cp "${bundle}.sig" "${upload}.sig"
           gh release upload "desktop-v${VERSION}" "${upload}.sig" --clobber
           echo "::notice::uploaded $(basename "$upload").sig"
@@ -270,9 +249,10 @@ jobs:
           set -euo pipefail
           OUTPUT_DIR=.update-manifests \
             node scripts/build-updater-manifest.mjs
-          for file in .update-manifests/latest-local.json .update-manifests/latest-client.json; do
-            if [ -f "$file" ]; then
-              gh release upload "$RELEASE_TAG" "$file" --clobber
-              echo "uploaded $(basename "$file")"
-            fi
-          done
+          file=".update-manifests/latest.json"
+          if [ -f "$file" ]; then
+            gh release upload "$RELEASE_TAG" "$file" --clobber
+            echo "uploaded $(basename "$file")"
+          else
+            echo "::notice::没有签名更新包，跳过 latest.json"
+          fi

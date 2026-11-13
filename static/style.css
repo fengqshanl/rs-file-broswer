@@ -1782,6 +1782,12 @@ progress::-moz-progress-bar {
   font-size: 10px;
 }
 
+.server-badge.kind {
+  border-color: rgba(148, 163, 184, 0.3);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--muted);
+}
+
 .server-url {
   color: var(--faint);
   font-size: 11px;
@@ -1830,6 +1836,53 @@ progress::-moz-progress-bar {
 }
 
 .danger-text {
+  color: var(--danger);
+}
+
+.server-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.server-group[hidden] {
+  display: none;
+}
+
+.server-form .form-row .field.grow {
+  flex: 3;
+}
+
+.server-form .form-row .field.port {
+  flex: 0 0 96px;
+}
+
+.hostkey-fingerprint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.hostkey-label {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.hostkey-fingerprint code {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.hostkey-fingerprint.previous code {
   color: var(--danger);
 }
 
@@ -1899,6 +1952,14 @@ progress::-moz-progress-bar {
 
 .workspace-tab.local .tab-dot {
   background: var(--accent);
+}
+
+.workspace-tab.ssh .tab-dot {
+  background: #c084fc;
+}
+
+.workspace-tab.ssh.locked .tab-dot {
+  background: var(--faint);
 }
 
 .workspace-tab.remote .tab-dot {

@@ -11,8 +11,8 @@
 //!   the latest GitHub Release and picks the installer matching this machine's
 //!   OS, architecture and app flavour.
 //! * *silent channel* - only available when the release carries a signed
-//!   updater manifest (`latest-local.json` / `latest-client.json`). The Tauri
-//!   updater plugin then downloads, verifies and installs the update in place.
+//!   updater manifest (`latest.json`). The Tauri updater plugin then downloads,
+//!   verifies and installs the update in place.
 
 use std::{
     path::{Path, PathBuf},
@@ -23,8 +23,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::AppMode;
 
 pub const REPOSITORY: &str = "fengqshanl/rs-file-broswer";
 pub const CURRENT_VERSION: &str = agentgod_files::VERSION;
@@ -55,7 +53,9 @@ fn default_release_page() -> String {
 }
 
 fn https_url(url: &str) -> bool {
-    url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")
+    url.starts_with("https://")
+        || url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://localhost")
 }
 
 /// Where the desktop apps look for releases and updater manifests.
@@ -150,13 +150,13 @@ impl UpdateSource {
         self.download_prefix = format!("{}/", self.download_prefix.trim_end_matches('/'));
     }
 
-    pub fn manifest_url(&self, slug: &str) -> String {
-        format!("{}latest-{}.json", self.download_prefix, slug)
+    pub fn manifest_url(&self) -> String {
+        format!("{}latest.json", self.download_prefix)
     }
 
-    pub fn endpoints(&self, slug: &str) -> Vec<String> {
+    pub fn endpoints(&self) -> Vec<String> {
         if self.updater_endpoints.is_empty() {
-            vec![self.manifest_url(slug)]
+            vec![self.manifest_url()]
         } else {
             self.updater_endpoints.clone()
         }
@@ -187,22 +187,8 @@ fn env_value(name: &str) -> Option<String> {
 /// Add an entry here (plus a manifest rule) to re-enable a platform.
 pub const SUPPORTED_PLATFORMS: &[&str] = &["windows"];
 
-impl AppMode {
-    /// Slug used for release asset prefixes and updater manifest filenames.
-    pub fn package_slug(self) -> &'static str {
-        match self {
-            AppMode::Local => "local",
-            AppMode::Client => "client",
-        }
-    }
-
-    fn asset_prefix(self) -> &'static str {
-        match self {
-            AppMode::Local => "agentgod.files.local_",
-            AppMode::Client => "agentgod.files.client_",
-        }
-    }
-}
+/// Prefix of the published Windows installer assets.
+const ASSET_PREFIX: &str = "agentgod.files_";
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct InstallStatus {
@@ -267,12 +253,12 @@ pub struct UpdateCheck {
 }
 
 impl UpdateCheck {
-    fn failed(app: AppMode, release_url: String, message: impl Into<String>) -> Self {
+    fn failed(release_url: String, message: impl Into<String>) -> Self {
         Self {
             current_version: CURRENT_VERSION.to_string(),
             latest_version: String::new(),
             has_update: false,
-            app: app.package_slug().to_string(),
+            app: "app".to_string(),
             platform: platform().0.to_string(),
             arch: platform().1.to_string(),
             asset: None,
@@ -302,7 +288,6 @@ struct ReleaseAsset {
 }
 
 pub struct UpdateHub {
-    app: AppMode,
     client: reqwest::Client,
     installer: Arc<dyn AutoInstaller>,
     source: UpdateSource,
@@ -312,13 +297,11 @@ pub struct UpdateHub {
 
 impl UpdateHub {
     pub fn new(
-        app: AppMode,
         installer: Arc<dyn AutoInstaller>,
         source: UpdateSource,
         data_dir: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
-            app,
             client: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
                 .connect_timeout(Duration::from_secs(8))
@@ -355,7 +338,7 @@ impl UpdateHub {
                 } else {
                     format!("检查更新失败：{err}。{hint}")
                 };
-                UpdateCheck::failed(self.app, self.source.release_page.clone(), message)
+                UpdateCheck::failed(self.source.release_page.clone(), message)
             }
         };
         if let Ok(mut guard) = self.cached.lock() {
@@ -371,14 +354,14 @@ impl UpdateHub {
             .ok_or_else(|| anyhow::anyhow!("无法解析发布版本 {}", release.tag_name))?;
         let (os, arch) = platform();
         let has_update = is_newer(&latest, CURRENT_VERSION);
-        let asset = pick_asset(&release.assets, self.app, os, arch);
+        let asset = pick_asset(&release.assets, os, arch);
         let silent = has_update && self.silent_available(os, arch).await;
 
         Ok(UpdateCheck {
             current_version: CURRENT_VERSION.to_string(),
             latest_version: latest,
             has_update,
-            app: self.app.package_slug().to_string(),
+            app: "app".to_string(),
             platform: os.to_string(),
             arch: arch.to_string(),
             download_url: asset
@@ -426,7 +409,7 @@ impl UpdateHub {
         if !self.installer.available() {
             return false;
         }
-        let url = self.source.manifest_url(self.app.package_slug());
+        let url = self.source.manifest_url();
         let Ok(response) = self.client.get(url).send().await else {
             return false;
         };
@@ -572,7 +555,7 @@ fn version_parts(version: &str) -> Option<(u64, u64, u64)> {
 
 const IGNORED_SUFFIXES: &[&str] = &[".sig", ".json", ".tar.gz", ".zip", ".txt", ".yml"];
 
-fn pick_asset(assets: &[ReleaseAsset], app: AppMode, os: &str, arch: &str) -> Option<ReleaseAsset> {
+fn pick_asset(assets: &[ReleaseAsset], os: &str, arch: &str) -> Option<ReleaseAsset> {
     if !SUPPORTED_PLATFORMS.contains(&os) {
         return None;
     }
@@ -580,7 +563,7 @@ fn pick_asset(assets: &[ReleaseAsset], app: AppMode, os: &str, arch: &str) -> Op
         .iter()
         .filter(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            name.starts_with(app.asset_prefix())
+            name.starts_with(ASSET_PREFIX)
                 && !IGNORED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
                 && asset.browser_download_url.starts_with("https://")
         })
@@ -649,17 +632,19 @@ mod tests {
 
     fn release_assets() -> Vec<ReleaseAsset> {
         vec![
+            asset("AgentGod.Files_0.2.0_x64.msi"),
+            asset("AgentGod.Files_0.2.0_x64.msi.sig"),
+            // Assets from the retired macOS / Linux / NSIS channels, and the
+            // pre-merge per-app builds, must be ignored.
+            asset("AgentGod.Files_0.2.0_universal.dmg"),
+            asset("AgentGod.Files_0.2.0_universal.app.tar.gz"),
+            asset("AgentGod.Files_0.2.0_amd64.AppImage"),
+            asset("AgentGod.Files_0.2.0_amd64.deb"),
+            asset("AgentGod.Files_0.2.0_x64-setup.exe"),
             asset("AgentGod.Files.Local_0.1.6_x64_en-US.msi"),
-            asset("AgentGod.Files.Local_0.1.6_x64_en-US.msi.sig"),
-            // Assets from the retired macOS / Linux / NSIS channels must be
-            // ignored even while they are still present on old releases.
-            asset("AgentGod.Files.Local_0.1.6_universal.dmg"),
-            asset("AgentGod.Files.Local_0.1.6_universal.app.tar.gz"),
-            asset("AgentGod.Files.Local_0.1.6_amd64.AppImage"),
-            asset("AgentGod.Files.Local_0.1.6_amd64.deb"),
-            asset("AgentGod.Files.Local_0.1.6_x64-setup.exe"),
-            asset("latest-local.json"),
             asset("AgentGod.Files.Client_0.1.6_x64_en-US.msi"),
+            asset("latest-local.json"),
+            asset("latest.json"),
         ]
     }
 
@@ -686,32 +671,22 @@ mod tests {
     fn picks_the_msi_for_windows() {
         let assets = release_assets();
         assert_eq!(
-            pick_asset(&assets, AppMode::Local, "windows", "x86_64")
-                .unwrap()
-                .name,
-            "AgentGod.Files.Local_0.1.6_x64_en-US.msi"
-        );
-        assert_eq!(
-            pick_asset(&assets, AppMode::Client, "windows", "x86_64")
-                .unwrap()
-                .name,
-            "AgentGod.Files.Client_0.1.6_x64_en-US.msi"
+            pick_asset(&assets, "windows", "x86_64").unwrap().name,
+            "AgentGod.Files_0.2.0_x64.msi"
         );
         // Windows on ARM runs the x64 MSI through emulation.
         assert_eq!(
-            pick_asset(&assets, AppMode::Local, "windows", "aarch64")
-                .unwrap()
-                .name,
-            "AgentGod.Files.Local_0.1.6_x64_en-US.msi"
+            pick_asset(&assets, "windows", "aarch64").unwrap().name,
+            "AgentGod.Files_0.2.0_x64.msi"
         );
     }
 
     #[test]
     fn macos_and_linux_get_no_installer() {
         let assets = release_assets();
-        assert!(pick_asset(&assets, AppMode::Local, "macos", "aarch64").is_none());
-        assert!(pick_asset(&assets, AppMode::Local, "macos", "x86_64").is_none());
-        assert!(pick_asset(&assets, AppMode::Local, "linux", "x86_64").is_none());
+        assert!(pick_asset(&assets, "macos", "aarch64").is_none());
+        assert!(pick_asset(&assets, "macos", "x86_64").is_none());
+        assert!(pick_asset(&assets, "linux", "x86_64").is_none());
         assert_eq!(updater_targets("macos", "aarch64"), Vec::<String>::new());
         assert_eq!(updater_targets("linux", "x86_64"), Vec::<String>::new());
     }
@@ -730,11 +705,13 @@ mod tests {
         let source = UpdateSource::default();
         assert_eq!(source.api_url, DEFAULT_API_URL);
         assert_eq!(
-            source.manifest_url("local"),
-            "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/latest-local.json"
+            source.manifest_url(),
+            "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/latest.json"
         );
-        assert_eq!(source.endpoints("client"), vec![source.manifest_url("client")]);
-        assert!(source.hint(std::path::Path::new(".")).contains("update-source.json"));
+        assert_eq!(source.endpoints(), vec![source.manifest_url()]);
+        assert!(source
+            .hint(std::path::Path::new("."))
+            .contains("update-source.json"));
     }
 
     #[test]
@@ -743,16 +720,16 @@ mod tests {
             api_url: "https://mirror.example/releases/latest".to_string(),
             download_prefix: "https://mirror.example/releases/latest/download".to_string(),
             release_page: "https://mirror.example/releases".to_string(),
-            updater_endpoints: vec!["https://mirror.example/updater/latest-local.json".to_string()],
+            updater_endpoints: vec!["https://mirror.example/updater/latest.json".to_string()],
         };
         source.normalize();
         assert_eq!(
-            source.manifest_url("local"),
-            "https://mirror.example/releases/latest/download/latest-local.json"
+            source.manifest_url(),
+            "https://mirror.example/releases/latest/download/latest.json"
         );
         assert_eq!(
-            source.endpoints("local"),
-            vec!["https://mirror.example/updater/latest-local.json"]
+            source.endpoints(),
+            vec!["https://mirror.example/updater/latest.json"]
         );
         assert!(source.hint(std::path::Path::new(".")).is_empty());
     }

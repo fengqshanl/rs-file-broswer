@@ -19,7 +19,7 @@
             <path d="M12 5v14"/><path d="M5 12h14"/>
           </svg>
         </span>
-        添加服务器
+        添加连接
       </button>
       <button id="btn-check-update" class="btn small" type="button" title="检查桌面应用更新">
         <span class="icon" aria-hidden="true">
@@ -152,12 +152,12 @@
     <div id="app-bar" class="app-bar" hidden>
       <div class="app-connection">
         <span id="local-root-wrap" class="app-root" hidden>
-          <span class="app-label">本机位置</span>
-          <select id="root-select" class="app-select" aria-label="选择本机目录"></select>
+          <span class="app-label">位置</span>
+          <select id="root-select" class="app-select" aria-label="选择文件位置"></select>
         </span>
       </div>
       <div class="app-bar-right">
-        <button id="btn-servers" class="btn ghost small" type="button">管理服务器</button>
+        <button id="btn-servers" class="btn ghost small" type="button">连接管理</button>
         <span id="app-version" class="app-version"></span>
       </div>
     </div>
@@ -241,6 +241,11 @@
   <div id="server-overlay" class="server-overlay" hidden>
     <div class="server-overlay-backdrop" data-server-close></div>
     <div id="server-panel" class="server-panel" role="dialog" aria-modal="true" aria-label="服务器连接"></div>
+  </div>
+
+  <div id="hostkey-overlay" class="server-overlay" hidden>
+    <div class="server-overlay-backdrop" data-hostkey-cancel></div>
+    <div id="hostkey-panel" class="server-panel" role="dialog" aria-modal="true" aria-label="确认主机指纹"></div>
   </div>
 
   <aside id="update-panel" class="update-panel" hidden aria-live="polite" aria-label="应用更新">

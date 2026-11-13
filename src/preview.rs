@@ -141,7 +141,7 @@ struct PreviewStream {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-fn content_type_for(name: &str) -> &'static str {
+pub fn content_type_for(name: &str) -> &'static str {
     let extension = name
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase())

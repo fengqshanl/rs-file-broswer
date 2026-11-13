@@ -7,15 +7,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use agentgod_desktop_common::update::UpdateSource;
-use agentgod_desktop_common::{AppMode, NoopInstaller, UpdateHub};
+use agentgod_desktop_common::{NoopInstaller, UpdateHub};
 
 fn hub(source: UpdateSource) -> Arc<UpdateHub> {
-    UpdateHub::new(
-        AppMode::Local,
-        Arc::new(NoopInstaller),
-        source,
-        PathBuf::from("."),
-    )
+    UpdateHub::new(Arc::new(NoopInstaller), source, PathBuf::from("."))
 }
 
 #[tokio::test]
@@ -28,7 +23,7 @@ async fn github_release_check_reports_the_published_version() {
         !check.latest_version.is_empty(),
         "latest version was not parsed"
     );
-    assert_eq!(check.app, "local");
+    assert_eq!(check.app, "app");
     assert!(
         !check.silent,
         "NoopInstaller must never advertise the silent channel"

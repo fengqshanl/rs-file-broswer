@@ -4,13 +4,13 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.82%2B-orange)
-![Platform](https://img.shields.io/badge/platform-macos-lightgrey)
+![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux-lightgrey)
 
 ## 目录
 
 - [特性](#特性)
 - [界面预览](#界面预览)
-- [桌面应用](#桌面应用macos)
+- [桌面应用](#桌面应用windows)
 - [快速开始](#快速开始)
 - [配置](#配置)
 - [使用说明](#使用说明)
@@ -42,7 +42,8 @@
 - **HTTPS-only**：内置自签名证书生成，可替换为受信证书
 - **资源保护**：全局令牌桶限速、传输/预览并发上限、磁盘安全余量、容器资源限制
 - **单文件部署**：前端资源编译进二进制，运行时镜像约 15 MB，空闲内存约 1–3 MB
-- **桌面多标签工作区**：本机与多台服务器各自一个标签，可同时登录、独立浏览；标签间可复制、剪切、粘贴文件与文件夹，传输全程经加密流中转；支持原生窗口与系统文件拖拽
+- **桌面多标签工作区**：本机、AgentGod 服务器与 SSH 主机各自一个标签，可同时登录、独立浏览；标签间可复制、剪切、粘贴文件与文件夹，传输全程经加密流中转；支持原生窗口与系统文件拖拽
+- **SSH / SFTP 目标**：在桌面端直接管理远程服务器文件，支持密码与私钥认证；凭据存入系统凭据库，主机密钥首次确认后固定，变化即拒绝
 
 ## 界面预览
 
@@ -58,17 +59,22 @@
 
 > 当前只发布 Windows x64 MSI 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍可通过 Docker 或二进制在 Linux / Windows 上运行。
 
-| 应用 | 适用场景 | 行为 |
+**AgentGod Files** 将原来的 Local / Client 两个应用合并为一个：启动即浏览本机文件，右上角「连接管理」可以添加远程目标，每个目标生成独立标签。
+
+| 目标类型 | 认证方式 | 能力 |
 | --- | --- | --- |
-| **AgentGod Files Local** | 本机文件管理 + 远程连接 | 启动即浏览本机目录，无需登录；右上角「添加服务器」可添加多台远程服务器，每台生成独立标签 |
-| **AgentGod Files Client** | 远程服务器客户端 | 同样默认显示本机文件系统；添加服务器后可在同一窗口内用标签同时操作多台远程服务器 |
+| **本机** | 无需登录（仅本机回环服务） | 浏览、上传、下载、预览、重命名、删除 |
+| **AgentGod Files 服务器** | 用户名 + 密码（加密会话） | 与上面相同，支持 HTTPS / HTTP 与自签名证书 |
+| **SSH / SFTP** | 密码或私钥 | 与上面相同，直接管理远程服务器文件 |
 
 安装包：
 
 - **Windows**：`*_x64.msi`，64 位 Windows 10 / 11（ARM64 系统通过系统模拟运行）
-- **应用内热更新包**：`*.msi.sig` 与 `latest-local.json` / `latest-client.json`（配置签名密钥后由发布工作流生成）
+- **应用内热更新包**：`*.msi.sig` 与 `latest.json`（配置签名密钥后由发布工作流生成）
 
-两个桌面应用都采用「本机优先 + 多标签」工作区：启动后先显示本机文件，右上角「添加服务器」支持选择 **HTTPS / HTTP**、填写服务器地址并允许自签名证书；保存后自动生成服务器标签并进入加密登录。每个标签有独立的会话、路径、筛选和分页状态，切换标签不会打断另一个标签的浏览。
+SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串），配置文件 `targets.json` 不保存密码或私钥口令。首次连接主机会显示 SHA256 指纹，确认后记住；指纹变化会拒绝连接并提示，防止中间人攻击。
+
+桌面端采用「本机优先 + 多标签」工作区：启动后先显示本机文件，右上角「连接管理」支持添加 AgentGod 服务器（HTTPS / HTTP）或 SSH / SFTP 主机。每个标签有独立的会话、路径、筛选和分页状态，切换标签不会打断另一个标签的浏览。
 
 标签间操作与本地文件管理器一致：
 
@@ -77,20 +83,20 @@
 - 跨标签复制时，数据先按源端密钥解密，再按目标端密钥重新加密上传；源端和目标端之间的网络传输只包含密文
 - 桌面端复用与服务端相同的界面、加密登录和传输协议。伴生服务只监听本机回环地址，局域网不可访问
 
-桌面端的服务器连接目前面向同版本 AgentGod Files 服务端，支持 HTTPS 与明文 HTTP（HTTP 仅建议用于回环或可信内网）；SFTP、WebDAV、SMB 等通用文件协议尚未内置。
+桌面端的远程连接面向同版本 AgentGod Files 服务端（HTTPS / 明文 HTTP，HTTP 仅建议用于回环或可信内网），并内置 SSH / SFTP 目标；WebDAV、SMB 等通用文件协议尚未支持。
 
 安装包未做商业代码签名：首次运行时 Windows SmartScreen 可能提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可。
 
 ### 应用内更新与热更新
 
-**0.1.3 起**，桌面应用启动后会在后台检查 GitHub Releases（不阻塞界面、离线时静默跳过，结果缓存 30 分钟）。发现新版本会弹出提示，并按**应用类型**（Local / Client）匹配 Windows MSI 安装包：
+**0.1.3 起**，桌面应用启动后会在后台检查 GitHub Releases（不阻塞界面、离线时静默跳过，结果缓存 30 分钟）。发现新版本会弹出提示，并按当前平台与架构匹配 Windows MSI 安装包：
 
 - **应用内更新**：Release 附带已签名的 MSI 更新包与清单时，直接在应用内下载、校验签名、安装，完成后点「重启应用」生效
 - **下载安装包**：始终可用，由系统默认浏览器打开已匹配好的 `.msi`；没有匹配包时打开发布页
 - **跳过此版本**：记录在 `localStorage`，下次启动不再提示同一版本；右上角「检查更新」可随时强制重查
 - **非 Windows 平台**：仍可正常检查更新，但会明确提示「当前仅发布 Windows 安装包」，不再给出无法下载的链接
 
-发布工作流在配置签名密钥后，会把 `*.msi.sig` 与 `latest-local.json` / `latest-client.json` 一起挂到 Release；未配置密钥时只发布 `.msi`，用户可手动下载升级。
+发布工作流在配置签名密钥后，会把 `*.msi.sig` 与 `latest.json` 一起挂到 Release；未配置密钥时只发布 `.msi`，用户可手动下载升级。
 
 #### 更新源无法访问时（镜像 / 代理）
 
@@ -105,23 +111,23 @@
 ```
 
 - `api_url` 需要返回与 GitHub `releases/latest` 相同结构的 JSON（`tag_name`、`body`、`assets[]`）
-- `download_prefix` 用来拼出 `latest-local.json` / `latest-client.json`；清单里的签名包 URL 指向镜像即可
+- `download_prefix` 用来拼出 `latest.json`；清单里的签名包 URL 指向镜像即可
 - 可选 `updater_endpoints`：直接指定签名清单地址数组，覆盖默认拼接（适用于清单与实际文件不在同一前缀的镜像）
 - 也可用环境变量覆盖：`AGENTGOD_UPDATE_API`、`AGENTGOD_UPDATE_DOWNLOAD_PREFIX`、`AGENTGOD_UPDATE_RELEASE_PAGE`、`AGENTGOD_UPDATER_ENDPOINTS`（逗号分隔）
 - 除 `http://127.0.0.1` / `http://localhost` 外只接受 `https://`；配置无效时自动回退到 GitHub，不影响其他功能
 
-镜像站只需原样代理 GitHub 的 Release 资产（`.msi`、`.msi.sig`、`latest-*.json`）。签名仍在本地校验，镜像无法注入内容。检查失败时，界面提示会带上该配置文件的路径。
+镜像站只需原样代理 GitHub 的 Release 资产（`.msi`、`.msi.sig`、`latest.json`）。签名仍在本地校验，镜像无法注入内容。检查失败时，界面提示会带上该配置文件的路径。
 
-> **从 0.1.2 及更早版本升级**：旧版安装包没有更新检查逻辑，且界面内嵌在二进制里、无法远程注入。这些用户需要手动下载一次 0.1.3 或更新版本的安装包；此后每次发版都会自动提示并可应用内更新。
+> **从 0.1.6 升级**：0.2.0 起产品改名为 **AgentGod Files**，安装包标识与 UpgradeCode 均已变化，无法覆盖安装或应用内更新。请先卸载旧版 Local / Client，再安装 0.2.0 一次；旧版的 `servers-local.json` / `servers-client.json` 会在首次启动时自动合并为 `targets.json`。
 
 **维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
 
 1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/agentgod-files.key`（如设置了密码，请妥善保存）
-2. 公钥内容写入 `desktop/local/tauri.conf.json` 与 `desktop/client/tauri.conf.json` 的 `plugins.updater.pubkey`（仓库中已填好本次生成的公钥）
+2. 公钥内容写入 `desktop/app/tauri.conf.json` 的 `plugins.updater.pubkey`（仓库中已填好本次生成的公钥）
 3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
    - `TAURI_SIGNING_PRIVATE_KEY`：`~/.tauri/agentgod-files.key` 的完整内容（base64 单行）。也接受解码后的两行文本，工作流会统一规范化
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：生成密钥时设置的密码；未设置密码则留空
-4. 推送 `desktop-v*` 标签：工作流在 `windows-latest` 上执行 `tauri build --bundles msi`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.msi` / `.msi.sig`，再生成 `latest-local.json` / `latest-client.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
+4. 推送 `desktop-v*` 标签：工作流在 `windows-latest` 上执行 `tauri build --bundles msi`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.msi` / `.msi.sig`，再生成 `latest.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
 
 发布流程在构建前会先用私钥签名一个测试文件，并用 `scripts/verify-updater-signature.mjs` 校验签名与仓库中的 `pubkey` 一致；构建后再对每个 `.app.tar.gz` 做同样校验。这样能避免“构建成功、用户下载后却因签名不匹配而安装失败”的情况。常见错误与处理：
 
@@ -139,13 +145,12 @@
 # 需要 Rust 与 Tauri 2 的系统依赖，见 https://v2.tauri.app/start/prerequisites/
 cargo install tauri-cli --version "^2"
 
-cd desktop/local && cargo tauri build
-cd desktop/client && cargo tauri build
+cd desktop/app && cargo tauri build
 ```
 
-安装包输出在 `desktop/<app>/target/release/bundle/msi`。推送 `desktop-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 Windows `.msi` 与签名更新包并上传到 Release；macOS / Linux 安装包暂不构建。
+安装包输出在 `desktop/app/target/release/bundle/msi`。推送 `desktop-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 Windows `.msi` 与签名更新包并上传到 Release；macOS / Linux 安装包暂不构建。
 
-服务器配置按应用分别保存在系统数据目录（macOS 为 `~/Library/Application Support/AgentGodFiles/`）下的 `servers-local.json` 或 `servers-client.json`。
+桌面端配置保存在系统数据目录（Windows 为 `%APPDATA%\AgentGodFiles\`，macOS 为 `~/Library/Application Support/AgentGodFiles/`）下的 `targets.json`；SSH 密码与私钥口令单独存入系统凭据库，`known_hosts.json` 保存已确认的主机指纹。
 
 ## 快速开始
 
@@ -367,13 +372,16 @@ src/
   web.rs         路由、CSP、安全响应头、静态资源
 static/          嵌入式 Web UI（原生 JS + WebCrypto，无外部依赖）
 static/vendor/   Word/Excel 本地解析库（仅预览时按需加载）
-desktop/common/  共享伴生运行时：回环前端、本机服务、远程反向代理
-  src/update.rs   版本检查、Windows 安装包匹配、静默更新状态桥接
-desktop/local/   本机版 Tauri 2 应用
-desktop/client/  远程客户端 Tauri 2 应用
+desktop/common/  共享伴生运行时：回环前端、本机服务、HTTP 代理、SSH/SFTP 目标
+  src/config.rs    targets.json（HTTP + SSH 目标）与旧配置迁移
+  src/known_hosts.rs  SSH 主机指纹（TOFU）持久化
+  src/secrets.rs   系统凭据库中的 SSH 密码 / 私钥口令
+  src/ssh/         SSH 连接、SFTP 文件系统、流式 tar 与逐目标回环服务
+  src/update.rs    版本检查、Windows 安装包匹配、静默更新状态桥接
+desktop/app/     AgentGod Files Tauri 2 应用（本机 + 服务器 + SSH）
 desktop/web/     打包用占位页面（真实界面由伴生服务提供）
 scripts/         Node E2E 协议测试、Chrome UI 冒烟测试、测试视频生成
-  build-updater-manifest.mjs  生成两个应用各自的签名更新清单
+  build-updater-manifest.mjs  生成单应用的签名更新清单
   normalize-updater-key.mjs   把签名私钥规范化为 tauri-cli 要求的 .key 格式
   verify-updater-signature.mjs 校验更新包签名与应用内嵌 pubkey 是否匹配
 .github/         GitHub Actions 桌面发布工作流与 Release 说明
@@ -408,21 +416,19 @@ docker-compose.yml
 ```bash
 # Rust 单元测试
 cargo test
-cargo test --manifest-path desktop/common/Cargo.toml   # 版本比较与 Windows 安装包匹配
+cargo test --manifest-path desktop/common/Cargo.toml   # 目标模型、凭据、SSH 与更新匹配
 
 # 更新清单生成逻辑自测（无需联网）
 node scripts/build-updater-manifest.mjs --self-test
 
-# 桌面端共享运行层（本机 / 客户端两种模式）
-cargo run --manifest-path desktop/common/Cargo.toml --bin dev_local
-cargo run --manifest-path desktop/common/Cargo.toml --bin dev_client
+# 桌面端共享运行层（本机 + HTTP + SSH 目标）
+cargo run --release --manifest-path desktop/common/Cargo.toml --bin dev_app
 
 # Tauri 应用
-cd desktop/local && cargo tauri dev
-cd desktop/client && cargo tauri dev
+cd desktop/app && cargo tauri dev
 ```
 
-`dev_local` / `dev_client` 会打印一个 `http://127.0.0.1:<端口>/` 地址，可直接用 Chrome 验证桌面端界面与代理行为，无需启动 Tauri 窗口。
+`dev_app` 会打印一个 `http://127.0.0.1:<端口>/` 地址，可直接用 Chrome 验证桌面端界面与代理行为，无需启动 Tauri 窗口。测试时可用 `AGENTGOD_DATA_DIR` 指定独立数据目录、`AGENTGOD_LOCAL_ROOT` 指定本机标签展示的目录、`AGENTGOD_MEMORY_SECRETS=1` 用内存凭据库代替系统凭据库。
 
 本地启动服务（用于下面的 E2E 与 UI 测试）：
 
@@ -464,13 +470,16 @@ ADMIN_PASSWORD='local-test-password-123' \
 node scripts/ui-smoke.mjs
 ```
 
-桌面多标签回归测试（需要全新的 `dev_client` 数据目录、Chrome 调试端口和上一节的远程测试服务器）：
+桌面多标签回归测试（需要全新的 `dev_app` 数据目录、Chrome 调试端口和上一节的远程测试服务器）：
 
 ```bash
-rm -rf /tmp/agentgod-tabs-home
+rm -rf /tmp/agentgod-tabs-home /tmp/agentgod-tabs-data
 mkdir -p /tmp/agentgod-tabs-home
-HOME=/tmp/agentgod-tabs-home \
-  ./desktop/common/target/debug/dev_client
+
+AGENTGOD_DATA_DIR=/tmp/agentgod-tabs-data \
+AGENTGOD_LOCAL_ROOT=/tmp/agentgod-tabs-home \
+AGENTGOD_MEMORY_SECRETS=1 \
+  ./desktop/common/target/release/dev_app
 # 记下命令输出的 http://127.0.0.1:<端口>/ 地址
 
 FRONT_URL=http://127.0.0.1:<端口>/ \
@@ -481,7 +490,19 @@ CHROME_DEBUG_URL=http://127.0.0.1:9223 \
 node scripts/ui-tabs.mjs
 ```
 
-该测试覆盖本机优先启动、「添加服务器」面板不会卡死、服务器标签与加密登录、远程预览、跨标签文件/文件夹复制、剪切移动、移除服务器标签和刷新后的本地自动登录。
+该测试覆盖本机优先启动、连接管理面板不会卡死、服务器标签与加密登录、远程预览、跨标签文件/文件夹复制、剪切移动、移除服务器标签和刷新后的本地自动登录。SSH 目标的表单、标签、连接报错、编辑与删除由 `scripts/ssh-ui-smoke.mjs` 覆盖：
+
+```bash
+FRONT_URL=http://127.0.0.1:<端口>/ \
+CHROME_DEBUG_URL=http://127.0.0.1:9223 \
+node scripts/ssh-ui-smoke.mjs
+```
+
+SSH / SFTP 协议链路（TOFU、加密登录、列表、分页、分块上传、下载、预览、文件夹 tar、重命名、删除、指纹持久化与错误密码）由内嵌的测试 SSH 服务器覆盖，不需要真实主机；同一套测试还会走一遍伴生层的添加、信任指纹、测试连接、修改凭据、清除指纹与删除目标：
+
+```bash
+cargo test --release --manifest-path desktop/common/Cargo.toml --test ssh_e2e --test ssh_companion
+```
 
 ## 部署建议
 
