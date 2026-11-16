@@ -73,7 +73,10 @@ export function buildManifestSpec(release) {
     for (const key of rule.keys) {
       platforms[key] = {
         url: bundle.browser_download_url,
-        signature_url: signature.browser_download_url,
+        // Draft releases do not expose public download URLs. Prefer the API
+        // asset endpoint, which works with the workflow token while the
+        // release is still a draft.
+        signature_url: signature.url || signature.browser_download_url,
       };
     }
   }
@@ -101,11 +104,19 @@ async function github(pathname) {
 }
 
 async function readSignature(url) {
+  const headers = {
+    Accept: 'application/octet-stream',
+    'Cache-Control': 'no-cache',
+    'User-Agent': 'rockbadger-release',
+  };
+  if (process.env.GH_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  }
   // A freshly uploaded asset can take a moment to become visible on the CDN.
   let lastError;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      const response = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } });
+      const response = await fetch(url, { headers });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const signature = (await response.text()).trim();
       if (!signature) throw new Error('签名文件为空');
@@ -186,6 +197,20 @@ async function selfTest() {
   assert.equal(
     specs['windows-aarch64'].signature_url,
     'https://example.com/RockBadger_0.2.0_x64.msi.sig',
+  );
+  // Draft releases expose API asset URLs; prefer them for reading signatures.
+  const apiAsset = (name) => ({
+    ...asset(name),
+    url: `https://api.example.com/assets/${name}`,
+  });
+  assert.equal(
+    buildManifestSpec({
+      assets: [
+        apiAsset('RockBadger_0.2.0_x64.msi'),
+        apiAsset('RockBadger_0.2.0_x64.msi.sig'),
+      ],
+    })['windows-x86_64'].signature_url,
+    'https://api.example.com/assets/RockBadger_0.2.0_x64.msi.sig',
   );
   // An MSI without its .sig must not produce a manifest entry.
   assert.deepEqual(
