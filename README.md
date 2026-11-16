@@ -121,7 +121,7 @@ SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串�
 
 > **从 0.1.6 升级**：0.2.0 起产品曾命名为 **AgentGod Files**，安装包标识与 UpgradeCode 均已变化，无法覆盖安装或应用内更新。请先卸载旧版 Local / Client，再安装 0.2.0 一次；旧版的 `servers-local.json` / `servers-client.json` 会在首次启动时自动合并为 `targets.json`。
 
-> **从 0.2.x 升级到 0.3.x**：产品更名为 **RockBadger**，应用标识与 UpgradeCode 再次变化，0.2.x 无法覆盖安装或应用内升级。请先安装 0.3.1 并确认连接、主机指纹与设置已从 `%APPDATA%\AgentGodFiles` 自动迁移，再从「应用和功能」手动卸载 AgentGod Files。旧数据目录与凭据库条目会保留作备份；0.3.x 的服务端只提供 API，不再提供网页界面。
+> **从 0.2.x 升级到 0.3.x**：产品更名为 **RockBadger**，应用标识与 UpgradeCode 再次变化，0.2.x 无法覆盖安装或应用内升级。请先安装 0.3.3 并确认连接、主机指纹与设置已从 `%APPDATA%\AgentGodFiles` 自动迁移，再从「应用和功能」手动卸载 AgentGod Files。旧数据目录与凭据库条目会保留作备份；0.3.x 的服务端只提供 API，不再提供网页界面。
 
 **维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
 
