@@ -100,7 +100,7 @@ jobs:
             exit 1
           }
 
-      - name: Create or reuse release
+      - name: Create or reuse draft release
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -108,7 +108,11 @@ jobs:
         run: |
           tag="rockbadger-v${VERSION}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
+            # Draft until the MSI and updater manifest are uploaded: an empty
+            # release would make `/releases/latest` advertise a version with no
+            # downloadable installer while the Windows build is still running.
             gh release create "$tag" \
+              --draft \
               --target "$GITHUB_SHA" \
               --title "RockBadger 桌面版 v${VERSION}" \
               --notes-file .github/desktop-release-notes.md
@@ -256,3 +260,13 @@ jobs:
           else
             echo "::notice::没有签名更新包，跳过 latest.json"
           fi
+
+      # Only now is the release safe for update checks: the MSI, its signature
+      # and latest.json are all attached. Until this step it stays a draft.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: rockbadger-v${{ needs.prepare.outputs.version }}
+        run: |
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          echo "::notice::published $RELEASE_TAG"
