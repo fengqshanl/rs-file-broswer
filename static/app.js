@@ -143,6 +143,18 @@ function targetDetail(target) {
   return target.url || '';
 }
 
+/// The local disk is already on this machine: uploading into it or downloading
+/// out of it would only duplicate files. Remote targets keep both actions.
+function isLocalTarget(tab = activeTab()) {
+  return Boolean(tab && tab.target && tab.target.kind === 'local');
+}
+
+/// Dragging files into the window is an upload; local tabs have no upload.
+function canUploadToActiveTab() {
+  const tab = activeTab();
+  return Boolean(tab && tab.session) && !isLocalTarget(tab);
+}
+
 function targetHeaders(tab) {
   if (!state.app || !tab || tab.target.kind === 'standalone') return {};
   return { 'X-RockBadger-Target': tab.id };
@@ -946,13 +958,22 @@ function renderFiles() {
   empty.hidden = hasEntries || state.list.loading;
   if (!hasEntries && !state.list.loading) {
     const filtering = Boolean(state.filter.trim());
+    const local = isLocalTarget();
     empty.querySelector('p').textContent = filtering
       ? '没有匹配的项目'
       : '这个文件夹还是空的';
     const hint = empty.querySelector('.empty-hint');
-    if (hint) hint.textContent = filtering ? '换个关键词试试' : '拖拽文件到此处或点击“上传”';
+    if (hint) {
+      hint.textContent = filtering
+        ? '换个关键词试试'
+        : local
+          ? '使用右键菜单或工具栏新建文件夹'
+          : '拖拽文件到此处或点击“上传”';
+    }
     const actions = empty.querySelector('.empty-actions');
     if (actions) actions.hidden = filtering;
+    const emptyUpload = empty.querySelector('#empty-upload');
+    if (emptyUpload) emptyUpload.hidden = local;
   }
 
   for (const entry of visible) {
@@ -1352,9 +1373,9 @@ function copyEntries(entries, cut = false, tab = activeTab()) {
   toast(
     count === 1
       ? cut
-        ? `已剪切「${entries[0].name}」，切换到目标标签后点击“移动”`
-        : `已复制「${entries[0].name}」，切换到目标标签后点击“粘贴”`
-      : `已${cut ? '剪切' : '复制'} ${count} 项`,
+        ? `已剪切「${entries[0].name}」，切换到目标连接后右键选择“粘贴”或按 Ctrl+V`
+        : `已复制「${entries[0].name}」，切换到目标连接后右键选择“粘贴”或按 Ctrl+V`
+      : `已${cut ? '剪切' : '复制'} ${count} 项，切换到目标连接后右键选择“粘贴”或按 Ctrl+V`,
     'success',
   );
 }
@@ -1981,27 +2002,32 @@ function openRowContextMenu(x, y, tab = activeTab()) {
   if (!entries.length) return;
   menu.replaceChildren();
   const single = entries.length === 1 ? entries[0] : null;
+  const canDownload = !isLocalTarget(tab);
 
   if (single) {
     const fullPath = entryPath(tab, single);
     menu.append(menuButton('eye', '打开', () => void openEntry(single, tab)));
     if (single.is_dir) {
-      menu.append(
-        menuButton('download', '下载文件夹 (.tar)', () =>
-          startFolderDownload(fullPath, single.name, tab),
-        ),
-      );
+      if (canDownload) {
+        menu.append(
+          menuButton('download', '下载文件夹 (.tar)', () =>
+            startFolderDownload(fullPath, single.name, tab),
+          ),
+        );
+      }
     } else {
       if (previewKindOf(single.name) !== 'none') {
         menu.append(
           menuButton('eye', '预览', () => openPreview(single, tab)),
         );
       }
-      menu.append(
-        menuButton('download', '下载', () =>
-          startDownload(fullPath, single.name, tab),
-        ),
-      );
+      if (canDownload) {
+        menu.append(
+          menuButton('download', '下载', () =>
+            startDownload(fullPath, single.name, tab),
+          ),
+        );
+      }
     }
     menu.append(menuSeparator());
   }
@@ -2927,6 +2953,7 @@ function openPreview(entry, tab = activeTab()) {
 
     const tools = div('preview-tools');
     const downloadButton = buttonEl('下载', 'btn');
+    downloadButton.hidden = isLocalTarget(tab);
     const closeButton = buttonEl('', 'btn ghost icon-only');
     closeButton.innerHTML = ICONS.close;
     closeButton.title = '关闭预览';
@@ -2983,8 +3010,10 @@ function openPreview(entry, tab = activeTab()) {
       if (index >= 0) controller.index = index;
 
       updateHeader(nextEntry, nextKind);
-      downloadButton.onclick = () =>
-        startDownload(joinPath(tab.cwd, currentEntry.name), currentEntry.name, tab);
+      if (!isLocalTarget(tab)) {
+        downloadButton.onclick = () =>
+          startDownload(joinPath(tab.cwd, currentEntry.name), currentEntry.name, tab);
+      }
 
       const generation = ++renderGeneration;
       releaseObjectUrls();
@@ -4210,6 +4239,12 @@ function updateTabChrome(tab) {
   $('#user-badge').hidden = passwordless || !tab.session;
   $('#btn-account').hidden = passwordless || !tab.session;
   $('#btn-logout').hidden = passwordless || !tab.session;
+  const local = tab.target.kind === 'local';
+  $('#btn-upload').hidden = local;
+  $('#btn-upload-folder').hidden = local;
+  const emptyUpload = $('#empty-upload');
+  if (emptyUpload) emptyUpload.hidden = local;
+  if (local) $('#drop-overlay').hidden = true;
   $('#session-note').textContent = passwordless
     ? tab.target.kind === 'local'
       ? '本机文件通过回环服务访问，不上传任何数据'
@@ -5332,7 +5367,6 @@ function bindEvents() {
       setTimeout(() => closeConnectionMenu(), 0);
     }
   });
-  $('#btn-paste').addEventListener('click', () => void pasteClipboard());
   $('#toggle-hidden').checked = state.showHidden;
   $('#toggle-hidden').addEventListener('change', (event) => {
     state.showHidden = event.target.checked;
@@ -5478,28 +5512,35 @@ function bindEvents() {
   });
 
   document.addEventListener('dragenter', (event) => {
-    if (!state.key || !hasFileDrag(event)) return;
+    if (!hasFileDrag(event)) return;
+    if (!canUploadToActiveTab()) {
+      event.preventDefault();
+      return;
+    }
     event.preventDefault();
     dragDepth += 1;
     $('#drop-overlay').hidden = false;
   });
   document.addEventListener('dragover', (event) => {
-    if (!state.key || !hasFileDrag(event)) return;
+    if (!hasFileDrag(event)) return;
     event.preventDefault();
+    if (!canUploadToActiveTab()) {
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+      return;
+    }
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
   });
   document.addEventListener('dragleave', (event) => {
-    if (!state.key) return;
     event.preventDefault();
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) $('#drop-overlay').hidden = true;
   });
   document.addEventListener('drop', async (event) => {
-    if (!state.key || !hasFileDrag(event)) return;
+    if (!hasFileDrag(event)) return;
     event.preventDefault();
     dragDepth = 0;
     $('#drop-overlay').hidden = true;
-    if (!event.dataTransfer) return;
+    if (!canUploadToActiveTab() || !event.dataTransfer) return;
     try {
       const collected = await collectDropItems(event.dataTransfer);
       enqueueUploads(collected.items, state.cwd, collected.directories);

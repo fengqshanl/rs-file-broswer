@@ -180,12 +180,12 @@ const downloadText = (path) =>
 
 try {
   await waitFor(
-    "document.readyState === 'complete' && !document.querySelector('#workspace-bar').hidden",
+    "document.readyState === 'complete' && !!document.querySelector('#workspace-bar') && !document.querySelector('#workspace-bar').hidden",
     20_000,
     'workspace boot',
   );
   await waitFor(
-    "!document.querySelector('#app-view').hidden",
+    "!!document.querySelector('#app-view') && !document.querySelector('#app-view').hidden",
     20_000,
     'local workspace ready',
   );
@@ -240,6 +240,16 @@ try {
   );
   pass('add server, create tab and encrypted login');
 
+  const remoteChrome = await evaluate(`({
+    upload: !document.querySelector('#btn-upload').hidden,
+    uploadFolder: !document.querySelector('#btn-upload-folder').hidden,
+    pasteGone: !document.querySelector('#btn-paste'),
+  })`);
+  if (!remoteChrome.upload || !remoteChrome.uploadFolder || !remoteChrome.pasteGone) {
+    throw new Error(`remote target lost upload actions: ${JSON.stringify(remoteChrome)}`);
+  }
+  pass('remote target keeps upload actions and has no paste button');
+
   await evaluate(`(async () => {
     await api('/api/mkdir', { path: ${JSON.stringify(`/${remoteFolder}`)} });
     enqueueUploads(
@@ -277,6 +287,16 @@ try {
   await clickTab('本机');
   await evaluate("(async () => { await loadDir(\"/\", { tab: activeTab() }); return true; })()");
   await waitRow(localFile, 10_000);
+  const localChrome = await evaluate(`({
+    uploadHidden:
+      document.querySelector('#btn-upload').hidden &&
+      document.querySelector('#btn-upload-folder').hidden,
+    pasteGone: !document.querySelector('#btn-paste'),
+  })`);
+  if (!localChrome.uploadHidden || !localChrome.pasteGone) {
+    throw new Error(`local target still offers upload: ${JSON.stringify(localChrome)}`);
+  }
+  pass('local target hides upload actions');
   if (!(await rowAction(localFile, '复制'))) throw new Error('local copy button missing');
   await clickTab(serverName);
   await waitFor(
@@ -284,7 +304,7 @@ try {
     10_000,
     'remote folder still active',
   );
-  await evaluate("document.querySelector('#btn-paste').click(); true");
+  await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true })); true");
   await waitRow(localFile, 25_000);
   const remoteText = await downloadText(`/${remoteFolder}/${localFile}`);
   if (!remoteText.includes(localContent.trim())) {
@@ -297,7 +317,7 @@ try {
   await waitRow(remoteFolder, 15_000);
   if (!(await rowAction(remoteFolder, '复制'))) throw new Error('remote folder copy button missing');
   await clickTab('本机');
-  await evaluate("document.querySelector('#btn-paste').click(); true");
+  await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true })); true");
   await waitRow(remoteFolder, 30_000);
   const copiedChild = await downloadText(`/${remoteFolder}/${remoteChild}`);
   if (!copiedChild.includes(remoteChildContent.trim())) {
@@ -310,7 +330,7 @@ try {
   await waitRow(remoteTop, 15_000);
   if (!(await rowAction(remoteTop, '剪切'))) throw new Error('remote cut button missing');
   await clickTab('本机');
-  await evaluate("document.querySelector('#btn-paste').click(); true");
+  await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true })); true");
   await waitRow(remoteTop, 25_000);
   const movedText = await downloadText(`/${remoteTop}`);
   if (!movedText.includes(remoteTopContent.trim())) {

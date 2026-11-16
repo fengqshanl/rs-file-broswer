@@ -123,6 +123,10 @@ try {
     appBarGone: !document.querySelector('#app-bar'),
     addVisible: !!document.querySelector('#btn-add-server'),
     updateVisible: !!document.querySelector('#btn-check-update'),
+    uploadHidden:
+      document.querySelector('#btn-upload').hidden &&
+      document.querySelector('#btn-upload-folder').hidden,
+    pasteGone: !document.querySelector('#btn-paste'),
     version: document.querySelector('#app-version').textContent,
     columns: [...document.querySelectorAll('.list-head > span')].map((node) => node.textContent),
   })`);
@@ -131,6 +135,8 @@ try {
     !chrome.appBarGone ||
     !chrome.addVisible ||
     !chrome.updateVisible ||
+    !chrome.uploadHidden ||
+    !chrome.pasteGone ||
     !/^v\d/.test(chrome.version)
   ) {
     throw new Error(`unexpected command bar: ${JSON.stringify(chrome)}`);
@@ -190,10 +196,13 @@ try {
       items: [...menu.querySelectorAll('.context-item')].map((node) => node.textContent),
     };
   })()`);
-  for (const label of ['打开', '下载', '复制', '剪切', '重命名', '删除']) {
+  for (const label of ['打开', '复制', '剪切', '重命名', '删除']) {
     if (!menu.visible || !menu.items.some((item) => item.includes(label))) {
       throw new Error(`context menu missing ${label}: ${JSON.stringify(menu)}`);
     }
+  }
+  if (menu.items.some((item) => item.includes('下载'))) {
+    throw new Error(`local context menu must not offer download: ${JSON.stringify(menu)}`);
   }
   await evaluate('document.body.click(); true');
   await evaluate('clearSelection(activeTab()); true');
