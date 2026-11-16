@@ -44,6 +44,11 @@ const HTML_PREVIEW_BYTES = 32 * 1024 * 1024;
 const BLOB_DOWNLOAD_LIMIT = 1024 * 1024 * 1024;
 const SHEET_MAX_ROWS = 2000;
 const SHEET_MAX_COLS = 80;
+/** A request that produces no traffic for this long is treated as dead. */
+const API_TIMEOUT_MS = 60_000;
+const UPLOAD_REQUEST_TIMEOUT_MS = 60_000;
+const DOWNLOAD_IDLE_TIMEOUT_MS = 60_000;
+const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024;
 
 const IMAGE_EXTENSIONS = new Set([
   'png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'avif', 'bmp', 'ico', 'svg',
@@ -170,6 +175,7 @@ Object.defineProperties(state, {
 });
 
 const uploadQueue = [];
+const activeUploads = new Set();
 let uploadRunning = false;
 let dragDepth = 0;
 
@@ -372,20 +378,65 @@ async function decryptWithKey(key, aad, envelope) {
 
 /* ---------- API ---------- */
 
-async function api(path, payload = {}, method = 'POST', tab = activeTab()) {
+/**
+ * fetch() with a deadline. A stalled connection would otherwise leave the
+ * upload queue waiting forever; aborting it turns the hang into a visible
+ * error and lets the next queued file start.
+ */
+async function fetchWithTimeout(
+  url,
+  options = {},
+  { signal = null, timeoutMs = 0, onTimeout = null } = {},
+) {
+  if (!timeoutMs && !signal) return fetch(url, options);
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abortFromCaller, { once: true });
+  }
+  let timedOut = false;
+  const timer = timeoutMs
+    ? setTimeout(() => {
+        timedOut = true;
+        if (onTimeout) onTimeout();
+        controller.abort();
+      }, timeoutMs)
+    : null;
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error('请求超时，请检查网络后重试');
+    if (error instanceof TypeError) throw new Error('网络连接失败，请检查网络后重试');
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', abortFromCaller);
+  }
+}
+
+async function api(path, payload = {}, method = 'POST', tab = activeTab(), options = {}) {
   const session = tab.session;
   if (!session) throw new Error('会话已失效，请重新登录');
   const aad = `${method} ${path}`;
   const envelope = await encryptWithKey(session.key, aad, payload);
-  const response = await fetch(path, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.token}`,
-      ...targetHeaders(tab),
+  const response = await fetchWithTimeout(
+    path,
+    {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.token}`,
+        ...targetHeaders(tab),
+      },
+      body: JSON.stringify(envelope),
     },
-    body: JSON.stringify(envelope),
-  });
+    {
+      signal: options.signal || null,
+      timeoutMs: options.timeoutMs ?? API_TIMEOUT_MS,
+      onTimeout: options.onTimeout || null,
+    },
+  );
   let data = null;
   try {
     data = await response.json();
@@ -492,7 +543,16 @@ function clearTabSession(tab) {
   tab.loaded = false;
   tab.needsRefresh = false;
   for (let index = uploadQueue.length - 1; index >= 0; index -= 1) {
-    if (uploadQueue[index].tab === tab) uploadQueue.splice(index, 1);
+    if (uploadQueue[index].tab !== tab) continue;
+    const [entry] = uploadQueue.splice(index, 1);
+    entry.cancelled = true;
+    entry.ui?.fail('会话已失效，请重新登录');
+  }
+  for (const entry of activeUploads) {
+    if (entry.tab !== tab) continue;
+    entry.cancelled = true;
+    entry.cancelMessage = '会话已失效，请重新登录';
+    entry.controller?.abort();
   }
   if (state.clipboard?.tabId === tab.id) {
     state.clipboard = null;
@@ -2057,6 +2117,19 @@ async function streamEncryptedDownload({
     toast('会话已失效，请重新登录', 'error');
     return;
   }
+  // A download that stops producing bytes (Wi-Fi drop, sleeping laptop,
+  // server restart) used to hang forever; abort it instead.
+  const controller = new AbortController();
+  let idleTimer = null;
+  let stalled = false;
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, DOWNLOAD_IDLE_TIMEOUT_MS);
+  };
+  armIdle();
   try {
     const aad = `POST ${endpoint}`;
     const envelope = await encryptWithKey(session.key, aad, payload);
@@ -2068,6 +2141,7 @@ async function streamEncryptedDownload({
         ...targetHeaders(tab),
       },
       body: JSON.stringify(envelope),
+      signal: controller.signal,
     });
     if (!response.ok) {
       let message = null;
@@ -2095,6 +2169,7 @@ async function streamEncryptedDownload({
     let ended = false;
 
     outer: for await (const value of responseChunks(response)) {
+      armIdle();
       pending = concatBytes(pending, value);
       while (pending.length >= 4) {
         const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
@@ -2173,9 +2248,17 @@ async function streamEncryptedDownload({
     } catch {
       /* ignore abort errors */
     }
-    const message = error.message || '下载失败';
+    const message = stalled
+      ? '下载超时，网络连接可能已中断，请重试'
+      : error?.name === 'AbortError'
+        ? '下载已取消'
+        : error instanceof TypeError
+          ? '网络连接失败，请检查网络后重试'
+          : error?.message || '下载失败';
     progress.fail(message);
     toast(message, 'error');
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
   }
 }
 
@@ -2243,17 +2326,46 @@ function enqueueUploads(input, dir, directories = [], tab = activeTab()) {
     void ensureDirectories(base, [...directorySet], tab);
   }
 
+  // Create the UI row as soon as the file is queued. Previously the row only
+  // appeared once the upload actually started, so a stuck transfer made every
+  // later selection look like it did nothing.
+  $('#upload-panel').hidden = false;
   for (const item of items) {
     const parent = dirnameOf(item.relative);
-    uploadQueue.push({
+    const targetDir = parent ? joinPath(base, parent) : base;
+    const display = item.relative;
+    const entry = {
       file: item.file,
-      dir: parent ? joinPath(base, parent) : base,
-      display: item.relative,
+      dir: targetDir,
+      display,
       tab,
-    });
+      cancelled: false,
+      timedOut: false,
+      controller: null,
+      ui: null,
+    };
+    try {
+      entry.ui = addUploadItem(display || item.file.name, item.file.size, targetDir, () =>
+        cancelUpload(entry),
+      );
+    } catch (error) {
+      toast(`无法开始上传 ${display || item.file.name}：${error?.message || error}`, 'error');
+      continue;
+    }
+    uploadQueue.push(entry);
   }
-  $('#upload-panel').hidden = false;
   void pumpUploads();
+}
+
+function cancelUpload(entry) {
+  if (entry.cancelled) return;
+  entry.cancelled = true;
+  if (entry.controller) {
+    entry.ui?.cancelling();
+    entry.controller.abort();
+    return;
+  }
+  entry.ui?.cancelled();
 }
 
 async function ensureDirectories(base, relatives, tab = activeTab()) {
@@ -2316,23 +2428,45 @@ async function pumpUploads() {
   uploadRunning = true;
   try {
     while (uploadQueue.length) {
-      const item = uploadQueue.shift();
-      await uploadFile(item.file, item.dir, item.display, item.tab);
+      const entry = uploadQueue.shift();
+      if (entry.cancelled) {
+        entry.ui?.cancelled();
+        continue;
+      }
+      // One broken transfer must never wedge the queue for every later file.
+      try {
+        await uploadFile(entry);
+      } catch (error) {
+        const message = error?.message || '上传失败';
+        entry.ui?.fail(message);
+        toast(message, 'error');
+      }
     }
   } finally {
     uploadRunning = false;
   }
 }
 
-async function uploadFile(file, dir, display, tab = activeTab()) {
-  const item = addUploadItem(display || file.name, file.size, dir);
+async function uploadFile(entry) {
+  const { file, dir, display, tab, ui } = entry;
   const session = tab.session;
   let uploadId = null;
   if (!session) {
-    item.fail('会话已失效，请重新登录');
+    ui.fail('会话已失效，请重新登录');
     return;
   }
+  const controller = new AbortController();
+  entry.controller = controller;
+  activeUploads.add(entry);
+  const requestOptions = {
+    signal: controller.signal,
+    timeoutMs: UPLOAD_REQUEST_TIMEOUT_MS,
+    onTimeout: () => {
+      entry.timedOut = true;
+    },
+  };
   try {
+    if (entry.cancelled) throw new Error('已取消');
     const init = await api(
       '/api/upload/init',
       {
@@ -2342,14 +2476,15 @@ async function uploadFile(file, dir, display, tab = activeTab()) {
       },
       'POST',
       tab,
+      requestOptions,
     );
     uploadId = init.id;
 
-    const chunkSize = 2 * 1024 * 1024;
     let offset = 0;
     let sequence = 0;
     while (offset < file.size) {
-      const end = Math.min(offset + chunkSize, file.size);
+      if (entry.cancelled) throw new Error('已取消');
+      const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
       const plaintext = new Uint8Array(await readBlob(file.slice(offset, end)));
       const iv = randomBytes(12);
       const path = `/api/upload/chunk/${encodeURIComponent(uploadId)}/${sequence}`;
@@ -2362,15 +2497,19 @@ async function uploadFile(file, dir, display, tab = activeTab()) {
         ),
       );
       const frame = makeFrame(iv, ciphertext);
-      const response = await fetch(path, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          Authorization: `Bearer ${session.token}`,
-          ...targetHeaders(tab),
+      const response = await fetchWithTimeout(
+        path,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            Authorization: `Bearer ${session.token}`,
+            ...targetHeaders(tab),
+          },
+          body: frame,
         },
-        body: frame,
-      });
+        requestOptions,
+      );
       let data = null;
       try {
         data = await response.json();
@@ -2385,32 +2524,51 @@ async function uploadFile(file, dir, display, tab = activeTab()) {
 
       offset = end;
       sequence += 1;
-      item.update(
+      ui.update(
         file.size === 0 ? 1 : offset / file.size,
         `${formatSize(offset)} / ${formatSize(file.size)}`,
       );
     }
 
-    const result = await api('/api/upload/finish', { id: uploadId }, 'POST', tab);
+    const result = await api(
+      '/api/upload/finish',
+      { id: uploadId },
+      'POST',
+      tab,
+      requestOptions,
+    );
     uploadId = null;
-    item.done(result.path || file.name);
+    ui.done(result.path || file.name);
     toast(`已上传：${display || file.name}`, 'success');
     if (tab === activeTab() && (dir === tab.cwd || dir.startsWith(`${tab.cwd === '/' ? '' : tab.cwd}/`))) {
-      await loadDir(tab.cwd, { tab });
+      // The upload already succeeded; a failed refresh must not mark it failed.
+      try {
+        await loadDir(tab.cwd, { tab });
+      } catch {
+        /* the next refresh will pick it up */
+      }
     } else {
       tab.needsRefresh = true;
     }
   } catch (error) {
-    const message = error.message || '上传失败';
-    item.fail(message);
-    toast(message, 'error');
+    const message = entry.cancelled
+      ? entry.cancelMessage || '已取消'
+      : entry.timedOut
+        ? '上传超时，网络连接可能已中断，请重试'
+        : error?.message || '上传失败';
+    if (entry.cancelled) ui.cancelled(entry.cancelMessage);
+    else ui.fail(message);
+    if (!entry.cancelled) toast(message, 'error');
     if (uploadId && tab.session) {
       try {
-        await api('/api/upload/abort', { id: uploadId }, 'POST', tab);
+        await api('/api/upload/abort', { id: uploadId }, 'POST', tab, { timeoutMs: 10_000 });
       } catch {
         /* best effort cleanup */
       }
     }
+  } finally {
+    entry.controller = null;
+    activeUploads.delete(entry);
   }
 }
 
@@ -2422,7 +2580,7 @@ function makeFrame(iv, ciphertext) {
   return frame;
 }
 
-function addUploadItem(name, size, dir) {
+function addUploadItem(name, size, dir, onCancel = null) {
   $('#upload-panel').hidden = false;
   const wrapper = div('upload-item');
   const head = div('upload-item-head');
@@ -2431,7 +2589,18 @@ function addUploadItem(name, size, dir) {
   title.title = name;
   const meta = span('upload-meta');
   meta.textContent = `${formatSize(size)} · ${dir === '/' ? '根目录' : dir}`;
-  head.append(title, meta);
+  const cancel = document.createElement('button');
+  cancel.className = 'upload-cancel';
+  cancel.type = 'button';
+  cancel.title = '取消上传';
+  cancel.setAttribute('aria-label', `取消上传 ${name}`);
+  cancel.textContent = '×';
+  cancel.addEventListener('click', () => {
+    cancel.disabled = true;
+    cancel.hidden = true;
+    if (onCancel) onCancel();
+  });
+  head.append(title, meta, cancel);
   const bar = document.createElement('progress');
   bar.max = 100;
   bar.value = 0;
@@ -2451,16 +2620,27 @@ function addUploadItem(name, size, dir) {
       bar.value = 100;
       status.textContent = `已完成 · ${path}`;
       wrapper.classList.add('done');
+      cancel.hidden = true;
     },
     fail(message) {
       status.textContent = `失败 · ${message}`;
       wrapper.classList.add('failed');
+      cancel.hidden = true;
+    },
+    cancelling() {
+      status.textContent = '正在取消…';
+      cancel.hidden = true;
+    },
+    cancelled(message) {
+      status.textContent = message || '已取消';
+      wrapper.classList.add('cancelled');
+      cancel.hidden = true;
     },
   };
 }
 
 function clearFinishedUploads() {
-  for (const item of document.querySelectorAll('.upload-item.done, .upload-item.failed')) {
+  for (const item of document.querySelectorAll('.upload-item.done, .upload-item.failed, .upload-item.cancelled')) {
     item.remove();
   }
   if (!$('#upload-list').children.length) $('#upload-panel').hidden = true;
@@ -4696,7 +4876,13 @@ function bindEvents() {
     // FileList is live: snapshot it before clearing the input.
     const files = Array.from(event.target.files || []);
     event.target.value = '';
-    enqueueUploads(files, state.cwd);
+    if (!files.length) return;
+    // Never let an unexpected error turn "picked a file" into silence.
+    try {
+      enqueueUploads(files, state.cwd);
+    } catch (error) {
+      toast(`无法开始上传：${error?.message || error}`, 'error');
+    }
   });
   $('#btn-upload-folder').addEventListener('click', () => {
     // Safari / WKWebView older than 11.1 ignores `webkitdirectory` and would
@@ -4711,7 +4897,12 @@ function bindEvents() {
   $('#dir-input').addEventListener('change', (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
-    if (files.length) enqueueUploads(files, state.cwd);
+    if (!files.length) return;
+    try {
+      enqueueUploads(files, state.cwd);
+    } catch (error) {
+      toast(`无法开始上传：${error?.message || error}`, 'error');
+    }
   });
   $('#btn-mkdir').addEventListener('click', createFolder);
   $('#btn-refresh').addEventListener('click', () => loadDir(state.cwd));

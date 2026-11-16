@@ -474,6 +474,15 @@ ADMIN_PASSWORD='local-test-password-123' \
 node scripts/ui-smoke.mjs
 ```
 
+传输韧性回归测试（拦截上传分块模拟断网，验证卡住的上传不会让后续选择的文件“没有反应”，并检查取消上传后队列还能继续）：
+
+```bash
+CHROME_DEBUG_URL=http://127.0.0.1:9223 \
+UI_URL=https://127.0.0.1:18443/ \
+ADMIN_PASSWORD='local-test-password-123' \
+node scripts/ui-transfer-resilience.mjs
+```
+
 桌面多标签回归测试（需要全新的 `dev_app` 数据目录、Chrome 调试端口和上一节的远程测试服务器）：
 
 ```bash

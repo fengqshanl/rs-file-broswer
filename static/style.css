@@ -815,6 +815,34 @@ svg {
   color: var(--danger);
 }
 
+.upload-item.cancelled .upload-status {
+  color: var(--faint);
+}
+
+.upload-cancel {
+  flex: none;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.upload-cancel:hover {
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.14);
+}
+
+.upload-cancel:disabled {
+  cursor: default;
+}
+
 progress {
   display: block;
   width: 100%;
