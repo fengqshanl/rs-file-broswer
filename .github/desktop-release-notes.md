@@ -1,8 +1,21 @@
-# AgentGod Files 桌面版
+# 岩獾 RockBadger 桌面版
 
-**AgentGod Files** 是合并后的单一桌面应用：默认展示本机文件系统；顶部命令栏的「添加连接」可添加 AgentGod Files 服务器（HTTPS / HTTP）或 SSH / SFTP 主机，每个目标生成独立标签。
+**岩獾 RockBadger** 是一个单一桌面应用：默认展示本机文件系统；顶部操作栏的「添加连接」可添加 RockBadger 服务器（HTTPS / HTTP）或 SSH / SFTP 主机，连接下拉菜单可随时切换。
 
 > **发布范围**：当前只提供 Windows x64 `.msi` 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
+
+## 0.3.0 更新
+
+- **品牌改名**：AgentGod Files → **岩獾 RockBadger**（进程名 `rockbadger.exe`、应用标识 `com.rockbadger.files`、数据目录 `%APPDATA%\RockBadger`）
+- **升级说明**：应用标识与 UpgradeCode 已变化，0.2.x 无法覆盖安装或应用内升级。请先安装 RockBadger，确认本机/服务器/SSH 连接与凭据已自动迁移，再从「应用和功能」手动卸载 AgentGod Files；旧数据目录与系统凭据会保留作备份
+- 首次启动自动迁移旧 `%APPDATA%\AgentGodFiles` 中的 `targets.json`、`known_hosts.json`、`update-source.json` 与设置；SSH 密码/私钥口令从旧凭据库逐条复制，旧条目不删除
+- 顶部改为统一操作栏：品牌、连接下拉（本机 / 服务器 / SSH）、位置选择、显示隐藏文件、主题切换、检查更新、版本与「添加连接」集中在一行
+- 全新「连接管理」弹窗：左侧已保存连接列表，右侧分区表单；支持 HTTP/SSH 类型切换、密码/私钥认证、删除二次确认与连接测试
+- 新增浅色 / 深色主题，默认跟随系统，也可手动选择「自动 / 浅色 / 深色」；主题与隐藏文件偏好写入 `settings.json`，重启后保持
+- 本机默认打开系统根目录（Windows 为 `C:\`），默认路径不再因用户目录不同而变化
+- 独立服务端改为 **纯 API**：不再提供网页界面，`GET /` 返回 410；请用桌面 App 连接服务器。`/healthz` 与全部加密 API 保持不变
+- 界面细节打磨：连接状态点、胶囊式面包屑、48px 文件行、更清晰的焦点环与滚动条、空目录快捷操作
+- 更新标签改为 `rockbadger-v*`，安装包名为 `RockBadger_0.3.0_x64.msi`；更新清单会忽略旧的 `AgentGod.Files_*` 资产
 
 ## 0.2.2 更新
 
@@ -79,14 +92,14 @@
 ## 0.1.1 更新
 
 - 客户端与本机版改为「本机优先 + 多标签」工作区，启动不再进入空白连接页
-- 右上角「添加服务器」使用 WebView 安全的自定义面板，修复部分系统上点击后卡死的问题
-- 每台服务器独立标签、独立登录会话、独立路径与分页状态
-- 标签间支持复制、剪切、粘贴文件与文件夹，同名自动改名，跨端传输只在内存中解密并立即重新加密
+- 顶部操作栏「添加连接」使用 WebView 安全的自定义面板，修复部分系统上点击后卡死的问题
+- 每个连接独立登录会话、独立路径与分页状态
+- 连接间支持复制、剪切、粘贴文件与文件夹，同名自动改名，跨端传输只在内存中解密并立即重新加密
 - 继续使用 AES-256-GCM 加密预览、下载、上传与文件夹归档
 
 ## 安装包
 
-- **Windows x64**：下载 `AgentGod.Files_*_x64.msi`
+- **Windows x64**：下载 `RockBadger_*_x64.msi`
 - **应用内更新**：配置签名密钥后，Release 还会附带 `*.msi.sig` 与 `latest.json`
 - **macOS / Linux**：暂停发布，历史安装包已移除
 
@@ -94,12 +107,13 @@
 
 - 安装包未做商业代码签名。Windows SmartScreen 首次运行可能拦截，点「更多信息 → 仍要运行」，
   或在下载目录执行 `Get-ChildItem *.msi | Unblock-File`。
-- 连接自签名证书的 AgentGod 服务器时，请在连接设置中勾选「允许自签名证书」。
-- 服务器目标面向同版本 AgentGod Files 服务端的 HTTPS / HTTP；SSH / SFTP 目标直接连接 OpenSSH 等标准服务器。
+- 连接自签名证书的 RockBadger 服务器时，请在连接设置中勾选「允许自签名证书」。
+- 服务器目标面向同版本 RockBadger 服务端的 HTTPS / HTTP；SSH / SFTP 目标直接连接 OpenSSH 等标准服务器。
 - 从 0.1.1 起，预览内容同样使用 AES-256-GCM 加密；请将服务端与桌面端升级到同一版本。
 - 桌面端会在本机回环地址启动一个仅本机可访问的伴生服务，用于加载界面、代理请求和承载 SSH 服务；
   不监听局域网，也不会上传任何数据到第三方。0.1.3 起会读取公开的 GitHub Releases 元数据检查新版本，
   不发送任何本机文件或凭据；离线时自动跳过。
-- 服务端继续使用 Docker 部署；桌面端与其共用同一套加密登录与传输协议。
+- 服务端继续使用 Docker 部署且只提供 API；桌面端与其共用同一套加密登录与传输协议。
+- 从 0.2.x 升级：应用标识已变化，需先安装 RockBadger 并确认数据迁移，再手动卸载 AgentGod Files。
 
 完整文档：https://github.com/fengqshanl/rs-file-broswer

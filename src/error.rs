@@ -62,5 +62,5 @@ pub fn log(message: &str) {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    eprintln!("[agentgod-files][{timestamp}] {message}");
+    eprintln!("[rockbadger][{timestamp}] {message}");
 }

@@ -28,13 +28,15 @@ const PLATFORM_RULES = [
   },
 ];
 
-/** True for assets produced by this app (`AgentGod.Files_0.2.0_x64.msi`). */
+/** True for assets produced by this app (`RockBadger_0.3.0_x64.msi`). */
 export function isAppAsset(name) {
   const compact = String(name).toLowerCase().replace(/[\s._-]+/g, '');
-  // Reject the retired per-app builds (`AgentGod.Files.Local_...`).
-  if (compact.startsWith('agentgodfileslocal')) return false;
-  if (compact.startsWith('agentgodfilesclient')) return false;
-  return compact.startsWith('agentgodfiles');
+  // Retired per-app builds (`RockBadger.Files.Local_...`) and everything from
+  // before the rename must never be offered to RockBadger users.
+  if (compact.startsWith('rockbadgerfileslocal')) return false;
+  if (compact.startsWith('rockbadgerfilesclient')) return false;
+  if (compact.startsWith('agentgod')) return false;
+  return compact.startsWith('rockbadger');
 }
 
 export function versionFromTag(tag) {
@@ -80,7 +82,7 @@ export function buildManifestSpec(release) {
 
 async function github(pathname) {
   const headers = {
-    'User-Agent': 'agentgod-files-release',
+    'User-Agent': 'rockbadger-release',
     Accept: 'application/vnd.github+json',
     // GitHub's API can serve a cached asset list for up to a minute. The
     // manifest job runs right after the uploads, so bypass that cache.
@@ -139,7 +141,7 @@ export async function buildManifest(release, tag, outputDir) {
   }
   const manifest = {
     version,
-    notes: `AgentGod Files 桌面版 v${version}`,
+    notes: `岩獾 RockBadger 桌面版 v${version}`,
     pub_date: release.published_at || new Date().toISOString(),
     platforms,
   };
@@ -158,19 +160,21 @@ async function selfTest() {
   const release = {
     published_at: '2026-11-13T06:00:00Z',
     assets: [
-      asset('AgentGod.Files_0.2.0_x64.msi'),
-      asset('AgentGod.Files_0.2.0_x64.msi.sig'),
+      asset('RockBadger_0.2.0_x64.msi'),
+      asset('RockBadger_0.2.0_x64.msi.sig'),
       // Retired macOS/Linux/NSIS bundles and pre-merge per-app builds are
       // ignored even when signed.
-      asset('AgentGod.Files_0.2.0_universal.dmg'),
-      asset('AgentGod.Files_0.2.0_universal.app.tar.gz'),
-      asset('AgentGod.Files_0.2.0_universal.app.tar.gz.sig'),
-      asset('AgentGod.Files_0.2.0_x64-setup.exe'),
-      asset('AgentGod.Files_0.2.0_x64-setup.exe.sig'),
-      asset('AgentGod.Files.Local_0.1.6_x64.msi'),
-      asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
-      asset('AgentGod.Files.Client_0.1.6_x64.msi'),
-      asset('AgentGod.Files.Client_0.1.6_x64.msi.sig'),
+      asset('RockBadger_0.2.0_universal.dmg'),
+      asset('RockBadger_0.2.0_universal.app.tar.gz'),
+      asset('RockBadger_0.2.0_universal.app.tar.gz.sig'),
+      asset('RockBadger_0.2.0_x64-setup.exe'),
+      asset('RockBadger_0.2.0_x64-setup.exe.sig'),
+      asset('RockBadger.Files.Local_0.1.6_x64.msi'),
+      asset('RockBadger.Files.Local_0.1.6_x64.msi.sig'),
+      asset('RockBadger.Files.Client_0.1.6_x64.msi'),
+      asset('RockBadger.Files.Client_0.1.6_x64.msi.sig'),
+      asset('AgentGod.Files_0.2.2_x64.msi'),
+      asset('AgentGod.Files_0.2.2_x64.msi.sig'),
       asset('latest.json'),
       asset('latest-local.json'),
     ],
@@ -178,39 +182,51 @@ async function selfTest() {
   const windowsKeys = ['windows-aarch64', 'windows-x86_64'];
   const specs = buildManifestSpec(release);
   assert.deepEqual(Object.keys(specs).sort(), windowsKeys);
-  assert.match(specs['windows-x86_64'].url, /AgentGod\.Files_0\.2\.0_x64\.msi$/);
+  assert.match(specs['windows-x86_64'].url, /RockBadger_0\.2\.0_x64\.msi$/);
   assert.equal(
     specs['windows-aarch64'].signature_url,
-    'https://example.com/AgentGod.Files_0.2.0_x64.msi.sig',
+    'https://example.com/RockBadger_0.2.0_x64.msi.sig',
   );
   // An MSI without its .sig must not produce a manifest entry.
   assert.deepEqual(
-    buildManifestSpec({ assets: [asset('AgentGod.Files_0.2.0_x64.msi')] }),
+    buildManifestSpec({ assets: [asset('RockBadger_0.2.0_x64.msi')] }),
     {},
   );
   // Pre-merge per-app assets must never be offered to the merged app.
   assert.deepEqual(
     buildManifestSpec({
       assets: [
-        asset('AgentGod.Files.Local_0.1.6_x64.msi'),
-        asset('AgentGod.Files.Local_0.1.6_x64.msi.sig'),
+        asset('RockBadger.Files.Local_0.1.6_x64.msi'),
+        asset('RockBadger.Files.Local_0.1.6_x64.msi.sig'),
       ],
     }),
     {},
   );
   assert.equal(versionFromTag('desktop-v0.2.0'), '0.2.0');
-  assert.equal(isAppAsset('AgentGod.Files_0.2.0_x64.msi'), true);
-  assert.equal(isAppAsset('AgentGod.Files_0.2.0_x64.msi.sig'), true);
-  assert.equal(isAppAsset('AgentGod.Files.Local_0.1.6_x64.msi'), false);
+  assert.equal(versionFromTag('rockbadger-v0.3.0'), '0.3.0');
+  assert.equal(isAppAsset('RockBadger_0.2.0_x64.msi'), true);
+  assert.equal(isAppAsset('RockBadger_0.2.0_x64.msi.sig'), true);
+  assert.equal(isAppAsset('RockBadger.Files.Local_0.1.6_x64.msi'), false);
+  assert.equal(isAppAsset('AgentGod.Files_0.2.2_x64.msi'), false);
+  assert.equal(isAppAsset('agentgod-files_0.3.0_x64.msi'), false);
   assert.equal(isAppAsset('latest-local.json'), false);
+  assert.deepEqual(
+    buildManifestSpec({
+      assets: [
+        asset('AgentGod.Files_0.2.2_x64.msi'),
+        asset('AgentGod.Files_0.2.2_x64.msi.sig'),
+      ],
+    }),
+    {},
+  );
   assert.deepEqual(buildManifestSpec({ assets: [] }), {});
   assert.equal(hasSignedAssets(release), true);
   assert.equal(
     hasSignedAssets({
       assets: [
-        asset('AgentGod.Files_0.2.0_universal.dmg'),
-        asset('AgentGod.Files_0.2.0_universal.app.tar.gz'),
-        asset('AgentGod.Files_0.2.0_universal.app.tar.gz.sig'),
+        asset('RockBadger_0.2.0_universal.dmg'),
+        asset('RockBadger_0.2.0_universal.app.tar.gz'),
+        asset('RockBadger_0.2.0_universal.app.tar.gz.sig'),
       ],
     }),
     false,

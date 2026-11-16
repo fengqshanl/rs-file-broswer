@@ -269,9 +269,7 @@ pub fn normalize_http_url(input: &str) -> Option<String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    if parsed.host_str().is_none() {
-        return None;
-    }
+    parsed.host_str()?;
     parsed.set_fragment(None);
     parsed.set_query(None);
     let mut text = parsed.to_string();

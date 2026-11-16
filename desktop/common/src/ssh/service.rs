@@ -1,7 +1,7 @@
 //! Loopback HTTP service for one SSH target.
 //!
 //! Its routes, request envelopes, encryption framing and JSON shapes are the
-//! same as the local service (`agentgod_files::web`), so the companion proxy
+//! same as the local service (`rockbadger::web`), so the companion proxy
 //! and the whole frontend work without a special case.
 
 use std::{
@@ -36,7 +36,7 @@ use tokio::{
     sync::{mpsc, Mutex, Semaphore},
 };
 
-use agentgod_files::{
+use rockbadger::{
     api::{encrypted_response, read_encrypted},
     auth::AuthSession,
     crypto::{self, random_b64, random_key, seal_frame},
@@ -401,7 +401,7 @@ async fn loopback_guard(request: axum::extract::Request, next: Next) -> Response
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !agentgod_files::web::is_loopback_host(host) {
+    if !rockbadger::web::is_loopback_host(host) {
         return (StatusCode::MISDIRECTED_REQUEST, "invalid host").into_response();
     }
     next.run(request).await
@@ -423,7 +423,7 @@ async fn info(State(state): State<Arc<SshState>>) -> Response {
     }
     Json(json!({
         "mode": "ssh",
-        "version": agentgod_files::VERSION,
+        "version": rockbadger::VERSION,
         "platform": std::env::consts::OS,
         "root": root,
         "roots": roots,

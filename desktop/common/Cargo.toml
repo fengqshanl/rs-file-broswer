@@ -1,12 +1,12 @@
 [package]
-name = "agentgod-desktop-common"
-version = "0.2.2"
+name = "rockbadger-desktop-common"
+version = "0.3.0"
 edition = "2021"
-description = "Shared runtime for the AgentGod Files desktop companions"
+description = "Shared runtime for the RockBadger desktop companions"
 license = "MIT"
 
 [dependencies]
-agentgod-files = { path = "../.." }
+rockbadger = { path = "../.." }
 aes-gcm = "0.10"
 anyhow = "1"
 axum = "0.8"

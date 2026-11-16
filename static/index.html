@@ -3,28 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>AgentGod Files</title>
+  <meta name="color-scheme" content="dark light">
+  <title>岩獾 RockBadger</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <script src="/theme-init.js"></script>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <div id="workspace-bar" class="workspace-bar" hidden>
-    <div id="tabs" class="workspace-tabs" role="tablist" aria-label="连接目标"></div>
-    <div class="workspace-actions">
-      <span id="local-root-wrap" class="app-root" hidden>
-        <span class="app-label">位置</span>
-        <select id="root-select" class="app-select" aria-label="选择文件位置"></select>
+  <div id="workspace-bar" class="workspace-bar ops-bar" hidden>
+    <div class="ops-brand" aria-hidden="true">
+      <span class="ops-logo">
+        <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M24 4.5 39.5 11v11.2c0 9.8-6.4 17.9-15.5 21.8C14.9 40.1 8.5 32 8.5 22.2V11Z"/>
+          <path d="M17.5 18.2a1.8 1.8 0 0 1 1.8-1.8h3.8l2.4 2.6h5.2a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H19.3a1.8 1.8 0 0 1-1.8-1.8Z"/>
+        </svg>
       </span>
-      <button id="btn-add-server" class="btn primary small" type="button">
-        <span class="icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 5v14"/><path d="M5 12h14"/>
+      <span class="ops-brand-name">岩獾 <b>RockBadger</b></span>
+    </div>
+
+    <div class="conn-picker">
+      <button id="conn-trigger" class="conn-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="conn-menu" title="切换连接">
+        <span id="conn-dot" class="conn-dot"></span>
+        <span class="conn-text">
+          <strong id="conn-name">本机</strong>
+          <span id="conn-detail" class="conn-detail">正在连接…</span>
+        </span>
+        <span class="conn-caret" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m6 9 6 6 6-6"/>
           </svg>
         </span>
-        添加连接
       </button>
+      <div id="conn-menu" class="conn-menu" role="menu" aria-label="连接目标" hidden></div>
+    </div>
+
+    <span id="local-root-wrap" class="app-root" hidden>
+      <span class="app-label">位置</span>
+      <select id="root-select" class="app-select" aria-label="选择文件位置"></select>
+    </span>
+
+    <div class="ops-actions">
+      <label class="toggle-check ops-toggle" title="显示以 . 开头或带隐藏属性的项目">
+        <input id="toggle-hidden" type="checkbox">
+        <span>显示隐藏文件</span>
+      </label>
+      <div id="theme-switch" class="segmented" role="group" aria-label="界面主题">
+        <button type="button" data-theme-choice="auto" aria-pressed="true" title="跟随系统主题">自动</button>
+        <button type="button" data-theme-choice="light" aria-pressed="false" title="浅色主题">浅色</button>
+        <button type="button" data-theme-choice="dark" aria-pressed="false" title="深色主题">深色</button>
+      </div>
       <button id="btn-check-update" class="btn small" type="button" title="检查桌面应用更新">
         <span class="icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -35,6 +63,14 @@
         <span id="update-check-spinner" class="spinner" hidden></span>
       </button>
       <span id="app-version" class="app-version"></span>
+      <button id="btn-add-server" class="btn primary small" type="button">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14"/><path d="M5 12h14"/>
+          </svg>
+        </span>
+        添加连接
+      </button>
     </div>
   </div>
 
@@ -49,7 +85,7 @@
           </svg>
         </span>
         <div class="brand-text">
-          <h1>AgentGod Files</h1>
+          <h1>岩獾 RockBadger</h1>
           <p>私有文件空间</p>
         </div>
       </div>
@@ -79,22 +115,10 @@
 
   <section id="app-view" class="app-view" hidden>
     <header class="topbar">
-      <div class="brand small">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M24 4.5 39.5 11v11.2c0 9.8-6.4 17.9-15.5 21.8C14.9 40.1 8.5 32 8.5 22.2V11Z"/>
-            <path d="M17.5 18.2a1.8 1.8 0 0 1 1.8-1.8h3.8l2.4 2.6h5.2a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H19.3a1.8 1.8 0 0 1-1.8-1.8Z"/>
-          </svg>
-        </span>
-        <div class="brand-text">
-          <strong>AgentGod Files</strong>
-          <button id="user-badge" class="user-badge" type="button" title="账户设置：修改用户名和密码">未登录</button>
-        </div>
-      </div>
-
       <nav id="breadcrumbs" class="crumbs" aria-label="当前路径"></nav>
 
       <div class="top-actions">
+        <button id="user-badge" class="user-badge" type="button" title="账户设置：修改用户名和密码" hidden>未登录</button>
         <button id="btn-upload" class="btn primary" type="button">
           <span class="icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -166,10 +190,6 @@
           </span>
           <input id="filter" type="search" placeholder="筛选当前目录" autocomplete="off">
         </label>
-        <label class="toggle-check" title="显示以 . 开头或带隐藏属性的项目">
-          <input id="toggle-hidden" type="checkbox">
-          <span>显示隐藏文件</span>
-        </label>
       </div>
       <div class="toolbar-right">
         <span id="free-space" class="free-space"></span>
@@ -192,7 +212,11 @@
           </svg>
         </span>
         <p>这个文件夹还是空的</p>
-        <span>拖拽文件到此处或点击“上传”</span>
+        <span class="empty-hint">拖拽文件到此处或点击“上传”</span>
+        <div class="empty-actions">
+          <button id="empty-upload" class="btn small" type="button">上传文件</button>
+          <button id="empty-mkdir" class="btn small" type="button">新建文件夹</button>
+        </div>
       </div>
     </main>
 
@@ -203,7 +227,7 @@
             <rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
           </svg>
         </span>
-        会话已加密
+        <span id="lock-note-text">会话已加密</span>
       </span>
       <span id="session-note">密钥仅保存在本页内存，刷新后需重新登录</span>
     </footer>

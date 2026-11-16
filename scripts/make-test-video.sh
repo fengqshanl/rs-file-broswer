@@ -3,7 +3,7 @@
 # video keyboard shortcuts (←/→ seek 5s, Space play/pause). Requires ffmpeg.
 set -euo pipefail
 
-output="${1:-/tmp/agentgod-ui-test.webm}"
+output="${1:-/tmp/rockbadger-ui-test.webm}"
 
 ffmpeg -y -loglevel error \
   -f lavfi -i "testsrc2=size=160x120:rate=10" \

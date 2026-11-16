@@ -25,17 +25,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const REPOSITORY: &str = "fengqshanl/rs-file-broswer";
-pub const CURRENT_VERSION: &str = agentgod_files::VERSION;
+pub const CURRENT_VERSION: &str = rockbadger::VERSION;
 pub const DEFAULT_API_URL: &str =
     "https://api.github.com/repos/fengqshanl/rs-file-broswer/releases/latest";
 pub const DEFAULT_RELEASE_PAGE: &str =
     "https://github.com/fengqshanl/rs-file-broswer/releases/latest";
 pub const DEFAULT_DOWNLOAD_PREFIX: &str =
     "https://github.com/fengqshanl/rs-file-broswer/releases/latest/download/";
-const ENV_API_URL: &str = "AGENTGOD_UPDATE_API";
-const ENV_DOWNLOAD_PREFIX: &str = "AGENTGOD_UPDATE_DOWNLOAD_PREFIX";
-const ENV_RELEASE_PAGE: &str = "AGENTGOD_UPDATE_RELEASE_PAGE";
-const ENV_ENDPOINTS: &str = "AGENTGOD_UPDATER_ENDPOINTS";
+const ENV_API_URL: &str = "ROCKBADGER_UPDATE_API";
+const ENV_DOWNLOAD_PREFIX: &str = "ROCKBADGER_UPDATE_DOWNLOAD_PREFIX";
+const ENV_RELEASE_PAGE: &str = "ROCKBADGER_UPDATE_RELEASE_PAGE";
+const ENV_ENDPOINTS: &str = "ROCKBADGER_UPDATER_ENDPOINTS";
 const UPDATE_SOURCE_FILE: &str = "update-source.json";
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -101,7 +101,7 @@ impl UpdateSource {
         let path = Self::config_path(data_dir);
         let mut source = match std::fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str::<UpdateSource>(&raw).unwrap_or_else(|err| {
-                agentgod_files::error::log(&format!(
+                rockbadger::error::log(&format!(
                     "更新源配置解析失败，使用默认 GitHub 源: {} ({err})",
                     path.display()
                 ));
@@ -136,11 +136,11 @@ impl UpdateSource {
     fn normalize(&mut self) {
         let fallback = Self::default();
         if !https_url(&self.api_url) {
-            agentgod_files::error::log("更新源 api_url 必须是 https 地址，已回退到 GitHub");
+            rockbadger::error::log("更新源 api_url 必须是 https 地址，已回退到 GitHub");
             self.api_url = fallback.api_url;
         }
         if !https_url(&self.download_prefix) {
-            agentgod_files::error::log("更新源 download_prefix 必须是 https 地址，已回退到 GitHub");
+            rockbadger::error::log("更新源 download_prefix 必须是 https 地址，已回退到 GitHub");
             self.download_prefix = fallback.download_prefix;
         }
         if !https_url(&self.release_page) {
@@ -176,10 +176,17 @@ impl UpdateSource {
 }
 
 fn env_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    let read = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    read(name).or_else(|| {
+        // Honour the pre-rename variables for one release.
+        let legacy = name.strip_prefix("ROCKBADGER_")?;
+        read(&format!("AGENTGOD_{legacy}"))
+    })
 }
 
 /// Platforms with published installers. Only Windows MSI packages are built
@@ -188,7 +195,7 @@ fn env_value(name: &str) -> Option<String> {
 pub const SUPPORTED_PLATFORMS: &[&str] = &["windows"];
 
 /// Prefix of the published Windows installer assets.
-const ASSET_PREFIX: &str = "agentgod.files_";
+const ASSET_PREFIX: &str = "rockbadger_";
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct InstallStatus {
@@ -258,7 +265,7 @@ impl UpdateCheck {
             current_version: CURRENT_VERSION.to_string(),
             latest_version: String::new(),
             has_update: false,
-            app: "app".to_string(),
+            app: "rockbadger".to_string(),
             platform: platform().0.to_string(),
             arch: platform().1.to_string(),
             asset: None,
@@ -361,7 +368,7 @@ impl UpdateHub {
             current_version: CURRENT_VERSION.to_string(),
             latest_version: latest,
             has_update,
-            app: "app".to_string(),
+            app: "rockbadger".to_string(),
             platform: os.to_string(),
             arch: arch.to_string(),
             download_url: asset
@@ -384,7 +391,7 @@ impl UpdateHub {
             let result = self
                 .client
                 .get(&self.source.api_url)
-                .header("User-Agent", format!("AgentGodFiles/{}", CURRENT_VERSION))
+                .header("User-Agent", format!("RockBadger/{}", CURRENT_VERSION))
                 .header("Accept", "application/vnd.github+json")
                 .send()
                 .await
@@ -518,11 +525,13 @@ fn updater_targets(os: &str, arch: &str) -> Vec<String> {
     }
 }
 
-/// `desktop-v0.1.3` / `v0.1.3` / `0.1.3` -> `0.1.3`.
+/// `rockbadger-v0.3.0` / `desktop-v0.1.3` / `v0.1.3` / `0.1.3` -> the version.
 pub fn normalize_version(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let stripped = trimmed
-        .strip_prefix("desktop-v")
+        .strip_prefix("rockbadger-v")
+        .or_else(|| trimmed.strip_prefix("rockbadger-V"))
+        .or_else(|| trimmed.strip_prefix("desktop-v"))
         .or_else(|| trimmed.strip_prefix("desktop-V"))
         .or_else(|| trimmed.strip_prefix('v'))
         .or_else(|| trimmed.strip_prefix('V'))
@@ -632,17 +641,21 @@ mod tests {
 
     fn release_assets() -> Vec<ReleaseAsset> {
         vec![
-            asset("AgentGod.Files_0.2.0_x64.msi"),
-            asset("AgentGod.Files_0.2.0_x64.msi.sig"),
+            asset("RockBadger_0.2.0_x64.msi"),
+            asset("RockBadger_0.2.0_x64.msi.sig"),
             // Assets from the retired macOS / Linux / NSIS channels, and the
             // pre-merge per-app builds, must be ignored.
-            asset("AgentGod.Files_0.2.0_universal.dmg"),
-            asset("AgentGod.Files_0.2.0_universal.app.tar.gz"),
-            asset("AgentGod.Files_0.2.0_amd64.AppImage"),
-            asset("AgentGod.Files_0.2.0_amd64.deb"),
-            asset("AgentGod.Files_0.2.0_x64-setup.exe"),
-            asset("AgentGod.Files.Local_0.1.6_x64_en-US.msi"),
-            asset("AgentGod.Files.Client_0.1.6_x64_en-US.msi"),
+            asset("RockBadger_0.2.0_universal.dmg"),
+            asset("RockBadger_0.2.0_universal.app.tar.gz"),
+            asset("RockBadger_0.2.0_amd64.AppImage"),
+            asset("RockBadger_0.2.0_amd64.deb"),
+            asset("RockBadger_0.2.0_x64-setup.exe"),
+            asset("RockBadger.Files.Local_0.1.6_x64_en-US.msi"),
+            asset("RockBadger.Files.Client_0.1.6_x64_en-US.msi"),
+            // Assets from before the rename must never be offered.
+            asset("AgentGod.Files_0.2.2_x64.msi"),
+            asset("AgentGod.Files_0.2.2_x64.msi.sig"),
+            asset("agentgod-files_0.3.0_x64.msi"),
             asset("latest-local.json"),
             asset("latest.json"),
         ]
@@ -653,6 +666,10 @@ mod tests {
         assert_eq!(
             normalize_version("desktop-v0.1.3").as_deref(),
             Some("0.1.3")
+        );
+        assert_eq!(
+            normalize_version("rockbadger-v0.3.0").as_deref(),
+            Some("0.3.0")
         );
         assert_eq!(normalize_version("v0.1.3").as_deref(), Some("0.1.3"));
         assert_eq!(normalize_version("0.2.0-beta.1").as_deref(), Some("0.2.0"));
@@ -672,12 +689,12 @@ mod tests {
         let assets = release_assets();
         assert_eq!(
             pick_asset(&assets, "windows", "x86_64").unwrap().name,
-            "AgentGod.Files_0.2.0_x64.msi"
+            "RockBadger_0.2.0_x64.msi"
         );
         // Windows on ARM runs the x64 MSI through emulation.
         assert_eq!(
             pick_asset(&assets, "windows", "aarch64").unwrap().name,
-            "AgentGod.Files_0.2.0_x64.msi"
+            "RockBadger_0.2.0_x64.msi"
         );
     }
 

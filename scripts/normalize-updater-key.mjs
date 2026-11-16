@@ -159,19 +159,19 @@ switch (material.kind) {
     process.exit(1);
   case 'public-key':
     console.error(
-      '::error::TAURI_SIGNING_PRIVATE_KEY 里是公钥（agentgod-files.key.pub），' +
-        '请改贴私钥文件 agentgod-files.key 的完整内容',
+      '::error::TAURI_SIGNING_PRIVATE_KEY 里是公钥（rockbadger.key.pub），' +
+        '请改贴私钥文件 rockbadger.key 的完整内容',
     );
     process.exit(1);
   case 'signature':
     console.error(
-      '::error::TAURI_SIGNING_PRIVATE_KEY 里是签名文件（.sig），请改贴私钥 agentgod-files.key 的完整内容',
+      '::error::TAURI_SIGNING_PRIVATE_KEY 里是签名文件（.sig），请改贴私钥 rockbadger.key 的完整内容',
     );
     process.exit(1);
   case 'unknown':
     console.error(
       '::error::TAURI_SIGNING_PRIVATE_KEY 既不是 minisign 私钥也不是其 base64 形式，' +
-        '请粘贴 ~/.tauri/agentgod-files.key 的全部内容（应以 dW50cnVzdGVk 开头）',
+        '请粘贴 ~/.tauri/rockbadger.key 的全部内容（应以 dW50cnVzdGVk 开头）',
     );
     process.exit(1);
   default:

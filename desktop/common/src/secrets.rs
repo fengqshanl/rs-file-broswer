@@ -8,7 +8,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-const SERVICE: &str = "com.agentgod.files";
+const SERVICE: &str = "com.rockbadger.files";
+/// Old credential-store service; read once so saved SSH secrets survive the
+/// rename. Never written to.
+pub const LEGACY_SERVICE: &str = "com.agentgod.files";
 
 pub trait Secrets: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>>;
@@ -33,6 +36,12 @@ impl Default for KeyringSecrets {
 }
 
 impl KeyringSecrets {
+    pub fn with_service(service: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+        }
+    }
+
     fn entry(&self, account: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(&self.service, account).context("无法访问系统凭据管理器")
     }

@@ -6,8 +6,8 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use agentgod_desktop_common::update::UpdateSource;
-use agentgod_desktop_common::{NoopInstaller, UpdateHub};
+use rockbadger_desktop_common::update::UpdateSource;
+use rockbadger_desktop_common::{NoopInstaller, UpdateHub};
 
 fn hub(source: UpdateSource) -> Arc<UpdateHub> {
     UpdateHub::new(Arc::new(NoopInstaller), source, PathBuf::from("."))
@@ -18,12 +18,12 @@ fn hub(source: UpdateSource) -> Arc<UpdateHub> {
 async fn github_release_check_reports_the_published_version() {
     let check = hub(UpdateSource::default()).check(true).await;
     assert!(check.error.is_none(), "unexpected error: {:?}", check.error);
-    assert_eq!(check.current_version, agentgod_files::VERSION);
+    assert_eq!(check.current_version, rockbadger::VERSION);
     assert!(
         !check.latest_version.is_empty(),
         "latest version was not parsed"
     );
-    assert_eq!(check.app, "app");
+    assert_eq!(check.app, "rockbadger");
     assert!(
         !check.silent,
         "NoopInstaller must never advertise the silent channel"

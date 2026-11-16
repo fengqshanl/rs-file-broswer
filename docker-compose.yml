@@ -1,12 +1,12 @@
 services:
-  agentgod-files:
-    image: agentgod-files:latest
+  rockbadger:
+    image: rockbadger:latest
     build:
       context: .
       args:
         RUST_IMAGE: "${RUST_IMAGE:-rust:1-alpine}"
         ALPINE_IMAGE: "${ALPINE_IMAGE:-alpine:3.20}"
-    container_name: agentgod-files
+    container_name: rockbadger
     restart: unless-stopped
     stop_grace_period: 20s
     init: true
@@ -20,7 +20,7 @@ services:
       - "./state:/data/state"
     environment:
       DATA_ROOT: /data/files
-      TMP_ROOT: /data/files/.agentgod-tmp
+      TMP_ROOT: /data/files/.rockbadger-tmp
       STATE_DIR: /data/state
       TLS_DIR: /data/state/tls
       BIND: 0.0.0.0

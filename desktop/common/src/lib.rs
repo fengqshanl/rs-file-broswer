@@ -2,7 +2,7 @@
 //!
 //! The app hosts a tiny loopback HTTP server. It serves the same web UI as the
 //! standalone server and routes API, preview and asset requests to the selected
-//! target: the embedded local file service, a remote AgentGod Files server, or
+//! target: the embedded local file service, a remote RockBadger server, or
 //! a per-target SSH/SFTP service. Because the webview loads
 //! `http://127.0.0.1:<port>/`, the existing same-origin frontend works
 //! unchanged and streaming is preserved by proxying response bodies with
@@ -10,13 +10,17 @@
 
 pub mod config;
 pub mod known_hosts;
+pub mod migration;
 pub mod secrets;
+pub mod settings;
 pub mod ssh;
 pub mod update;
 
 pub use config::{HttpTarget, SshAuth, SshTarget, TargetEntry, TargetsConfig};
 pub use known_hosts::KnownHosts;
+pub use migration::prepare_data_dir;
 pub use secrets::{KeyringSecrets, MemorySecrets, Secrets};
+pub use settings::{AppSettings, ThemeChoice};
 pub use update::{AutoInstaller, InstallStatus, NoopInstaller, UpdateHub, UpdateSource};
 
 use std::{
@@ -41,7 +45,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 
-use agentgod_files::{
+use rockbadger::{
     config::Config,
     server::{start_http, HttpServer},
 };
@@ -80,6 +84,7 @@ const FORWARD_RESPONSE_HEADERS: &[&str] = &[
 
 struct FrontState {
     config: StdRwLock<TargetsConfig>,
+    settings: StdRwLock<AppSettings>,
     data_dir: PathBuf,
     local_url: Option<String>,
     update: Arc<UpdateHub>,
@@ -116,13 +121,16 @@ pub struct Runtime {
 }
 
 pub fn data_dir() -> PathBuf {
-    // Tests and portable installs can redirect the whole profile.
-    if let Some(dir) = std::env::var_os("AGENTGOD_DATA_DIR") {
+    // Tests and portable installs can redirect the whole profile. The legacy
+    // variable is honoured for one release while users migrate.
+    if let Some(dir) = std::env::var_os("ROCKBADGER_DATA_DIR")
+        .or_else(|| std::env::var_os("AGENTGOD_DATA_DIR"))
+    {
         return PathBuf::from(dir);
     }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("AgentGodFiles")
+        .join(migration::DATA_DIR_NAME)
 }
 
 /// Headless entry point (used by the `dev_app` binary).
@@ -133,9 +141,7 @@ pub async fn start() -> anyhow::Result<Runtime> {
 /// Tauri shells pass an updater implementation; the companion exposes a small
 /// same-origin HTTP API so the webview never needs a JS plugin or capability.
 pub async fn start_with_updater(installer: Arc<dyn AutoInstaller>) -> anyhow::Result<Runtime> {
-    let data_dir = data_dir();
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("无法创建数据目录: {}", data_dir.display()))?;
+    let data_dir = migration::prepare_data_dir().with_context(|| "无法准备数据目录")?;
 
     // The app is local-first: the machine's filesystem is always available,
     // and remote targets are additional workspace tabs.
@@ -147,7 +153,7 @@ pub async fn start_with_updater(installer: Arc<dyn AutoInstaller>) -> anyhow::Re
 
     let (mut config, notes) = config::load_or_migrate(&data_dir);
     for note in notes {
-        agentgod_files::error::log(&note);
+        rockbadger::error::log(&note);
     }
     config.normalize_active(local_url.is_some());
     // Always open on this machine's files; saved targets stay one dropdown
@@ -157,16 +163,36 @@ pub async fn start_with_updater(installer: Arc<dyn AutoInstaller>) -> anyhow::Re
     }
     config::save(&data_dir, &config)?;
 
-    let secrets: Arc<dyn Secrets> = if std::env::var("AGENTGOD_MEMORY_SECRETS").is_ok() {
+    let memory_secrets = std::env::var("ROCKBADGER_MEMORY_SECRETS").is_ok()
+        || std::env::var("AGENTGOD_MEMORY_SECRETS").is_ok();
+    let secrets: Arc<dyn Secrets> = if memory_secrets {
         Arc::new(MemorySecrets::default())
     } else {
         Arc::new(KeyringSecrets::default())
     };
+    if !memory_secrets && migration::load_marker(&data_dir).keyring_migrated_at.is_none() {
+        let legacy = KeyringSecrets::with_service(secrets::LEGACY_SERVICE);
+        match migration::migrate_keyring(&legacy, secrets.as_ref(), &config.targets) {
+            Ok(copied) => {
+                migration::mark_keyring_migrated(&data_dir);
+                if copied > 0 {
+                    rockbadger::error::log(&format!(
+                        "已把 {copied} 条 SSH 凭据迁移到 RockBadger 凭据库"
+                    ));
+                }
+            }
+            Err(err) => rockbadger::error::log(&format!(
+                "SSH 凭据迁移失败（下次启动重试）: {err}"
+            )),
+        }
+    }
     let known_hosts = Arc::new(Mutex::new(KnownHosts::load(&data_dir)));
 
     let update_source = UpdateSource::load(&data_dir);
+    let settings = settings::load(&data_dir);
     let front = Arc::new(FrontState {
         config: StdRwLock::new(config),
+        settings: StdRwLock::new(settings),
         data_dir: data_dir.clone(),
         local_url,
         update: UpdateHub::new(installer, update_source, data_dir.clone()),
@@ -193,7 +219,7 @@ pub async fn start_with_updater(installer: Arc<dyn AutoInstaller>) -> anyhow::Re
             .collect();
         for target in targets {
             if let Err(err) = ensure_ssh(&boot, &target).await {
-                agentgod_files::error::log(&format!("SSH 目标 {} 启动失败: {err}", target.name));
+                rockbadger::error::log(&format!("SSH 目标 {} 启动失败: {err}", target.name));
             }
         }
     });
@@ -205,7 +231,7 @@ pub async fn start_with_updater(installer: Arc<dyn AutoInstaller>) -> anyhow::Re
     let addr = listener.local_addr()?;
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
-            agentgod_files::error::log(&format!("桌面伴生服务异常退出: {err}"));
+            rockbadger::error::log(&format!("桌面伴生服务异常退出: {err}"));
         }
     });
 
@@ -234,12 +260,29 @@ async fn ensure_ssh(front: &Arc<FrontState>, target: &SshTarget) -> anyhow::Resu
     Ok(url)
 }
 
+/// Default visible root: the system drive on Windows (`C:\`), `/` elsewhere.
+/// Tests and portable builds can pin it with `ROCKBADGER_LOCAL_ROOT`.
+fn system_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(drive) = std::env::var_os("SystemDrive") {
+            let path = PathBuf::from(format!("{}\\", drive.to_string_lossy()));
+            if path.is_dir() {
+                return path;
+            }
+        }
+        PathBuf::from("C:\\")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/")
+    }
+}
+
 fn local_config(data_dir: &Path) -> anyhow::Result<Config> {
-    // Tests pin the visible local tree; the shipped app opens the home folder.
-    let home = std::env::var_os("AGENTGOD_LOCAL_ROOT")
+    let home = std::env::var_os("ROCKBADGER_LOCAL_ROOT")
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("/"));
+        .unwrap_or_else(system_root);
     let data_root = std::fs::canonicalize(&home).unwrap_or(home);
     let tmp_root = data_dir.join("tmp-local");
     let state_dir = data_dir.join("local-state");
@@ -327,13 +370,15 @@ async fn resolve_active(front: &FrontState) -> Option<(String, Route)> {
 fn router(front: Arc<FrontState>) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/app.js", get(agentgod_files::web::app_js))
-        .route("/style.css", get(agentgod_files::web::style_css))
-        .route("/favicon.svg", get(agentgod_files::web::favicon))
-        .route("/vendor/mammoth.js", get(agentgod_files::web::mammoth_js))
-        .route("/vendor/xlsx.js", get(agentgod_files::web::xlsx_js))
+        .route("/app.js", get(rockbadger::web::app_js))
+        .route("/style.css", get(rockbadger::web::style_css))
+        .route("/theme-init.js", get(rockbadger::web::theme_init_js))
+        .route("/favicon.svg", get(rockbadger::web::favicon))
+        .route("/vendor/mammoth.js", get(rockbadger::web::mammoth_js))
+        .route("/vendor/xlsx.js", get(rockbadger::web::xlsx_js))
         .route("/app/info", get(app_info))
         .route("/app/servers", post(servers_action))
+        .route("/app/settings", post(update_settings))
         .route("/app/local/root", post(local_set_root))
         .route("/app/update/check", get(update_check))
         .route("/app/update/status", get(update_status))
@@ -353,7 +398,7 @@ async fn front_guard(request: Request, next: Next) -> Response {
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !agentgod_files::web::is_loopback_host(host) {
+    if !rockbadger::web::is_loopback_host(host) {
         return (StatusCode::MISDIRECTED_REQUEST, "invalid host").into_response();
     }
 
@@ -393,30 +438,63 @@ fn is_loopback_origin(value: &str) -> bool {
         )
 }
 
-async fn index() -> Response {
-    let mut response = agentgod_files::web::index().await;
+async fn index(State(front): State<Arc<FrontState>>) -> Response {
+    let mut response = rockbadger::web::index().await;
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(agentgod_files::web::CONTENT_SECURITY_POLICY),
+        HeaderValue::from_static(rockbadger::web::CONTENT_SECURITY_POLICY),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    // Mirror the persisted theme into a cookie so the pre-paint script can
+    // pick the right palette on the very first frame.
+    let choice = front.settings.read().expect("settings lock").theme.as_str();
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "rockbadger_theme={choice}; Path=/; Max-Age=31536000; SameSite=Lax"
+    )) {
+        headers.insert(header::SET_COOKIE, value);
+    }
     response
+}
+
+async fn update_settings(
+    State(front): State<Arc<FrontState>>,
+    Json(patch): Json<settings::SettingsPatch>,
+) -> Response {
+    let mut guard = front.settings.write().expect("settings lock");
+    let mut next = guard.clone();
+    next.apply(patch);
+    match settings::save(&front.data_dir, &next) {
+        Ok(()) => {
+            *guard = next.clone();
+            Json(json!({ "ok": true, "settings": next })).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("保存设置失败: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// Reads the target selector, accepting the pre-rename header for one release.
+fn target_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-rockbadger-target")
+        .or_else(|| headers.get("x-agentgod-target"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 async fn app_info(State(front): State<Arc<FrontState>>, headers: HeaderMap) -> Response {
     // A tab asking for its own info (SSH roots, local roots) must reach that
     // target's service; only the header-less bootstrap call builds the list.
-    if let Some(id) = headers
-        .get("x-agentgod-target")
-        .and_then(|value| value.to_str().ok())
-        .filter(|id| !id.is_empty())
-    {
-        return forward_target(&front, id, Method::GET, "/app/info", None).await;
+    if let Some(id) = target_header(&headers).filter(|id| !id.is_empty()) {
+        return forward_target(&front, &id, Method::GET, "/app/info", None).await;
     }
     let config = front.config.read().expect("config lock").clone();
     let mut targets = Vec::new();
@@ -464,14 +542,20 @@ async fn app_info(State(front): State<Arc<FrontState>>, headers: HeaderMap) -> R
         Some(url) => fetch_local_info(url).await,
         None => Value::Null,
     };
+    let settings = front
+        .settings
+        .read()
+        .expect("settings lock")
+        .clone();
 
     Json(json!({
         "mode": "desktop",
-        "version": agentgod_files::VERSION,
+        "version": rockbadger::VERSION,
         "platform": std::env::consts::OS,
         "active": active,
         "targets": targets,
         "local": local,
+        "settings": settings,
     }))
     .into_response()
 }
@@ -1127,11 +1211,7 @@ async fn forward_target(
 }
 
 async fn local_set_root(State(front): State<Arc<FrontState>>, request: Request) -> Response {
-    let target = request
-        .headers()
-        .get("x-agentgod-target")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let target = target_header(request.headers());
     let id = match target {
         Some(id) => id,
         None => match resolve_active(&front).await {
@@ -1154,11 +1234,7 @@ async fn local_set_root(State(front): State<Arc<FrontState>>, request: Request) 
 }
 
 async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Response {
-    let requested = request
-        .headers()
-        .get("x-agentgod-target")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let requested = target_header(request.headers());
     let (target_id, route) = match requested {
         Some(id) => match route_for(&front, &id).await {
             Some(route) => (id, route),

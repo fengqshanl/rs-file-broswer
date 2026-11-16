@@ -38,34 +38,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentgod-files"
-version = "0.2.2"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "axum",
- "axum-server",
- "base64",
- "bytes",
- "dashmap",
- "dirs",
- "fs2",
- "futures-util",
- "rand",
- "rcgen",
- "rsa",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "time",
- "tokio",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,6 +974,34 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rockbadger"
+version = "0.3.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "axum",
+ "axum-server",
+ "base64",
+ "bytes",
+ "dashmap",
+ "dirs",
+ "fs2",
+ "futures-util",
+ "rand",
+ "rcgen",
+ "rsa",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "time",
+ "tokio",
 ]
 
 [[package]]

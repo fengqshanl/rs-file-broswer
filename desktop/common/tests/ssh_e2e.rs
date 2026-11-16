@@ -17,7 +17,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 
-use agentgod_desktop_common::{
+use rockbadger_desktop_common::{
     config::{SshAuth, SshTarget},
     known_hosts::KnownHosts,
     secrets::{self, MemorySecrets, Secrets},
@@ -45,7 +45,7 @@ impl ApiClient {
         body: &T,
     ) -> R {
         let aad = Self::aad(method.as_str(), path);
-        let envelope = agentgod_files::crypto::encrypt_envelope(&self.key, &aad, body).unwrap();
+        let envelope = rockbadger::crypto::encrypt_envelope(&self.key, &aad, body).unwrap();
         let response = self
             .http
             .request(method, format!("{}{}", self.base, path))
@@ -60,15 +60,15 @@ impl ApiClient {
             "{path} failed: {status} {}",
             String::from_utf8_lossy(&raw)
         );
-        let envelope: agentgod_files::crypto::Envelope = serde_json::from_slice(&raw).unwrap();
-        agentgod_files::crypto::decrypt_envelope(&self.key, &aad, &envelope).unwrap()
+        let envelope: rockbadger::crypto::Envelope = serde_json::from_slice(&raw).unwrap();
+        rockbadger::crypto::decrypt_envelope(&self.key, &aad, &envelope).unwrap()
     }
 
     async fn upload_chunk(&self, id: &str, seq: u64, data: &[u8]) {
         let path = format!("/api/upload/chunk/{id}/{seq}");
         let aad = Self::aad("PUT", &path);
         let cipher = Aes256Gcm::new_from_slice(&self.key).unwrap();
-        let frame = agentgod_files::crypto::seal_frame(&cipher, &aad, data).unwrap();
+        let frame = rockbadger::crypto::seal_frame(&cipher, &aad, data).unwrap();
         let response = self
             .http
             .put(format!("{}{}", self.base, path))
@@ -293,7 +293,7 @@ async fn ssh_target_supports_the_full_file_api() {
     // Download round-trip.
     let download_path = format!("{base}/api/download");
     let aad = ApiClient::aad("POST", "/api/download");
-    let envelope = agentgod_files::crypto::encrypt_envelope(
+    let envelope = rockbadger::crypto::encrypt_envelope(
         &client.key,
         &aad,
         &json!({ "path": "/docs/big.bin" }),
@@ -338,7 +338,7 @@ async fn ssh_target_supports_the_full_file_api() {
     // Folder tar stream ends with the shared marker.
     let aad = ApiClient::aad("POST", "/api/download_folder");
     let envelope =
-        agentgod_files::crypto::encrypt_envelope(&client.key, &aad, &json!({ "path": "/docs" }))
+        rockbadger::crypto::encrypt_envelope(&client.key, &aad, &json!({ "path": "/docs" }))
             .unwrap();
     let response = client
         .http
@@ -374,7 +374,7 @@ async fn ssh_target_supports_the_full_file_api() {
 
     // Preview stream.
     let aad = ApiClient::aad("POST", "/api/preview/stream");
-    let envelope = agentgod_files::crypto::encrypt_envelope(
+    let envelope = rockbadger::crypto::encrypt_envelope(
         &client.key,
         &aad,
         &json!({ "path": "/docs/big.bin" }),
@@ -558,7 +558,7 @@ async fn ssh_service_rejects_paths_outside_the_root() {
         .http
         .post(format!("{}/api/list", client.base))
         .json(
-            &agentgod_files::crypto::encrypt_envelope(
+            &rockbadger::crypto::encrypt_envelope(
                 &client.key,
                 &ApiClient::aad("POST", "/api/list"),
                 &json!({ "path": "/../secret" }),

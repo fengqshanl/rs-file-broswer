@@ -62,7 +62,7 @@ pub async fn start_http(cfg: Arc<Config>) -> anyhow::Result<HttpServer> {
             log(&format!("本地 HTTP 服务异常退出: {err}"));
         }
     });
-    log(&format!("AgentGod Files 本地服务启动于 http://{addr}"));
+    log(&format!("RockBadger 本地服务启动于 http://{addr}"));
     Ok(HttpServer { addr, state, task })
 }
 
@@ -79,7 +79,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
             .await
             .with_context(|| format!("无法监听 {address}"))?;
         log(&format!(
-            "AgentGod Files 启动于 http://{} | 数据目录: {}",
+            "RockBadger 启动于 http://{} | 数据目录: {}",
             listener.local_addr()?,
             cfg.data_root.display()
         ));
@@ -115,7 +115,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
     });
 
     log(&format!(
-        "AgentGod Files 启动于 https://{}:{}",
+        "RockBadger 启动于 https://{}:{}",
         cfg.bind, cfg.port
     ));
     log(&format!(

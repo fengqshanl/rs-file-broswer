@@ -34,7 +34,7 @@ async fn action(http: &reqwest::Client, base: &str, body: Value) -> (reqwest::St
 async fn login(http: &reqwest::Client, base: &str, id: &str) -> (reqwest::StatusCode, Value) {
     let response = http
         .get(format!("{base}/api/local-login"))
-        .header("x-agentgod-target", id)
+        .header("x-rockbadger-target", id)
         .send()
         .await
         .unwrap();
@@ -50,10 +50,10 @@ async fn companion_manages_an_ssh_target_end_to_end() {
 
     let data_dir = tempfile::tempdir().unwrap();
     let local_root = tempfile::tempdir().unwrap();
-    std::env::set_var("AGENTGOD_DATA_DIR", data_dir.path());
-    std::env::set_var("AGENTGOD_MEMORY_SECRETS", "1");
-    std::env::set_var("AGENTGOD_LOCAL_ROOT", local_root.path());
-    let runtime = agentgod_desktop_common::start().await.unwrap();
+    std::env::set_var("ROCKBADGER_DATA_DIR", data_dir.path());
+    std::env::set_var("ROCKBADGER_MEMORY_SECRETS", "1");
+    std::env::set_var("ROCKBADGER_LOCAL_ROOT", local_root.path());
+    let runtime = rockbadger_desktop_common::start().await.unwrap();
     let base = runtime.url.trim_end_matches('/').to_string();
     let http = client();
 
@@ -114,7 +114,7 @@ async fn companion_manages_an_ssh_target_end_to_end() {
     // The target-aware /app/info reaches the SSH service, not the companion.
     let info: Value = http
         .get(format!("{base}/app/info"))
-        .header("x-agentgod-target", &id)
+        .header("x-rockbadger-target", &id)
         .send()
         .await
         .unwrap()

@@ -232,7 +232,7 @@ try {
   pass('Ctrl+V pastes multiple items');
 
   const updateState = await evaluate(`(() => {
-    window.__agentgodUpdateRequest = updateRequest;
+    window.__rockbadgerUpdateRequest = updateRequest;
     updateRequest = async () => {
       await new Promise((resolve) => setTimeout(resolve, 500));
       return { current_version: '0.0.0' };
@@ -252,7 +252,7 @@ try {
     10_000,
     'update button reset',
   );
-  await evaluate('updateRequest = window.__agentgodUpdateRequest; true');
+  await evaluate('updateRequest = window.__rockbadgerUpdateRequest; true');
   pass('update check shows a spinner and disables the button');
 
   await waitFor("document.querySelectorAll('#file-list .file-row.selected').length === 0", 5_000, 'paste clears selection');

@@ -196,7 +196,7 @@ impl SftpFs {
             .read_dir(&directory)
             .await
             .map_err(|err| FsError::internal(format!("读取目录失败：{err}")))?;
-        while let Some(entry) = reader.next() {
+        for entry in reader.by_ref() {
             if entries.len() >= MAX_LIST_ENTRIES {
                 truncated = true;
                 break;
@@ -342,7 +342,7 @@ impl SftpFs {
                 .await
                 .map_err(|err| FsError::internal(format!("读取目录失败：{err}")))?;
             dirs.push(dir);
-            while let Some(entry) = reader.next() {
+            for entry in reader.by_ref() {
                 let name = entry.file_name();
                 if name == "." || name == ".." {
                     continue;

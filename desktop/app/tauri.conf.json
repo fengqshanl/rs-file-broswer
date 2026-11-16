@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AgentGod Files",
-  "mainBinaryName": "agentgod-files",
-  "version": "0.2.2",
-  "identifier": "com.agentgod.files",
+  "productName": "RockBadger",
+  "mainBinaryName": "rockbadger",
+  "version": "0.3.0",
+  "identifier": "com.rockbadger.files",
   "build": {
     "frontendDist": "../web"
   },
@@ -22,7 +22,7 @@
     ],
     "category": "Utility",
     "shortDescription": "浏览本机、服务器与 SSH 主机文件",
-    "longDescription": "AgentGod Files：无需登录即可浏览、上传、下载和预览本机文件，也可以通过 URL 添加 AgentGod Files 服务器，或用 SSH 连接远程主机直接管理其文件系统。",
+    "longDescription": "RockBadger：无需登录即可浏览、上传、下载和预览本机文件，也可以通过 URL 添加 RockBadger 服务器，或用 SSH 连接远程主机直接管理其文件系统。",
     "copyright": "MIT License",
     "macOS": {
       "minimumSystemVersion": "10.15"

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end protocol test for AgentGod Files.
+ * End-to-end protocol test for RockBadger.
  *
  * It speaks the exact same RSA-OAEP / AES-256-GCM protocol as the browser UI,
  * so a PASS means login, encrypted API calls, chunked upload, encrypted

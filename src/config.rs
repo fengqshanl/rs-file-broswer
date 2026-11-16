@@ -89,7 +89,7 @@ impl Config {
 
         let tmp_raw = env_opt("TMP_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_root.join(".agentgod-tmp"));
+            .unwrap_or_else(|| data_root.join(".rockbadger-tmp"));
         std::fs::create_dir_all(&tmp_raw)
             .with_context(|| format!("无法创建临时目录: {}", tmp_raw.display()))?;
         let tmp_root = std::fs::canonicalize(&tmp_raw)?;

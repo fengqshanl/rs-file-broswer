@@ -1,4 +1,4 @@
-# AgentGod Files
+# 岩獾 RockBadger
 
 一个用 Rust 编写的轻量级自托管文件服务器：单二进制、低内存占用，面向低功耗设备（ARM64 单板机、NAS、旧笔记本）设计。自带加密登录、应用层加密传输、在线预览、带宽与并发保护，用 Docker 一条命令即可部署；同时提供 Windows 桌面应用（macOS / Linux 桌面端暂不发布）。
 
@@ -18,7 +18,7 @@
 - [资源保护](#资源保护)
 - [项目结构](#项目结构)
 - [协议摘要](#协议摘要)
-- [测试](#测试)
+- [本地运行与测试](#本地运行与测试)
 - [部署建议](#部署建议)
 - [常见问题](#常见问题)
 - [已知限制](#已知限制)
@@ -42,7 +42,8 @@
 - **HTTPS-only**：内置自签名证书生成，可替换为受信证书
 - **资源保护**：全局令牌桶限速、传输/预览并发上限、磁盘安全余量、容器资源限制
 - **单文件部署**：前端资源编译进二进制，运行时镜像约 15 MB，空闲内存约 1–3 MB
-- **桌面多标签工作区**：本机、AgentGod 服务器与 SSH 主机各自一个标签，可同时登录、独立浏览；标签间可复制、剪切、粘贴文件与文件夹，传输全程经加密流中转；支持原生窗口与系统文件拖拽
+- **顶部连接切换**：本机、RockBadger 服务器与 SSH 主机各自保持独立会话，可在顶部操作栏随时切换；连接之间可复制、剪切、粘贴文件与文件夹，传输全程经加密流中转；支持原生窗口与系统文件拖拽
+- **浅色 / 深色主题**：默认跟随系统，也可在操作栏手动切换；主题与「显示隐藏文件」偏好持久化到 `settings.json`
 - **SSH / SFTP 目标**：在桌面端直接管理远程服务器文件，支持密码与私钥认证；凭据存入系统凭据库，主机密钥首次确认后固定，变化即拒绝
 
 ## 界面预览
@@ -59,12 +60,12 @@
 
 > 当前只发布 Windows x64 MSI 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍可通过 Docker 或二进制在 Linux / Windows 上运行。
 
-**AgentGod Files** 将原来的 Local / Client 两个应用合并为一个：启动即浏览本机文件，右上角「连接管理」可以添加远程目标，每个目标生成独立标签。
+**岩獾 RockBadger** 将原来的 Local / Client 两个应用合并为一个：启动即浏览本机文件，顶部操作栏「添加连接」可以添加远程目标，连接下拉菜单可随时切换。
 
 | 目标类型 | 认证方式 | 能力 |
 | --- | --- | --- |
 | **本机** | 无需登录（仅本机回环服务） | 浏览、上传、下载、预览、重命名、删除 |
-| **AgentGod Files 服务器** | 用户名 + 密码（加密会话） | 与上面相同，支持 HTTPS / HTTP 与自签名证书 |
+| **岩獾 RockBadger 服务器** | 用户名 + 密码（加密会话） | 与上面相同，支持 HTTPS / HTTP 与自签名证书 |
 | **SSH / SFTP** | 密码或私钥 | 与上面相同，直接管理远程服务器文件 |
 
 安装包：
@@ -74,16 +75,16 @@
 
 SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串），配置文件 `targets.json` 不保存密码或私钥口令。首次连接主机会显示 SHA256 指纹，确认后记住；指纹变化会拒绝连接并提示，防止中间人攻击。
 
-桌面端采用「本机优先 + 多标签」工作区：启动后先显示本机文件，右上角「连接管理」支持添加 AgentGod 服务器（HTTPS / HTTP）或 SSH / SFTP 主机。每个标签有独立的会话、路径、筛选和分页状态，切换标签不会打断另一个标签的浏览。
+桌面端采用「本机优先 + 连接切换」工作区：启动后先显示本机文件，顶部操作栏支持添加 RockBadger 服务器（HTTPS / HTTP）或 SSH / SFTP 主机。每个连接有独立的会话、路径、筛选和分页状态，切换连接不会打断另一个连接的浏览。
 
-标签间操作与本地文件管理器一致：
+连接间操作与本地文件管理器一致：
 
-- 在任意文件的复制 / 剪切按钮（或 `Cmd/Ctrl+C`、`Cmd/Ctrl+X`）后切换到目标标签，点击「粘贴」或按 `Cmd/Ctrl+V`
+- 在任意文件的复制 / 剪切按钮（或 `Cmd/Ctrl+C`、`Cmd/Ctrl+X`）后切换到目标连接，点击「粘贴」或按 `Cmd/Ctrl+V`
 - 支持文件、空文件夹和递归文件夹；同名目标自动生成「(副本)」「(2)」等名称
-- 跨标签复制时，数据先按源端密钥解密，再按目标端密钥重新加密上传；源端和目标端之间的网络传输只包含密文
+- 跨连接复制时，数据先按源端密钥解密，再按目标端密钥重新加密上传；源端和目标端之间的网络传输只包含密文
 - 桌面端复用与服务端相同的界面、加密登录和传输协议。伴生服务只监听本机回环地址，局域网不可访问
 
-桌面端的远程连接面向同版本 AgentGod Files 服务端（HTTPS / 明文 HTTP，HTTP 仅建议用于回环或可信内网），并内置 SSH / SFTP 目标；WebDAV、SMB 等通用文件协议尚未支持。
+桌面端的远程连接面向同版本 岩獾 RockBadger 服务端（HTTPS / 明文 HTTP，HTTP 仅建议用于回环或可信内网），并内置 SSH / SFTP 目标；WebDAV、SMB 等通用文件协议尚未支持。
 
 安装包未做商业代码签名：首次运行时 Windows SmartScreen 可能提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可。
 
@@ -100,7 +101,7 @@ SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串�
 
 #### 更新源无法访问时（镜像 / 代理）
 
-应用默认直连 `api.github.com` 与 `github.com`。在无法访问 GitHub 的网络里，「检查更新」会失败；此时可在系统数据目录放一个 `update-source.json`（macOS 为 `~/Library/Application Support/AgentGodFiles/`，Windows 为 `%APPDATA%\AgentGodFiles\`），把检查与下载都指向自建镜像：
+应用默认直连 `api.github.com` 与 `github.com`。在无法访问 GitHub 的网络里，「检查更新」会失败；此时可在系统数据目录放一个 `update-source.json`（macOS 为 `~/Library/Application Support/RockBadger/`，Windows 为 `%APPDATA%\RockBadger\`），把检查与下载都指向自建镜像：
 
 ```json
 {
@@ -113,21 +114,23 @@ SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串�
 - `api_url` 需要返回与 GitHub `releases/latest` 相同结构的 JSON（`tag_name`、`body`、`assets[]`）
 - `download_prefix` 用来拼出 `latest.json`；清单里的签名包 URL 指向镜像即可
 - 可选 `updater_endpoints`：直接指定签名清单地址数组，覆盖默认拼接（适用于清单与实际文件不在同一前缀的镜像）
-- 也可用环境变量覆盖：`AGENTGOD_UPDATE_API`、`AGENTGOD_UPDATE_DOWNLOAD_PREFIX`、`AGENTGOD_UPDATE_RELEASE_PAGE`、`AGENTGOD_UPDATER_ENDPOINTS`（逗号分隔）
+- 也可用环境变量覆盖：`ROCKBADGER_UPDATE_API`、`ROCKBADGER_UPDATE_DOWNLOAD_PREFIX`、`ROCKBADGER_UPDATE_RELEASE_PAGE`、`ROCKBADGER_UPDATER_ENDPOINTS`（逗号分隔）
 - 除 `http://127.0.0.1` / `http://localhost` 外只接受 `https://`；配置无效时自动回退到 GitHub，不影响其他功能
 
 镜像站只需原样代理 GitHub 的 Release 资产（`.msi`、`.msi.sig`、`latest.json`）。签名仍在本地校验，镜像无法注入内容。检查失败时，界面提示会带上该配置文件的路径。
 
-> **从 0.1.6 升级**：0.2.0 起产品改名为 **AgentGod Files**，安装包标识与 UpgradeCode 均已变化，无法覆盖安装或应用内更新。请先卸载旧版 Local / Client，再安装 0.2.0 一次；旧版的 `servers-local.json` / `servers-client.json` 会在首次启动时自动合并为 `targets.json`。
+> **从 0.1.6 升级**：0.2.0 起产品曾命名为 **AgentGod Files**，安装包标识与 UpgradeCode 均已变化，无法覆盖安装或应用内更新。请先卸载旧版 Local / Client，再安装 0.2.0 一次；旧版的 `servers-local.json` / `servers-client.json` 会在首次启动时自动合并为 `targets.json`。
+
+> **从 0.2.x 升级到 0.3.0**：产品更名为 **岩獾 RockBadger**，应用标识与 UpgradeCode 再次变化，0.2.x 无法覆盖安装或应用内升级。请先安装 0.3.0 并确认连接、主机指纹与设置已从 `%APPDATA%\AgentGodFiles` 自动迁移，再从「应用和功能」手动卸载 AgentGod Files。旧数据目录与凭据库条目会保留作备份；0.3.0 的服务端只提供 API，不再提供网页界面。
 
 **维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
 
-1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/agentgod-files.key`（如设置了密码，请妥善保存）
+1. 生成密钥对：`cargo tauri signer generate -w ~/.tauri/rockbadger.key`（如设置了密码，请妥善保存）
 2. 公钥内容写入 `desktop/app/tauri.conf.json` 的 `plugins.updater.pubkey`（仓库中已填好本次生成的公钥）
 3. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
-   - `TAURI_SIGNING_PRIVATE_KEY`：`~/.tauri/agentgod-files.key` 的完整内容（base64 单行）。也接受解码后的两行文本，工作流会统一规范化
+   - `TAURI_SIGNING_PRIVATE_KEY`：`~/.tauri/rockbadger.key` 的完整内容（base64 单行）。也接受解码后的两行文本，工作流会统一规范化
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：生成密钥时设置的密码；未设置密码则留空
-4. 推送 `desktop-v*` 标签：工作流在 `windows-latest` 上执行 `tauri build --bundles msi`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.msi` / `.msi.sig`，再生成 `latest.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
+4. 推送 `rockbadger-v*` 标签：工作流在 `windows-latest` 上执行 `tauri build --bundles msi`，设置 `bundle.createUpdaterArtifacts = true`，产出 `.msi` / `.msi.sig`，再生成 `latest.json` 挂到同一个 Release。**不要把 `updater` 写进 `--bundles`**：它不是合法的 bundle target，会让构建直接失败
 
 发布流程在构建前会先用私钥签名一个测试文件，并用 `scripts/verify-updater-signature.mjs` 校验签名与仓库中的 `pubkey` 一致；构建后再对每个 `.app.tar.gz` 做同样校验。这样能避免“构建成功、用户下载后却因签名不匹配而安装失败”的情况。常见错误与处理：
 
@@ -148,9 +151,9 @@ cargo install tauri-cli --version "^2"
 cd desktop/app && cargo tauri build
 ```
 
-安装包输出在 `desktop/app/target/release/bundle/msi`。推送 `desktop-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 Windows `.msi` 与签名更新包并上传到 Release；macOS / Linux 安装包暂不构建。
+安装包输出在 `desktop/app/target/release/bundle/msi`。推送 `rockbadger-v*` 标签会触发 [桌面发布工作流](.github/workflows/desktop-release.yml)，自动构建 Windows `.msi` 与签名更新包并上传到 Release；macOS / Linux 安装包暂不构建。
 
-桌面端配置保存在系统数据目录（Windows 为 `%APPDATA%\AgentGodFiles\`，macOS 为 `~/Library/Application Support/AgentGodFiles/`）下的 `targets.json`；SSH 密码与私钥口令单独存入系统凭据库，`known_hosts.json` 保存已确认的主机指纹。
+桌面端配置保存在系统数据目录（Windows 为 `%APPDATA%\RockBadger\`，macOS 为 `~/Library/Application Support/RockBadger/`）下的 `targets.json`；SSH 密码与私钥口令单独存入系统凭据库，`known_hosts.json` 保存已确认的主机指纹。
 
 ## 快速开始
 
@@ -174,7 +177,7 @@ docker compose ps
 docker compose logs -f
 ```
 
-启动后访问 `https://<LISTEN_IP>:8090/`。默认只绑定 `127.0.0.1`，如需局域网访问，把 `.env` 中的 `LISTEN_IP` 改为服务器内网地址（不要直接暴露公网）。
+启动后服务端只在 `https://<LISTEN_IP>:8090/` 提供 **纯 API**，不再返回网页。请在 Windows 桌面应用中点「添加连接」填入该地址；默认只绑定 `127.0.0.1`，如需局域网访问，把 `.env` 中的 `LISTEN_IP` 改为服务器内网地址（不要直接暴露公网）。
 
 首次启动会自动生成：
 
@@ -185,14 +188,14 @@ docker compose logs -f
 | `state/tls/self-signed.json` | 自签名证书到期时间（用于自动轮换，0600） |
 | `state/credentials.json` | 管理员凭据哈希（0600，首次登录前创建） |
 
-自签名证书首次访问会提示不安全，选择「高级 → 继续前往」即可。浏览器的 WebCrypto 要求安全上下文，因此独立服务端只提供 HTTPS。自签名证书有效期 365 天，到期前 30 天会在启动时自动重新签发（浏览器需重新信任一次）；运维自行放置的受信证书不会被覆盖。仅在回环代理或可信内网调试时可用 `TLS_DISABLED=1` 关闭 TLS，但此时浏览器 WebCrypto 不可用。
+首次在 App 中连接自签名证书服务器时，勾选「允许自签名证书」即可。桌面 App 的 WebView 同样要求安全上下文，因此独立服务端只提供 HTTPS。自签名证书有效期 365 天，到期前 30 天会在启动时自动重新签发（App 需重新确认一次）；运维自行放置的受信证书不会被覆盖。仅在回环代理或可信内网调试时可用 `TLS_DISABLED=1` 关闭 TLS。
 
 ### Docker 单容器
 
 ```bash
-docker build -t agentgod-files .
+docker build -t rockbadger .
 
-docker run -d --name agentgod-files \
+docker run -d --name rockbadger \
   --restart unless-stopped \
   --read-only --tmpfs /tmp:size=16m \
   --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
@@ -203,7 +206,7 @@ docker run -d --name agentgod-files \
   -v "$PWD/state:/data/state" \
   -e ADMIN_PASSWORD='change-me-to-a-long-random-password' \
   -e TLS_EXTRA_IPS=127.0.0.1 \
-  agentgod-files
+  rockbadger
 ```
 
 > 容器以 root 运行，因为需要读写宿主机上 root 拥有的目录。请配合上面的 capability 裁剪、只读根文件系统与资源限制使用。
@@ -214,7 +217,7 @@ docker run -d --name agentgod-files \
 
 ```bash
 export DATA_ROOT=/path/to/files
-export TMP_ROOT=/path/to/files/.agentgod-tmp
+export TMP_ROOT=/path/to/files/.rockbadger-tmp
 export STATE_DIR=$PWD/state
 export ADMIN_USER=admin
 export ADMIN_PASSWORD='change-me-to-a-long-random-password'
@@ -257,13 +260,13 @@ cargo run --release
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DATA_ROOT` | `/data/files` | 对外提供的数据目录；Compose 中由 `FILES_DIR` 挂载到该路径 |
-| `TMP_ROOT` | `DATA_ROOT/.agentgod-tmp` | 上传临时目录，**必须是 `DATA_ROOT` 内的独立子目录**，否则启动报错（保证上传完成后可原子重命名） |
+| `TMP_ROOT` | `DATA_ROOT/.rockbadger-tmp` | 上传临时目录，**必须是 `DATA_ROOT` 内的独立子目录**，否则启动报错（保证上传完成后可原子重命名） |
 | `STATE_DIR` | `/data/state` | RSA 私钥、凭据哈希与 TLS 目录；Compose 中挂载 `./state` |
 | `TLS_DIR` | `STATE_DIR/tls` | 证书、私钥与自签名元数据目录 |
 | `BIND` | `0.0.0.0` | 容器内监听地址；宿主机绑定由 `LISTEN_IP` 控制 |
 | `PORT` | `8090` | 监听端口 |
 | `LOCAL_MODE` | `0` | 桌面本机模式：免登录、忽略 Bearer、仅接受回环 Host。由桌面伴生服务设置，**不要在独立服务端开启** |
-| `TLS_DISABLED` | `0` | 关闭 TLS 并改用明文 HTTP；仅限回环代理或可信内网调试，浏览器 WebCrypto 此时不可用 |
+| `TLS_DISABLED` | `0` | 关闭 TLS 并改用明文 HTTP；仅限回环代理或可信内网调试，客户端 WebCrypto 此时不可用 |
 | `ADMIN_USER` / `ADMIN_PASSWORD` / `ADMIN_PASSWORD_HASH` | 同上表 | 凭据初始化 |
 | 限速、并发、会话、登录防护等变量 | 同上表 | 同名直接传入容器 |
 
@@ -273,14 +276,14 @@ cargo run --release
 docker build \
   --build-arg RUST_IMAGE=rust:1-alpine \
   --build-arg ALPINE_IMAGE=alpine:3.20 \
-  -t agentgod-files .
+  -t rockbadger .
 ```
 
 在中国大陆网络下可以改用镜像源，例如 `docker.1ms.run/library/rust:1-alpine`。
 
 ### 使用受信证书
 
-把证书与私钥放到 `state/tls/cert.pem` 和 `state/tls/key.pem`，然后重启容器。证书需覆盖你实际访问的域名或 IP，此后浏览器不再提示自签名警告。没有 `self-signed.json` 元数据且证书主题不是本项目生成的文件会被原样保留，自动轮换不会覆盖运维提供的证书。
+把证书与私钥放到 `state/tls/cert.pem` 和 `state/tls/key.pem`，然后重启容器。证书需覆盖你实际访问的域名或 IP，此后 App 不再提示自签名警告。没有 `self-signed.json` 元数据且证书主题不是本项目生成的文件会被原样保留，自动轮换不会覆盖运维提供的证书。
 
 ### 重置管理员凭据
 
@@ -301,8 +304,8 @@ docker compose up -d --force-recreate
 - **预览快捷键**：预览打开时，视频 `←`/`→` 快退/快进 5 秒、`空格` 播放/暂停；图片 `←`/`→` 循环切换目录内图片
 - **隐藏文件**：默认不显示以 `.` 开头或带 Windows 隐藏属性的项目；勾选工具栏「显示隐藏文件」后显示，选择会记住
 - **文件夹大小**：文件列表会异步计算并显示文件夹的递归大小（跳过符号链接），超大目录显示 `≥` 下限；结果按目录缓存
-- **桌面标签**：桌面端启动后默认显示本机文件；顶部命令栏的「添加连接」可添加 AgentGod 服务器或 SSH 主机，每台服务器生成独立标签
-- **跨标签复制**：右键菜单或 `Ctrl/Cmd+C`、`Ctrl/Cmd+X` 复制/剪切（支持多选）；切换到目标标签后点「粘贴」或按 `Ctrl/Cmd+V`。文件夹会递归复制，同名项目自动改名
+- **桌面连接**：桌面端启动后默认显示本机文件；顶部操作栏的「添加连接」可添加 RockBadger 服务器或 SSH 主机，通过连接下拉菜单切换
+- **跨连接复制**：右键菜单或 `Ctrl/Cmd+C`、`Ctrl/Cmd+X` 复制/剪切（支持多选）；切换到目标连接后点「粘贴」或按 `Ctrl/Cmd+V`。文件夹会递归复制，同名项目自动改名
 - **账户**：点击右上角「账户」或左上角用户名，可修改用户名与密码
 - **历史**：点击工具栏时钟图标，可查看最近访问的文件夹与文件；点击记录回到对应目录并高亮该文件，可一键清空
 - **大目录**：首次打开会显示骨架屏，列表滚动到底自动加载下一页；底部也会显示「加载更多」按钮
@@ -312,8 +315,8 @@ docker compose up -d --force-recreate
 
 ### 传输与登录
 
-1. **TLS 1.2 / 1.3**：服务只监听 HTTPS，浏览器必须处于安全上下文才能使用 WebCrypto。
-2. **登录（非对称 + 一次性）**：浏览器先取 `GET /api/challenge` 拿到 120 秒有效的一次性随机值，再拉取 RSA 公钥、生成随机 AES-256 会话密钥并用 `RSA-OAEP-SHA256` 包装；用户名、密码、客户端时间戳与 challenge 以 AES-256-GCM 加密后发送。服务器强制校验时间戳（±10 分钟）、在密码校验前原子消费 challenge，然后用 Argon2id 校验密码并签发随机会话令牌；截获的登录密文第二次提交会被拒绝。
+1. **TLS 1.2 / 1.3**：服务只监听 HTTPS，客户端 WebView 必须处于安全上下文才能使用 WebCrypto。
+2. **登录（非对称 + 一次性）**：客户端先取 `GET /api/challenge` 拿到 120 秒有效的一次性随机值，再拉取 RSA 公钥、生成随机 AES-256 会话密钥并用 `RSA-OAEP-SHA256` 包装；用户名、密码、客户端时间戳与 challenge 以 AES-256-GCM 加密后发送。服务器强制校验时间戳（±10 分钟）、在密码校验前原子消费 challenge，然后用 Argon2id 校验密码并签发随机会话令牌；截获的登录密文第二次提交会被拒绝。
 3. **数据（对称 + 防重放）**：所有 API 请求/响应 JSON 使用 AES-256-GCM，AAD 绑定 `方法 + URI`，密文不能跨接口重放；服务端另外按会话记录最近 8,192 个请求 nonce（覆盖会话绝对有效期），同一密文第二次送达直接以 409 拒绝。客户端重试必须重新生成信封，不得重发原密文。
 4. **上传**：按 2 MiB 分块加密，服务器校验分块序号、声明大小与 GCM 标签，完成后在同一文件系统内原子重命名。
 5. **下载与预览**：64 KiB 流式加密帧 `[u32 长度][12B nonce][密文+tag]`；下载每帧 AAD 含序号，预览每帧 AAD 绑定随机流 ID 与序号；文件夹归档额外带结束标记，客户端校验完整性。
@@ -321,7 +324,7 @@ docker compose up -d --force-recreate
 7. **会话**：32 字节随机令牌，放在 `Authorization: Bearer` 头中（不使用 Cookie，天然规避 CSRF）；滑动过期 + 绝对上限；刷新页面会丢失内存中的会话密钥，需要重新登录。
 8. **爆破防护**：按来源 IP 限制登录失败次数，Argon2 校验并发限制为 2，避免登录请求打满 CPU。
 9. **路径安全**：拒绝 `..`，对目标做 canonicalize 并校验位于数据根目录内；临时上传目录对外不可见；删除符号链接只删除链接本身。
-10. **浏览器侧**：严格 CSP（无内联脚本/样式）、`X-Frame-Options: DENY`、`nosniff`、无 Referrer、同源限制；文件名通过 `textContent` 渲染，避免 XSS。
+10. **客户端侧**：严格 CSP（无内联脚本/样式）、`X-Frame-Options: DENY`、`nosniff`、无 Referrer、同源限制；文件名通过 `textContent` 渲染，避免 XSS。
 
 ### 文件预览的安全模型
 
@@ -329,18 +332,18 @@ docker compose up -d --force-recreate
 
 - `POST /api/preview/stream` 使用正常的 Bearer 会话与加密请求 `{path}`，响应是 AES-256-GCM 帧流；每帧 AAD 绑定随机流 ID 与序号，响应头只包含大小、MIME 和流 ID，不包含文件内容。
 - 前端通过 `fetch()` 接收密文并在内存逐帧解密。文本边解密边追加；图片、PDF、HTML、Office 与音视频在完整接收后创建短期 `blob:` URL 呈现，切换或关闭预览时立即吊销。原生 `<img>` / `<video>` / `<iframe>` 从不接触明文 HTTP 流。
-- 预览仍受全局下载限速与预览并发限制。为避免浏览器内存耗尽，加密预览有大小上限：图片 128 MB、PDF 256 MB、音视频 512 MB、HTML 32 MB；超过上限请下载后查看。
+- 预览仍受全局下载限速与预览并发限制。为避免客户端内存耗尽，加密预览有大小上限：图片 128 MB、PDF 256 MB、音视频 512 MB、HTML 32 MB；超过上限请下载后查看。
 - HTML 预览运行在 `iframe sandbox` 的独立不透明源中（没有 `allow-same-origin`），并注入禁止脚本、外部网络和表单提交的 CSP，因此只做静态渲染，无法读取本应用 DOM、令牌或调用已认证接口。SVG 通过 `<img>` 加载，脚本不会执行。
-- Word / Excel 完全在浏览器本地解析（仓库内打包的 mammoth.js 与 SheetJS，按需加载），文件不会发送给第三方；docx 生成的 HTML 在插入前经过白名单清洗。
+- Word / Excel 完全在客户端本地解析（仓库内打包的 mammoth.js 与 SheetJS，按需加载），文件不会发送给第三方；docx 生成的 HTML 在插入前经过白名单清洗。
 
-> 应用层加密保护的是「浏览器 ↔ 本服务」这条会话。自签名证书需要手动信任；若用户在已被 MITM 的环境里强行信任伪造证书，应用层密钥交换无法阻止。需要严格防护时请使用受信证书。
+> 应用层加密保护的是「客户端 ↔ 本服务」这条会话。自签名证书需要手动信任；若用户在已被 MITM 的环境里强行信任伪造证书，应用层密钥交换无法阻止。需要严格防护时请使用受信证书。
 
 ### 桌面端安全模型
 
 - 本机版与客户端都会在 `127.0.0.1` 的随机端口启动一个前端伴生服务，只监听回环地址；Tauri WebView 只加载这个地址，界面与 API 同源，无需放宽 CORS。
-- 远程请求由伴生服务按标签转发，只透传必要请求头（`Authorization`、`Content-Type` 等），响应体按流转发；预览帧在浏览器端解密，桌面代理转发时同样只有密文。默认严格校验服务器证书，只有显式勾选「允许自签名证书」才关闭校验。
-- 本机标签不做登录，因为访问者必须是同一台机器上的本地进程；切换根目录时会 canonicalize 并校验目录存在，文件操作仍限制在当前根目录内。远程标签沿用完整的 RSA-OAEP + AES-GCM 登录流程，每个标签独立保存内存会话。
-- 跨标签复制不会在磁盘上产生明文临时文件：源端加密帧在页面内存中解密后立即按目标端会话密钥重新分块加密，再写入目标端。
+- 远程请求由伴生服务按连接转发，只透传必要请求头（`Authorization`、`Content-Type` 等），响应体按流转发；预览帧在客户端解密，桌面代理转发时同样只有密文。默认严格校验服务器证书，只有显式勾选「允许自签名证书」才关闭校验。
+- 本机连接不做登录，因为访问者必须是同一台机器上的本地进程；切换根目录时会 canonicalize 并校验目录存在，文件操作仍限制在当前根目录内。远程连接沿用完整的 RSA-OAEP + AES-GCM 登录流程，每个连接独立保存内存会话。
+- 跨连接复制不会在磁盘上产生明文临时文件：源端加密帧在页面内存中解密后立即按目标端会话密钥重新分块加密，再写入目标端。
 - 伴生服务不监听局域网、不启用 CORS 通配，也不接入任何遥测或第三方服务。
 - 更新检查只读取公开的 GitHub Releases API，不上传机器标识、文件路径或凭据；请求 8 秒超时、失败静默，Webview 仍保持 `connect-src 'self'`。静默更新包安装前必须由 Tauri 用内置公钥校验签名，校验不通过不会安装；下载链接由伴生服务从已校验的 Release 资产里选取，前端无法传入任意 URL。
 
@@ -350,7 +353,7 @@ docker compose up -d --force-recreate
 - **并发上限**：默认 2 个上传 + 2 个下载，预览另设 4 个并发；其余请求排队。
 - **内存可控**：下载块 64 KiB、上传块最大 4 MiB，流式处理，不缓存整个文件；预览同样流式，单次读取 64 KiB。
 - **磁盘安全余量**：拒绝任何会占用「剩余空间 − 2 GiB」的上传，分块写入时持续检查。
-- **大目录保护**：目录在阻塞线程中一次扫描并排序，结果缓存 15 秒（最多缓存 2 个目录），前端每页 300 项；单目录上限 50,000 项。这样翻页不会反复遍历目录，也不会把数万个 DOM 节点一次性塞进浏览器。
+- **大目录保护**：目录在阻塞线程中一次扫描并排序，结果缓存 15 秒（最多缓存 2 个目录），前端每页 300 项；单目录上限 50,000 项。这样翻页不会反复遍历目录，也不会把数万个 DOM 节点一次性塞进页面。
 - **容器限制**：示例配置使用 256 MB 内存、1 CPU、128 PID、只读根文件系统、丢弃全部 capability（仅保留文件访问所需的 `DAC_OVERRIDE` / `DAC_READ_SEARCH`），日志轮转 10 MB × 3。
 - **登录 CPU 保护**：Argon2 并发信号量 + 失败退避。
 
@@ -373,8 +376,8 @@ src/
   rate.rs        全局令牌桶
   state.rs       应用状态、上传会话、会话表、预览并发控制
   tls.rs         自签名证书生成/复用
-  web.rs         路由、CSP、安全响应头、静态资源
-static/          嵌入式 Web UI（原生 JS + WebCrypto，无外部依赖）
+  web.rs         独立服务端路由（纯 API）、CSP/安全响应头
+static/          桌面 App 界面资源（原生 JS + WebCrypto，无外部依赖，由伴生服务下发）
 static/vendor/   Word/Excel 本地解析库（仅预览时按需加载）
 desktop/common/  共享伴生运行时：回环前端、本机服务、HTTP 代理、SSH/SFTP 目标
   src/config.rs    targets.json（HTTP + SSH 目标）与旧配置迁移
@@ -382,7 +385,7 @@ desktop/common/  共享伴生运行时：回环前端、本机服务、HTTP 代�
   src/secrets.rs   系统凭据库中的 SSH 密码 / 私钥口令
   src/ssh/         SSH 连接、SFTP 文件系统、流式 tar 与逐目标回环服务
   src/update.rs    版本检查、Windows 安装包匹配、静默更新状态桥接
-desktop/app/     AgentGod Files Tauri 2 应用（本机 + 服务器 + SSH）
+desktop/app/     岩獾 RockBadger Tauri 2 应用（本机 + 服务器 + SSH）
 desktop/web/     打包用占位页面（真实界面由伴生服务提供）
 scripts/         Node E2E 协议测试、Chrome UI 冒烟测试、测试视频生成
   build-updater-manifest.mjs  生成单应用的签名更新清单
@@ -415,7 +418,7 @@ docker-compose.yml
 | 下载帧 | `[u32 ct_len][12B iv][ct]`，AAD = `dl:<seq>` |
 | 预览帧 | `[u32 ct_len][12B iv][ct]`，AAD = `pv:<stream-id>:<seq>` |
 
-## 测试
+## 本地运行与测试
 
 ```bash
 # Rust 单元测试
@@ -425,14 +428,27 @@ cargo test --manifest-path desktop/common/Cargo.toml   # 目标模型、凭据�
 # 更新清单生成逻辑自测（无需联网）
 node scripts/build-updater-manifest.mjs --self-test
 
-# 桌面端共享运行层（本机 + HTTP + SSH 目标）
-cargo run --release --manifest-path desktop/common/Cargo.toml --bin dev_app
+# 本地界面（无需 tauri-cli）：启动伴生服务并用默认浏览器打开
+node scripts/dev-ui.mjs
 
-# Tauri 应用
+# 原生窗口（需要先安装 tauri-cli）
+cargo install tauri-cli --version "^2" --locked
 cd desktop/app && cargo tauri dev
+# 已装好依赖时也可以直接：cargo run --manifest-path desktop/app/Cargo.toml
 ```
 
-`dev_app` 会打印一个 `http://127.0.0.1:<端口>/` 地址，可直接用 Chrome 验证桌面端界面与代理行为，无需启动 Tauri 窗口。测试时可用 `AGENTGOD_DATA_DIR` 指定独立数据目录、`AGENTGOD_LOCAL_ROOT` 指定本机标签展示的目录、`AGENTGOD_MEMORY_SECRETS=1` 用内存凭据库代替系统凭据库。
+`cargo tauri` 不是 `cargo` 自带的子命令；没装 `tauri-cli` 时它会立即报 `no such command: tauri` 并退出，这和应用本身能否运行无关。`scripts/dev-ui.mjs` 直接启动 Tauri 窗口背后的伴生服务，界面、加密协议和文件操作完全相同，只是显示在浏览器里；默认数据目录在系统临时目录，本机根目录为系统盘。可用环境变量覆盖：
+
+```bash
+ROCKBADGER_DATA_DIR=/tmp/rockbadger-dev \
+ROCKBADGER_LOCAL_ROOT=/tmp/rockbadger-root \
+ROCKBADGER_MEMORY_SECRETS=1 \
+node scripts/dev-ui.mjs
+```
+
+`dev_app` 会打印一个 `http://127.0.0.1:<端口>/` 地址，可直接用 Chrome 验证桌面端界面与代理行为，无需启动 Tauri 窗口。测试时可用 `ROCKBADGER_DATA_DIR` 指定独立数据目录、`ROCKBADGER_LOCAL_ROOT` 指定本机连接展示的目录、`ROCKBADGER_MEMORY_SECRETS=1` 用内存凭据库代替系统凭据库。
+
+> Windows 上构建 Tauri 原生窗口会编译 `windows` / WebView2 相关依赖，内存占用较高。若 `rustc` 报 `out of memory` 或 `STATUS_STACK_BUFFER_OVERRUN`，请关闭占用内存的程序，或在「系统属性 → 高级 → 性能 → 虚拟内存」中增大页面文件后重试；也可以直接使用上面的 `dev-ui.mjs`。
 
 本地启动服务（用于下面的 E2E 与 UI 测试）：
 
@@ -440,7 +456,7 @@ cd desktop/app && cargo tauri dev
 mkdir -p testdata/files testdata/state
 
 DATA_ROOT=$PWD/testdata/files \
-TMP_ROOT=$PWD/testdata/files/.agentgod-tmp \
+TMP_ROOT=$PWD/testdata/files/.rockbadger-tmp \
 STATE_DIR=$PWD/testdata/state \
 TLS_DIR=$PWD/testdata/state/tls \
 ADMIN_USER=admin \
@@ -459,18 +475,18 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 \
 node scripts/e2e-test.mjs
 ```
 
-浏览器 UI 冒烟测试（需要本地 Chrome 与调试端口；视频快捷键测试需要 ffmpeg 生成 6 秒测试片段）：
+Chrome UI 冒烟测试（需要本地 Chrome 与调试端口；界面由 `dev_app` 提供，独立服务端已不再提供网页；视频快捷键测试需要 ffmpeg 生成 6 秒测试片段）：
 
 ```bash
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --headless=new --remote-debugging-port=9223 \
-  --user-data-dir=/tmp/agentgod-chrome --ignore-certificate-errors about:blank &
+  --user-data-dir=/tmp/rockbadger-chrome --ignore-certificate-errors about:blank &
 
-./scripts/make-test-video.sh /tmp/agentgod-ui-test.webm
+./scripts/make-test-video.sh /tmp/rockbadger-ui-test.webm
 
 CHROME_DEBUG_URL=http://127.0.0.1:9223 \
-UI_URL=https://127.0.0.1:18443/ \
-ADMIN_PASSWORD='local-test-password-123' \
+UI_URL=http://127.0.0.1:<dev_app 端口>/ \
+UI_LOCAL=1 \
 node scripts/ui-smoke.mjs
 ```
 
@@ -478,32 +494,38 @@ node scripts/ui-smoke.mjs
 
 ```bash
 CHROME_DEBUG_URL=http://127.0.0.1:9223 \
-UI_URL=https://127.0.0.1:18443/ \
-ADMIN_PASSWORD='local-test-password-123' \
+UI_URL=http://127.0.0.1:<dev_app 端口>/ \
+UI_LOCAL=1 \
 node scripts/ui-transfer-resilience.mjs
 ```
 
-桌面多标签回归测试（需要全新的 `dev_app` 数据目录、Chrome 调试端口和上一节的远程测试服务器）：
+独立服务端 API-only 冒烟测试（确认 `GET /` 返回 410、界面资产 404，而 `/healthz` 与 `/api/challenge` 正常）：
 
 ```bash
-rm -rf /tmp/agentgod-tabs-home /tmp/agentgod-tabs-data
-mkdir -p /tmp/agentgod-tabs-home
+BASE_URL=https://127.0.0.1:18443 INSECURE=1 node scripts/api-only-smoke.mjs
+```
 
-AGENTGOD_DATA_DIR=/tmp/agentgod-tabs-data \
-AGENTGOD_LOCAL_ROOT=/tmp/agentgod-tabs-home \
-AGENTGOD_MEMORY_SECRETS=1 \
+桌面连接与工作区回归测试（需要全新的 `dev_app` 数据目录、Chrome 调试端口和上一节的远程测试服务器）：
+
+```bash
+rm -rf /tmp/rockbadger-tabs-home /tmp/rockbadger-tabs-data
+mkdir -p /tmp/rockbadger-tabs-home
+
+ROCKBADGER_DATA_DIR=/tmp/rockbadger-tabs-data \
+ROCKBADGER_LOCAL_ROOT=/tmp/rockbadger-tabs-home \
+ROCKBADGER_MEMORY_SECRETS=1 \
   ./desktop/common/target/release/dev_app
 # 记下命令输出的 http://127.0.0.1:<端口>/ 地址
 
 FRONT_URL=http://127.0.0.1:<端口>/ \
 REMOTE_URL=https://127.0.0.1:18443 \
 REMOTE_USER=admin REMOTE_PASS='local-test-password-123' \
-LOCAL_DIR=/tmp/agentgod-tabs-home \
+LOCAL_DIR=/tmp/rockbadger-tabs-home \
 CHROME_DEBUG_URL=http://127.0.0.1:9223 \
 node scripts/ui-tabs.mjs
 ```
 
-该测试覆盖本机优先启动、连接管理面板不会卡死、服务器标签与加密登录、远程预览、跨标签文件/文件夹复制、剪切移动、移除服务器标签和刷新后的本地自动登录。顶部命令栏、隐藏文件开关、文件夹大小、右键菜单、多选与剪贴板快捷键由 `scripts/ui-features-smoke.mjs` 覆盖（使用下方 fixture）：
+该测试覆盖本机优先启动、连接管理面板不会卡死、服务器连接与加密登录、远程预览、跨连接文件/文件夹复制、剪切移动、移除服务器连接和刷新后的本地自动登录。顶部操作栏、隐藏文件开关、文件夹大小、右键菜单、多选与剪贴板快捷键由 `scripts/ui-features-smoke.mjs` 覆盖（使用下方 fixture）：
 
 ```bash
 FRONT_URL=http://127.0.0.1:<端口>/ \
@@ -511,7 +533,15 @@ CHROME_DEBUG_URL=http://127.0.0.1:9223 \
 node scripts/ui-features-smoke.mjs
 ```
 
-SSH 目标的表单、标签、连接报错、编辑与删除由 `scripts/ssh-ui-smoke.mjs` 覆盖：
+主题、设置持久化与连接下拉/管理弹窗由 `scripts/ui-theme-smoke.mjs` 覆盖：
+
+```bash
+FRONT_URL=http://127.0.0.1:<端口>/ \
+CHROME_DEBUG_URL=http://127.0.0.1:9223 \
+node scripts/ui-theme-smoke.mjs
+```
+
+SSH 目标的表单、连接、连接报错、编辑与删除由 `scripts/ssh-ui-smoke.mjs` 覆盖：
 
 ```bash
 FRONT_URL=http://127.0.0.1:<端口>/ \
@@ -532,7 +562,7 @@ cargo test --release --manifest-path desktop/common/Cargo.toml --test ssh_e2e --
 - **使用受信证书**：如果通过域名访问，建议放置受信证书或由反向代理终止 TLS（反向代理需支持大文件与流式响应透传）。
 - **备份**：文件在 `FILES_DIR`；`state/` 保存 RSA 私钥、TLS 证书与凭据哈希，建议一起备份。
 - **升级**：替换镜像后 `docker compose up -d`。上传过程中重启会让未完成上传失效，临时文件会在下次启动时清理。
-- **观察**：`docker stats agentgod-files` 通常只有数 MB 内存；若持续升高，检查限速与并发配置。
+- **观察**：`docker stats rockbadger` 通常只有数 MB 内存；若持续升高，检查限速与并发配置。
 
 ## 常见问题
 
@@ -542,19 +572,19 @@ cargo test --release --manifest-path desktop/common/Cargo.toml --test ssh_e2e --
 
 **页面登录后刷新就需要重新登录？**
 
-会话密钥只保存在页面内存中，这是有意设计。刷新会丢弃密钥。
+会话密钥只保存在页面内存中，这是有意设计。刷新或重新打开会丢弃密钥；桌面端切换连接时会保留各连接的内存会话。
 
-**浏览器提示「当前页面不是安全上下文」？**
+**App 提示「当前页面不是安全上下文」？**
 
-说明你用的是 `http://` 或证书未被信任，WebCrypto 因此不可用。请改用 HTTPS 并信任证书。
+说明连接用的是 `http://` 或证书未被信任，WebCrypto 因此不可用。请改用 HTTPS，并在添加连接时勾选「允许自签名证书」。
 
 **大文件下载失败，提示超过 1 GB？**
 
-不支持 File System Access 的浏览器会回退为内存 Blob，上限 1 GiB。建议使用 Chrome / Edge。
+不支持 File System Access 的 WebView 会回退为内存 Blob，上限 1 GiB。建议使用 Windows 10 / 11 自带的 WebView2。
 
 **视频无法播放？**
 
-浏览器不支持该容器或编码（例如 H.265/HEVC、部分 MKV）。可下载后用本地播放器打开；mp4（H.264）与 webm（VP8/VP9）兼容性最好。
+WebView 不支持该容器或编码（例如 H.265/HEVC、部分 MKV）。可下载后用本地播放器打开；mp4（H.264）与 webm（VP8/VP9）兼容性最好。
 
 **`.doc` / `.xls` / `.pptx` 无法预览？**
 
@@ -566,23 +596,23 @@ cargo test --release --manifest-path desktop/common/Cargo.toml --test ssh_e2e --
 
 **为什么视频/PDF 预览要等一会儿才能播放，且不能像以前一样边下边播？**
 
-因为预览内容也走 AES-256-GCM 应用层加密，浏览器原生媒体元素无法直接解密分块响应。文本仍支持边解密边查看；图片、PDF、Office 与音视频会显示接收进度，音视频完整解密后即可正常播放和拖动。超过预览大小上限的文件请下载后查看。
+因为预览内容也走 AES-256-GCM 应用层加密，WebView 原生媒体元素无法直接解密分块响应。文本仍支持边解密边查看；图片、PDF、Office 与音视频会显示接收进度，音视频完整解密后即可正常播放和拖动。超过预览大小上限的文件请下载后查看。
 
 **升级到 0.1.2 需要注意什么？**
 
-0.1.2 起登录必须先调用 `GET /api/challenge`，并把一次性 challenge 放进加密登录载荷；时间戳也变为必填。**这是一次不兼容的协议变更**：0.1.1 及更早的桌面客户端无法登录 0.1.2 服务端，0.1.2 桌面客户端也无法登录旧版服务端，请同步升级服务端与桌面端；浏览器端强制刷新页面即可（静态资源为 `no-cache`）。此外会话内重复的加密请求会被拒绝，自定义客户端重试时须重新生成信封。旧版本生成的自签名证书会在升级后首次启动时重新签发一次，浏览器需要重新信任。
+0.1.2 起登录必须先调用 `GET /api/challenge`，并把一次性 challenge 放进加密登录载荷；时间戳也变为必填。**这是一次不兼容的协议变更**：0.1.1 及更早的桌面客户端无法登录 0.1.2 服务端，0.1.2 桌面客户端也无法登录旧版服务端，请同步升级服务端与桌面端；桌面 App 重新打开即可（静态资源为 `no-cache`）。此外会话内重复的加密请求会被拒绝，自定义客户端重试时须重新生成信封。旧版本生成的自签名证书会在升级后首次启动时重新签发一次，桌面 App 需要重新确认。
 
 **升级到 0.1.1 需要注意什么？**
 
 0.1.1 起预览内容也使用 AES-256-GCM 应用层加密，旧的明文预览接口已移除。服务端与桌面端必须一起升级：0.1.0 桌面端无法预览 0.1.1 服务端，0.1.1 桌面端也无法使用 0.1.0 服务端的预览功能。
 
-**桌面版和浏览器版有什么区别？**
+**桌面应用和服务端是什么关系？**
 
-浏览器版需要先部署服务器，再通过 HTTPS 打开页面。桌面版分成两个应用，二者都默认显示本机文件，也都可以添加远程服务器：本机版更偏向单机文件管理，客户端同样支持本机文件与多服务器标签工作区，只是使用独立的服务器配置。桌面版复用同一套加密协议和界面，安装后无需浏览器。
+服务端只提供加密 API，不再包含网页界面；界面全部在 Windows 桌面应用里。启动 App 即可浏览本机文件，也可以用顶部操作栏「添加连接」连接部署在 NAS / 服务器上的 RockBadger 服务端（HTTPS / HTTP）或 SSH / SFTP 主机，连接之间可随时切换，每个连接保留独立的会话、路径和分页状态。
 
 **桌面客户端支持哪些服务器协议？**
 
-当前支持同版本 AgentGod Files 服务端的 HTTPS / HTTP 连接，每台服务器一个标签；HTTP 只建议用于本机回环或可信内网。SFTP、WebDAV、SMB、FTP 等通用协议尚未内置，不在当前版本的能力范围内。
+当前支持同版本 岩獾 RockBadger 服务端的 HTTPS / HTTP 连接，每台服务器一个连接；HTTP 只建议用于本机回环或可信内网。SFTP、WebDAV、SMB、FTP 等通用协议尚未内置，不在当前版本的能力范围内。
 
 **Windows 提示「Windows 已保护你的电脑」或 SmartScreen 拦截？**
 
@@ -598,14 +628,14 @@ cargo test --release --manifest-path desktop/common/Cargo.toml --test ssh_e2e --
 - 表格预览最多 2000 行 × 80 列；Word/Excel 预览上限 64 MB（需完整接收后解析，期间显示进度）；文本流式显示上限 32 MB
 - 加密预览需要先完整接收并解密：图片 128 MB、PDF 256 MB、音视频 512 MB、HTML 32 MB；音视频完整接收后才能开始播放和任意拖动
 - 单目录最多显示 50,000 项；筛选只作用于已加载的分页内容
-- 浏览历史保存在浏览器 `localStorage`（最多 300 条），不跨浏览器同步
+- 浏览历史保存在 App 本地存储（最多 300 条），不跨浏览器同步
 - 文件在宿主机磁盘上不额外加密存储，访问控制依赖容器与宿主机文件权限
 - 符号链接按保守策略处理：列表会解析指向并拒绝越出数据根目录的目标，删除只删除链接本身，文件夹打包跳过全部符号链接，避免把链接目标带出根目录
 - 自签名证书有效期 365 天、到期前 30 天自动轮换；运维自行放置的受信证书不会被覆盖
-- 桌面客户端目前只支持连接同版本 AgentGod Files 服务端（HTTPS / HTTP），不支持 SFTP、WebDAV、SMB、FTP
+- 桌面客户端目前只支持连接同版本 岩獾 RockBadger 服务端（HTTPS / HTTP），不支持 SFTP、WebDAV、SMB、FTP
 - 桌面安装包未做商业代码签名，首次安装需要手动放行
 - 0.1.2 及更早的桌面安装包没有内置更新检查，需要手动升级一次到 0.1.3 或更新版本；未配置 `TAURI_SIGNING_PRIVATE_KEY` 的发布不含静默更新包，只能下载安装包手动升级
-- 桌面本机标签按「同一台机器的本地访问即可信」设计，不设登录；多人共用电脑时请使用操作系统账户隔离
+- 桌面本机连接按「同一台机器的本地访问即可信」设计，不设登录；多人共用电脑时请使用操作系统账户隔离
 
 ## 安全边界
 

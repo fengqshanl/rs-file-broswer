@@ -33,8 +33,11 @@ const ARCHIVE_END_MARKER = 'AGF_TAR_END_v1';
 const LIST_PAGE_SIZE = 300;
 const ENSURE_DIRS_BATCH = 100;
 const TEXT_STREAM_BYTES = 32 * 1024 * 1024;
-const HISTORY_KEY = 'agentgod.history.v1';
-const SHOW_HIDDEN_KEY = 'agentgod.show-hidden';
+const HISTORY_KEY = 'rockbadger.history.v1';
+const SHOW_HIDDEN_KEY = 'rockbadger.show-hidden';
+const THEME_KEY = 'rockbadger.theme';
+const THEME_COOKIE = 'rockbadger_theme';
+const THEME_CHOICES = ['auto', 'light', 'dark'];
 const HISTORY_LIMIT = 300;
 const OFFICE_PREVIEW_BYTES = 64 * 1024 * 1024;
 const IMAGE_PREVIEW_BYTES = 128 * 1024 * 1024;
@@ -105,6 +108,7 @@ const state = {
   standaloneTab: null,
   clipboard: null,
   showHidden: readStoredShowHidden(),
+  themeChoice: document.documentElement.getAttribute('data-theme-choice') || 'auto',
   pageSize: LIST_PAGE_SIZE,
   autoLoadPaging: true,
 };
@@ -141,7 +145,7 @@ function targetDetail(target) {
 
 function targetHeaders(tab) {
   if (!state.app || !tab || tab.target.kind === 'standalone') return {};
-  return { 'X-AgentGod-Target': tab.id };
+  return { 'X-RockBadger-Target': tab.id };
 }
 
 for (const field of [
@@ -564,7 +568,7 @@ function handleSessionLost(message, tab = activeTab()) {
   const wasActive = tab === activeTab();
   clearTabSession(tab);
   if (!wasActive) {
-    renderTabs();
+    renderConnectionPicker();
     updatePasteButton();
     return;
   }
@@ -575,7 +579,7 @@ function handleSessionLost(message, tab = activeTab()) {
     return;
   }
   showTabLogin(tab, message);
-  renderTabs();
+  renderConnectionPicker();
   updatePasteButton();
 }
 
@@ -635,7 +639,7 @@ async function onLogout() {
   }
   clearTabSession(tab);
   showTabLogin(tab, '');
-  renderTabs();
+  renderConnectionPicker();
   updatePasteButton();
   toast('已安全退出', 'info');
 }
@@ -941,12 +945,14 @@ function renderFiles() {
   const empty = $('#empty-state');
   empty.hidden = hasEntries || state.list.loading;
   if (!hasEntries && !state.list.loading) {
-    empty.querySelector('p').textContent = state.filter.trim()
+    const filtering = Boolean(state.filter.trim());
+    empty.querySelector('p').textContent = filtering
       ? '没有匹配的项目'
       : '这个文件夹还是空的';
-    empty.querySelector('span:last-child').textContent = state.filter.trim()
-      ? '换个关键词试试'
-      : '拖拽文件到此处或点击“上传”';
+    const hint = empty.querySelector('.empty-hint');
+    if (hint) hint.textContent = filtering ? '换个关键词试试' : '拖拽文件到此处或点击“上传”';
+    const actions = empty.querySelector('.empty-actions');
+    if (actions) actions.hidden = filtering;
   }
 
   for (const entry of visible) {
@@ -2649,11 +2655,19 @@ function clearFinishedUploads() {
 /* ---------- Toasts / dialogs ---------- */
 
 function toast(message, kind = 'info') {
+  const container = $('#toasts');
+  while (container.children.length >= 4) container.firstElementChild.remove();
   const element = div(`toast ${kind}`);
+  const icon = span('toast-icon');
+  icon.textContent = kind === 'error' ? '!' : kind === 'success' ? '✓' : 'i';
   const text = span('toast-text');
   text.textContent = message;
-  element.append(text);
-  $('#toasts').append(element);
+  const close = buttonEl('', 'toast-close');
+  close.innerHTML = ICONS.close;
+  close.setAttribute('aria-label', '关闭提示');
+  close.addEventListener('click', () => element.remove());
+  element.append(icon, text, close);
+  container.append(element);
   setTimeout(() => element.remove(), kind === 'error' ? 6500 : 3800);
 }
 
@@ -4047,42 +4061,112 @@ function syncTabs(info) {
   }
 }
 
-function renderTabs() {
+function connectionKindClass(target) {
+  if (!target) return '';
+  if (target.kind === 'local') return 'local';
+  if (target.kind === 'ssh') return 'ssh';
+  return 'remote';
+}
+
+function connectionSummary(target) {
+  if (!target) return '';
+  if (target.kind === 'local') return '本机磁盘';
+  if (target.kind === 'ssh') return targetDetail(target) || 'SSH';
+  return targetDetail(target) || 'RockBadger 服务器';
+}
+
+function renderConnectionMenu() {
+  const menu = $('#conn-menu');
+  if (!menu) return;
+  const wasOpen = !menu.hidden;
+  menu.replaceChildren();
+  for (const target of state.app?.targets || []) {
+    const tab = ensureTab(target);
+    const active = target.id === state.activeTabId;
+    const item = buttonEl('', `conn-item${active ? ' active' : ''}`);
+    item.type = 'button';
+    item.dataset.connId = target.id;
+    item.dataset.testid = 'connection-item';
+    item.setAttribute('role', 'menuitemradio');
+    item.setAttribute('aria-checked', String(active));
+    const dot = span(`conn-item-dot ${connectionKindClass(target)}`);
+    const text = span('conn-item-text');
+    const name = span('conn-item-name');
+    name.textContent = targetLabel(target);
+    const detail = span('conn-item-detail');
+    detail.textContent = `${connectionSummary(target)}${tab.session ? '' : ' · 未连接'}`;
+    text.append(name, detail);
+    item.append(dot, text);
+    if (active) {
+      const check = span('conn-item-check');
+      check.textContent = '✓';
+      item.append(check);
+    }
+    item.addEventListener('click', () => {
+      closeConnectionMenu({ focus: true });
+      if (active) return;
+      void activateTab(target.id);
+    });
+    menu.append(item);
+  }
+  menu.append(div('conn-menu-sep'));
+  const manage = buttonEl('管理连接…', 'conn-manage');
+  manage.type = 'button';
+  manage.setAttribute('role', 'menuitem');
+  manage.dataset.testid = 'manage-connections';
+  manage.addEventListener('click', () => {
+    closeConnectionMenu({ focus: true });
+    openServersDialog();
+  });
+  menu.append(manage);
+  menu.hidden = !wasOpen;
+  $('#conn-trigger').setAttribute('aria-expanded', String(wasOpen));
+}
+
+function openConnectionMenu() {
+  renderConnectionMenu();
+  const menu = $('#conn-menu');
+  if (!menu) return;
+  menu.hidden = false;
+  $('#conn-trigger').setAttribute('aria-expanded', 'true');
+  const first = menu.querySelector('.conn-item.active') || menu.querySelector('.conn-item');
+  if (first) first.focus();
+}
+
+function closeConnectionMenu({ focus = false } = {}) {
+  const menu = $('#conn-menu');
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  $('#conn-trigger').setAttribute('aria-expanded', 'false');
+  if (focus) $('#conn-trigger').focus();
+}
+
+function renderConnectionPicker() {
   const bar = $('#workspace-bar');
   if (!state.app) {
     bar.hidden = true;
     return;
   }
   bar.hidden = false;
-  const container = $('#tabs');
-  container.replaceChildren();
-  for (const target of state.app.targets || []) {
-    const tab = ensureTab(target);
-    const active = target.id === state.activeTabId;
-    const button = buttonEl(
-      '',
-      `workspace-tab ${
-        target.kind === 'local'
-          ? 'local'
-          : target.kind === 'ssh'
-            ? 'ssh'
-            : 'remote'
-      }${tab.session ? '' : ' locked'}${active ? ' active' : ''}`,
-    );
-    button.dataset.tabId = target.id;
-    button.setAttribute('role', 'tab');
-    button.setAttribute('aria-selected', active ? 'true' : 'false');
-    const dot = span('tab-dot');
-    const label = span('workspace-tab-label');
-    label.textContent = targetLabel(target);
-    button.append(dot, label);
-    button.title =
-      target.kind === 'local'
-        ? '本机文件系统'
-        : `${targetDetail(target)}${tab.session ? '' : '（未连接）'}`;
-    button.addEventListener('click', () => void activateTab(target.id));
-    container.append(button);
+  const tab = activeTab();
+  const target = tab?.target;
+  const trigger = $('#conn-trigger');
+  if (target) {
+    $('#conn-name').textContent = targetLabel(target);
+    $('#conn-detail').textContent = connectionSummary(target) || '未连接';
+    $('#conn-dot').className = `conn-dot ${connectionKindClass(target)}${
+      tab.session ? ' online' : ''
+    }`;
+    trigger.title = `${targetLabel(target)} · ${connectionSummary(target)}${
+      tab.session ? '' : '（未连接）'
+    }`;
+  } else {
+    $('#conn-name').textContent = '尚未连接';
+    $('#conn-detail').textContent = '选择或添加一个连接';
+    $('#conn-dot').className = 'conn-dot';
+    trigger.title = '切换连接';
   }
+  renderConnectionMenu();
   updatePasteButton();
 }
 
@@ -4092,7 +4176,7 @@ async function activateTab(id, options = {}) {
   if (!tab) return;
   state.activeTabId = state.tabs.has(id) ? id : null;
   loginTab = tab.session ? null : tab;
-  renderTabs();
+  renderConnectionPicker();
   renderRootSelect();
   updatePasteButton();
   if (!tab.session) {
@@ -4123,6 +4207,7 @@ function updateTabChrome(tab) {
       ? '本机'
       : targetDetail(tab.target)
     : tab.session?.user || targetLabel(tab.target);
+  $('#user-badge').hidden = passwordless || !tab.session;
   $('#btn-account').hidden = passwordless || !tab.session;
   $('#btn-logout').hidden = passwordless || !tab.session;
   $('#session-note').textContent = passwordless
@@ -4130,6 +4215,11 @@ function updateTabChrome(tab) {
       ? '本机文件通过回环服务访问，不上传任何数据'
       : 'SSH 加密通道直连服务器，文件不经过第三方'
     : '会话密钥仅保存在本页内存，刷新后需重新登录';
+  $('#lock-note-text').textContent = passwordless
+    ? tab.target.kind === 'local'
+      ? '本机访问'
+      : 'SSH 加密通道'
+    : '会话已加密';
   $('#local-root-wrap').hidden = !passwordless;
   renderRootSelect();
 }
@@ -4181,7 +4271,7 @@ async function enterLocalTab(tab) {
     user: data.user || 'local',
   };
   await refreshTargetRoots(tab);
-  renderTabs();
+  renderConnectionPicker();
   if (tab === activeTab()) {
     showAppView();
     updateTabChrome(tab);
@@ -4212,6 +4302,115 @@ async function refreshTargetRoots(tab) {
   }
 }
 
+/* ---------- Theme and persisted settings ---------- */
+
+function systemPrefersLight() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: light)').matches;
+  } catch {
+    return false;
+  }
+}
+
+function resolveTheme(choice) {
+  return choice === 'auto' ? (systemPrefersLight() ? 'light' : 'dark') : choice;
+}
+
+function renderThemeSwitch() {
+  const control = $('#theme-switch');
+  if (!control) return;
+  for (const button of control.querySelectorAll('[data-theme-choice]')) {
+    const active = button.dataset.themeChoice === state.themeChoice;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
+function writeThemeCache(choice) {
+  try {
+    localStorage.setItem(THEME_KEY, choice);
+  } catch {
+    /* storage can be unavailable in a hardened webview */
+  }
+  try {
+    document.cookie = `${THEME_COOKIE}=${choice}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  } catch {
+    /* cookies may be disabled */
+  }
+}
+
+/// Applies a theme choice to the document. `persist` writes it through to the
+/// backend, which is the source of truth across restarts (the desktop front
+/// binds a random port, so localStorage is not shared between launches).
+function applyTheme(choice, { persist = false } = {}) {
+  const valid = THEME_CHOICES.includes(choice) ? choice : 'auto';
+  state.themeChoice = valid;
+  const resolved = resolveTheme(valid);
+  const root = document.documentElement;
+  root.setAttribute('data-theme', resolved);
+  root.setAttribute('data-theme-choice', valid);
+  root.style.colorScheme = resolved;
+  writeThemeCache(valid);
+  renderThemeSwitch();
+  if (persist) queueSettingsSave({ theme: valid });
+}
+
+function applySettings(settings) {
+  if (!settings || typeof settings !== 'object') return;
+  if (THEME_CHOICES.includes(settings.theme)) {
+    applyTheme(settings.theme);
+  }
+  if (typeof settings.show_hidden === 'boolean' && settings.show_hidden !== state.showHidden) {
+    state.showHidden = settings.show_hidden;
+    const toggle = $('#toggle-hidden');
+    if (toggle) toggle.checked = state.showHidden;
+    try {
+      localStorage.setItem(SHOW_HIDDEN_KEY, state.showHidden ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+let settingsSaveTimer = null;
+let pendingSettings = {};
+
+/// Debounced so dragging a toggle does not spam the backend. A failure is not
+/// fatal: the value still applies for this session and is cached locally.
+function queueSettingsSave(patch) {
+  pendingSettings = { ...pendingSettings, ...patch };
+  clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = setTimeout(() => {
+    const body = pendingSettings;
+    pendingSettings = {};
+    fetch('/app/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .catch(() => {
+        /* standalone API server or offline: local cache still applies */
+      });
+  }, 200);
+}
+
+function watchSystemTheme() {
+  try {
+    const media = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = () => {
+      if (state.themeChoice === 'auto') applyTheme('auto');
+    };
+    if (media.addEventListener) media.addEventListener('change', onChange);
+    else if (media.addListener) media.addListener(onChange);
+  } catch {
+    /* matchMedia can be unavailable in a hardened webview */
+  }
+}
+
 async function boot() {
   if (!window.crypto || !window.crypto.subtle) {
     showLoginError('当前页面不是安全上下文（需要 HTTPS），无法进行加密登录');
@@ -4225,27 +4424,27 @@ async function boot() {
     info = null;
   }
   if (!info || !info.mode) {
-    renderTabs();
+    renderConnectionPicker();
     return; // standalone server: normal login flow
   }
 
   state.app = info;
+  applySettings(info.settings);
   document.body.classList.add('has-workspace');
   $('#workspace-bar').hidden = false;
   $('#app-version').textContent = `v${info.version || ''}`;
   syncTabs(info);
-  renderTabs();
   // Best effort and non-blocking: an offline desktop must stay fully usable.
   void checkForAppUpdate(false);
   const localTarget = (info.targets || []).find((target) => target.kind === 'local');
   const initial = localTarget || (info.targets || [])[0];
-  if (!initial) {
+  if (initial) state.activeTabId = initial.id;
+  const tab = initial ? ensureTab(initial) : null;
+  renderConnectionPicker();
+  if (!tab) {
     showTabLogin(state.standaloneTab, '尚未配置任何文件位置');
     return;
   }
-  state.activeTabId = initial.id;
-  const tab = ensureTab(initial);
-  renderTabs();
   renderRootSelect();
   if (isPasswordless(tab.target)) {
     try {
@@ -4305,8 +4504,9 @@ async function refreshAppInfo() {
     const response = await fetch('/app/info', { cache: 'no-store' });
     if (!response.ok) return null;
     state.app = await response.json();
+    applySettings(state.app.settings);
     syncTabs(state.app);
-    renderTabs();
+    renderConnectionPicker();
     renderRootSelect();
     return state.app;
   } catch {
@@ -4434,55 +4634,120 @@ function confirmHostKey(target, info, previousFingerprint) {
 /* ---------- Add / manage servers (custom overlay, WKWebView safe) ---------- */
 
 let serverPanelEditing = null;
+let serverPanelReturnFocus = null;
 
 function closeServerPanel() {
   const overlay = $('#server-overlay');
   if (overlay) overlay.hidden = true;
   const panel = $('#server-panel');
-  if (panel) panel.replaceChildren();
+  if (panel) {
+    panel.replaceChildren();
+    panel.onkeydown = null;
+  }
   serverPanelEditing = null;
+  const target = serverPanelReturnFocus;
+  serverPanelReturnFocus = null;
+  if (target && document.contains(target)) target.focus();
+  else $('#btn-add-server')?.focus();
 }
 
 function openServersDialog() {
   if (!state.app) return;
   const overlay = $('#server-overlay');
   const panel = $('#server-panel');
+  serverPanelReturnFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
   overlay.hidden = false;
 
-  const body = div('modal-body');
+  let editingTarget = null;
+  let formKind = 'http';
+  let deleteArmed = false;
+  let deleteTimer = null;
+
+  const root = div('cm');
+  root.dataset.testid = 'connection-manager';
+
+  /* ---------- Header ---------- */
+  const head = div('cm-head');
+  const titleWrap = div('cm-title');
   const heading = document.createElement('h2');
   heading.textContent = '连接管理';
-  const hint = document.createElement('p');
-  hint.className = 'modal-text';
-  hint.textContent =
-    '本机文件始终显示在第一个标签。这里可以添加 AgentGod Files 服务器（HTTPS / HTTP），或通过 SSH/SFTP 直接管理远程服务器的文件。';
-
+  const subtitle = span('cm-subtitle');
+  subtitle.textContent = '管理 RockBadger 服务器与 SSH 连接，本机文件始终可用。';
+  titleWrap.append(heading, subtitle);
   const close = buttonEl('', 'btn ghost icon-only panel-close');
   close.innerHTML = ICONS.close;
   close.title = '关闭';
   close.setAttribute('aria-label', '关闭');
   close.addEventListener('click', closeServerPanel);
+  head.append(titleWrap, close);
 
-  const list = div('servers-list');
-  const form = div('server-form');
+  const bodyWrap = div('cm-body');
 
+  /* ---------- Sidebar ---------- */
+  const sidebar = div('cm-sidebar');
+  sidebar.dataset.testid = 'connection-sidebar';
+  const sideHead = span('cm-sidebar-title');
+  sideHead.textContent = '已保存的连接';
+  const list = div('cm-list');
+  const addButton = buttonEl('添加连接', 'btn primary small cm-add');
+  addButton.dataset.testid = 'add-connection';
+  sidebar.append(sideHead, list, addButton);
+
+  /* ---------- Editor ---------- */
+  const editor = div('cm-editor');
+  editor.dataset.testid = 'connection-editor';
+  const empty = div('cm-editor-empty');
+  const emptyIcon = span('cm-empty-icon');
+  emptyIcon.innerHTML =
+    '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M24 4.5 39.5 11v11.2c0 9.8-6.4 17.9-15.5 21.8C14.9 40.1 8.5 32 8.5 22.2V11Z"/><path d="M17.5 18.2a1.8 1.8 0 0 1 1.8-1.8h3.8l2.4 2.6h5.2a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H19.3a1.8 1.8 0 0 1-1.8-1.8Z"/></svg>';
+  const emptyTitle = document.createElement('strong');
+  emptyTitle.textContent = '选择一个连接';
+  const emptyText = span('');
+  emptyText.textContent = '在左侧选择已保存的连接进行编辑，或添加新的服务器 / SSH 连接。';
+  empty.append(emptyIcon, emptyTitle, emptyText);
+
+  const form = document.createElement('form');
+  form.className = 'cm-form';
+  form.noValidate = true;
+  form.hidden = true;
+  form.dataset.testid = 'connection-form';
+  const scroll = div('cm-form-scroll');
+
+  const section = (title) => {
+    const box = document.createElement('section');
+    box.className = 'cm-section';
+    const h = document.createElement('h3');
+    h.textContent = title;
+    box.append(h);
+    return box;
+  };
+
+  /* ---------- Basic info ---------- */
+  const basicSection = section('基本信息');
   const nameField = labeledInput('名称', 'text', 'off');
   nameField.input.placeholder = '例如：办公室 NAS';
+  nameField.input.dataset.testid = 'connection-name';
+  const nameRow = div('form-row');
+  nameRow.append(nameField.field);
 
-  const kindField = document.createElement('label');
-  kindField.className = 'field protocol';
-  const kindLabel = span('类型');
-  const kindSelect = document.createElement('select');
-  kindSelect.className = 'app-select';
-  kindSelect.innerHTML =
-    '<option value="http">AgentGod 服务器</option><option value="ssh">SSH / SFTP</option>';
-  kindField.append(kindLabel, kindSelect);
+  const kindRow = div('cm-kind-row');
+  const kindLabel = span('cm-kind-label');
+  kindLabel.textContent = '类型';
+  const kindSeg = div('segmented cm-kind');
+  kindSeg.dataset.testid = 'connection-kind';
+  kindSeg.setAttribute('role', 'group');
+  kindSeg.setAttribute('aria-label', '连接类型');
+  const kindHttp = buttonEl('RockBadger 服务器', '');
+  kindHttp.dataset.kind = 'http';
+  const kindSsh = buttonEl('SSH / SFTP', '');
+  kindSsh.dataset.kind = 'ssh';
+  kindSeg.append(kindHttp, kindSsh);
+  kindRow.append(kindLabel, kindSeg);
+  basicSection.append(nameRow, kindRow);
 
-  const kindRow = div('form-row');
-  kindRow.append(kindField, nameField.field);
-
-  /* ---------- AgentGod server fields ---------- */
-  const httpGroup = div('server-group');
+  /* ---------- RockBadger server fields ---------- */
+  const httpGroup = section('服务器');
   const protocolField = document.createElement('label');
   protocolField.className = 'field protocol';
   const protocolLabel = span('协议');
@@ -4493,6 +4758,8 @@ function openServersDialog() {
   protocolField.append(protocolLabel, protocolSelect);
   const urlField = labeledInput('服务器地址', 'text', 'off');
   urlField.input.placeholder = '192.168.1.10:8090 或完整 URL';
+  urlField.input.dataset.testid = 'connection-url';
+  urlField.field.classList.add('grow');
   const httpRow = div('form-row');
   httpRow.append(protocolField, urlField.field);
 
@@ -4507,34 +4774,47 @@ function openServersDialog() {
   httpGroup.append(httpRow, checkRow);
 
   /* ---------- SSH / SFTP fields ---------- */
-  const sshGroup = div('server-group');
+  const sshGroup = section('SSH / SFTP');
   const hostField = labeledInput('主机', 'text', 'off');
   hostField.input.placeholder = '192.168.1.20 或 example.com';
+  hostField.input.dataset.testid = 'connection-ssh-host';
   hostField.field.classList.add('grow');
   const portField = labeledInput('端口', 'number', 'off');
   portField.input.value = '22';
   portField.input.min = '1';
   portField.input.max = '65535';
+  portField.input.dataset.testid = 'connection-ssh-port';
   portField.field.classList.add('port');
   const hostRow = div('form-row');
   hostRow.append(hostField.field, portField.field);
 
   const userField = labeledInput('用户名', 'text', 'username');
   userField.input.placeholder = 'root';
-  const authField = document.createElement('label');
-  authField.className = 'field protocol';
-  const authLabel = span('认证方式');
-  const authSelect = document.createElement('select');
-  authSelect.className = 'app-select';
-  authSelect.innerHTML =
-    '<option value="password">密码</option><option value="key">私钥</option>';
-  authField.append(authLabel, authSelect);
+  userField.input.dataset.testid = 'connection-ssh-user';
+  userField.field.classList.add('grow');
+  const authRow = div('cm-auth-row');
+  const authLabel = span('cm-kind-label');
+  authLabel.textContent = '认证方式';
+  const authSeg = div('segmented cm-kind');
+  authSeg.dataset.testid = 'connection-auth';
+  authSeg.setAttribute('role', 'group');
+  authSeg.setAttribute('aria-label', '认证方式');
+  const authPassword = buttonEl('密码', '');
+  authPassword.dataset.auth = 'password';
+  const authKey = buttonEl('私钥', '');
+  authKey.dataset.auth = 'key';
+  authSeg.append(authPassword, authKey);
+  authRow.append(authLabel, authSeg);
   const userRow = div('form-row');
-  userRow.append(userField.field, authField);
+  userRow.append(userField.field);
+  const authFieldRow = div('form-row');
+  authFieldRow.append(authRow);
 
   const passwordField = labeledInput('密码', 'password', 'current-password');
+  passwordField.input.dataset.testid = 'connection-ssh-password';
   const keyField = labeledInput('私钥文件', 'text', 'off');
   keyField.input.placeholder = 'C:\\Users\\you\\.ssh\\id_ed25519';
+  keyField.input.dataset.testid = 'connection-ssh-key';
   const passphraseField = labeledInput('私钥口令（可选）', 'password', 'off');
   const rootField = labeledInput('起始目录（可选）', 'text', 'off');
   rootField.input.placeholder = '/var/www（留空进入主目录）';
@@ -4542,54 +4822,84 @@ function openServersDialog() {
   sshGroup.append(
     hostRow,
     userRow,
+    authFieldRow,
     passwordField.field,
     keyField.field,
     passphraseField.field,
     rootField.field,
   );
 
+  scroll.append(basicSection, httpGroup, sshGroup);
+  form.append(scroll);
+
+  /* ---------- Sticky actions ---------- */
+  const actions = div('cm-actions');
   const errorEl = div('form-error inline-error');
-  const formActions = div('form-actions');
+  const actionsRight = div('cm-actions-right');
+  const deleteButton = buttonEl('删除连接', 'btn ghost danger-text cm-delete');
+  deleteButton.dataset.testid = 'connection-delete';
+  deleteButton.hidden = true;
+  const testButton = buttonEl('测试连接', 'btn ghost');
+  testButton.dataset.testid = 'connection-test';
+  testButton.hidden = true;
+  const cancelButton = buttonEl('取消', 'btn ghost');
   const saveButton = buttonEl('添加服务器', 'btn primary');
-  const cancelEdit = buttonEl('取消编辑', 'btn ghost small');
-  cancelEdit.hidden = true;
-  formActions.append(saveButton, cancelEdit);
+  saveButton.type = 'submit';
+  saveButton.dataset.testid = 'connection-save';
+  actionsRight.append(deleteButton, testButton, cancelButton, saveButton);
+  actions.append(errorEl, actionsRight);
+  form.append(actions);
 
-  form.append(kindRow, httpGroup, sshGroup, errorEl, formActions);
+  editor.append(empty, form);
+  bodyWrap.append(sidebar, editor);
+  root.append(head, bodyWrap);
+  panel.replaceChildren(root);
 
-  const footer = div('modal-actions');
-  const done = buttonEl('关闭', 'btn ghost');
-  done.addEventListener('click', closeServerPanel);
-  footer.append(done);
+  /* ---------- State helpers ---------- */
+  const setKind = (kind) => {
+    formKind = kind === 'ssh' ? 'ssh' : 'http';
+    for (const button of kindSeg.querySelectorAll('[data-kind]')) {
+      button.classList.toggle('active', button.dataset.kind === formKind);
+    }
+    httpGroup.hidden = formKind !== 'http';
+    sshGroup.hidden = formKind !== 'ssh';
+    if (!editingTarget) {
+      saveButton.textContent = formKind === 'ssh' ? '添加 SSH 连接' : '添加服务器';
+    }
+  };
 
-  body.append(heading, hint, close, list, form, footer);
-  panel.replaceChildren(body);
+  const authValue = () =>
+    authKey.classList.contains('active') ? 'key' : 'password';
 
-  let editingTarget = null;
-
-  const updateAuthFields = () => {
-    const usesKey = authSelect.value === 'key';
+  const setAuth = (auth) => {
+    const usesKey = auth === 'key';
+    authPassword.classList.toggle('active', !usesKey);
+    authKey.classList.toggle('active', usesKey);
     passwordField.field.hidden = usesKey;
     keyField.field.hidden = !usesKey;
     passphraseField.field.hidden = !usesKey;
   };
 
-  const applyKind = (kind) => {
-    httpGroup.hidden = kind !== 'http';
-    sshGroup.hidden = kind !== 'ssh';
-    if (kind === 'ssh') updateAuthFields();
-    if (!editingTarget) {
-      saveButton.textContent = kind === 'ssh' ? '添加 SSH 连接' : '添加服务器';
-    }
+  const resetDelete = () => {
+    deleteArmed = false;
+    clearTimeout(deleteTimer);
+    deleteButton.textContent = '删除连接';
+    deleteButton.classList.remove('armed');
   };
 
-  const setKind = (kind) => {
-    kindSelect.value = kind;
-    kindSelect.disabled = Boolean(serverPanelEditing);
-    applyKind(kind);
+  const openForm = () => {
+    empty.hidden = true;
+    form.hidden = false;
   };
 
-  const resetForm = () => {
+  const showEmpty = () => {
+    empty.hidden = false;
+    form.hidden = true;
+    errorEl.textContent = '';
+    resetDelete();
+  };
+
+  const clearFields = () => {
     serverPanelEditing = null;
     editingTarget = null;
     nameField.input.value = '';
@@ -4599,37 +4909,43 @@ function openServersDialog() {
     hostField.input.value = '';
     portField.input.value = '22';
     userField.input.value = '';
-    authSelect.value = 'password';
-    passwordField.input.value = '';
-    passwordField.input.placeholder = '';
     keyField.input.value = '';
     passphraseField.input.value = '';
     passphraseField.input.placeholder = '';
+    passwordField.input.value = '';
+    passwordField.input.placeholder = '';
     rootField.input.value = '';
     saveButton.textContent = '添加服务器';
-    cancelEdit.hidden = true;
+    testButton.hidden = true;
+    deleteButton.hidden = true;
+    resetDelete();
     errorEl.textContent = '';
     setKind('http');
+    setAuth('password');
+  };
+
+  const startAdd = () => {
+    clearFields();
+    openForm();
+    drawList();
+    setTimeout(() => nameField.input.focus(), 30);
   };
 
   const beginEdit = (target) => {
+    clearFields();
     serverPanelEditing = target.id;
     editingTarget = target;
-    errorEl.textContent = '';
     nameField.input.value = target.name || '';
     if (target.kind === 'ssh') {
       setKind('ssh');
       hostField.input.value = target.host || '';
       portField.input.value = String(target.port || 22);
       userField.input.value = target.user || '';
-      authSelect.value = target.auth === 'key' ? 'key' : 'password';
+      setAuth(target.auth === 'key' ? 'key' : 'password');
       keyField.input.value = target.key_path || '';
       rootField.input.value = target.root || '';
-      passwordField.input.value = '';
-      passphraseField.input.value = '';
       passwordField.input.placeholder = '留空保持不变';
       passphraseField.input.placeholder = '留空保持不变';
-      updateAuthFields();
     } else {
       setKind('http');
       const url = String(target.url || '');
@@ -4637,72 +4953,70 @@ function openServersDialog() {
       urlField.input.value = url.replace(/^https?:\/\//, '');
       checkBox.checked = Boolean(target.allow_invalid_certs);
     }
+    openForm();
     saveButton.textContent = '保存修改';
-    cancelEdit.hidden = false;
-    nameField.input.focus();
+    testButton.hidden = false;
+    deleteButton.hidden = false;
+    drawList();
+    setTimeout(() => nameField.input.focus(), 30);
   };
 
   const drawList = () => {
     list.replaceChildren();
-    const remotes = (state.app.targets || []).filter(
-      (target) => target.kind !== 'local',
-    );
+    const targets = state.app?.targets || [];
+    const localTarget = targets.find((target) => target.kind === 'local');
+    if (localTarget) {
+      const localItem = buttonEl('', 'cm-item local');
+      localItem.type = 'button';
+      localItem.disabled = true;
+      const dot = span('conn-item-dot local');
+      const text = span('conn-item-text');
+      const name = span('conn-item-name');
+      name.textContent = '本机磁盘';
+      const detail = span('conn-item-detail');
+      detail.textContent = '系统文件系统';
+      text.append(name, detail);
+      const badge = span('cm-badge');
+      badge.textContent = '内置';
+      localItem.append(dot, text, badge);
+      list.append(localItem);
+    }
+
+    const remotes = targets.filter((target) => target.kind !== 'local');
     if (!remotes.length) {
-      const empty = div('servers-empty');
-      empty.textContent = '还没有保存的连接，请在下方添加。';
-      list.append(empty);
+      const emptyList = div('cm-list-empty');
+      emptyList.textContent = '还没有保存的连接。';
+      list.append(emptyList);
       return;
     }
     for (const target of remotes) {
-      const row = div('server-row');
-      const info = div('server-info');
-      const title = span('server-name');
-      title.textContent = target.name || targetDetail(target);
-      if (target.id === state.activeTabId) {
-        const badge = span('server-badge');
-        badge.textContent = '当前';
-        title.append(badge);
-      }
-      const kindBadge = span('server-badge kind');
-      kindBadge.textContent = target.kind === 'ssh' ? 'SSH' : 'HTTP';
-      title.append(kindBadge);
-
-      const meta = span('server-url');
-      meta.textContent =
+      const item = buttonEl('', 'cm-item');
+      item.type = 'button';
+      item.dataset.testid = 'connection-item';
+      item.dataset.id = target.id;
+      if (target.id === serverPanelEditing) item.classList.add('editing');
+      const dot = span(`conn-item-dot ${connectionKindClass(target)}`);
+      const text = span('conn-item-text');
+      const name = span('conn-item-name');
+      name.textContent = target.name || targetDetail(target);
+      const detail = span('conn-item-detail');
+      detail.textContent =
         target.kind === 'ssh'
           ? `${targetDetail(target)}${target.root ? ` · ${target.root}` : ''}`
           : target.url || '';
-      info.append(title, meta);
-
-      const actions = div('server-actions');
-      const test = buttonEl('测试', 'btn ghost small');
-      test.addEventListener('click', () => void testTarget(target));
-      const edit = buttonEl('编辑', 'btn ghost small');
-      edit.addEventListener('click', () => beginEdit(target));
-      const remove = buttonEl('删除', 'btn ghost small danger-text');
-      remove.addEventListener('click', async () => {
-        errorEl.textContent = '';
-        try {
-          await serversAction({ action: 'remove', id: target.id });
-          const wasActive = state.activeTabId === target.id;
-          state.tabs.delete(target.id);
-          if (wasActive) state.activeTabId = null;
-          await refreshAppInfo();
-          drawList();
-          resetForm();
-          if (wasActive) {
-            const local = (state.app.targets || []).find(
-              (item) => item.kind === 'local',
-            );
-            if (local) await activateTab(local.id);
-          }
-        } catch (error) {
-          errorEl.textContent = error.message || '删除失败';
-        }
-      });
-      actions.append(test, edit, remove);
-      row.append(info, actions);
-      list.append(row);
+      text.append(name, detail);
+      item.append(dot, text);
+      if (target.id === state.activeTabId) {
+        const badge = span('cm-badge current');
+        badge.textContent = '当前';
+        item.append(badge);
+      } else {
+        const kindBadge = span('cm-badge');
+        kindBadge.textContent = target.kind === 'ssh' ? 'SSH' : 'HTTP';
+        item.append(kindBadge);
+      }
+      item.addEventListener('click', () => beginEdit(target));
+      list.append(item);
     }
   };
 
@@ -4737,10 +5051,11 @@ function openServersDialog() {
 
   const submit = async () => {
     errorEl.textContent = '';
-    const kind = kindSelect.value;
+    const kind = formKind;
     const name = nameField.input.value.trim();
     if (!name) {
       errorEl.textContent = '请填写名称';
+      nameField.input.focus();
       return;
     }
 
@@ -4749,23 +5064,27 @@ function openServersDialog() {
       const host = hostField.input.value.trim();
       const username = userField.input.value.trim();
       const port = Number(portField.input.value);
-      const auth = authSelect.value === 'key' ? 'key' : 'password';
+      const auth = authValue();
       const keyPath = keyField.input.value.trim();
       const root = rootField.input.value.trim();
       if (!host) {
         errorEl.textContent = '请填写主机地址';
+        hostField.input.focus();
         return;
       }
       if (!username) {
         errorEl.textContent = '请填写用户名';
+        userField.input.focus();
         return;
       }
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         errorEl.textContent = '端口必须在 1-65535 之间';
+        portField.input.focus();
         return;
       }
       if (auth === 'key' && !keyPath) {
         errorEl.textContent = '请选择私钥文件';
+        keyField.input.focus();
         return;
       }
       if (
@@ -4774,6 +5093,7 @@ function openServersDialog() {
         !passwordField.input.value
       ) {
         errorEl.textContent = '请输入登录密码';
+        passwordField.input.focus();
         return;
       }
       payload = {
@@ -4783,7 +5103,7 @@ function openServersDialog() {
         username,
         auth,
         key_path: keyPath,
-        root: root,
+        root,
         password: auth === 'password' ? passwordField.input.value : '',
         passphrase: auth === 'key' ? passphraseField.input.value : '',
       };
@@ -4797,6 +5117,7 @@ function openServersDialog() {
       let url = urlField.input.value.trim();
       if (!url) {
         errorEl.textContent = '请填写服务器地址';
+        urlField.input.focus();
         return;
       }
       if (!url.includes('://')) url = `${protocolSelect.value}://${url}`;
@@ -4823,10 +5144,8 @@ function openServersDialog() {
         tab.roots = null;
         tab.rootPath = null;
       }
-      resetForm();
-      drawList();
       closeServerPanel();
-      renderTabs();
+      renderConnectionPicker();
       if (id) await activateTab(id);
     } catch (error) {
       errorEl.textContent = error.message || '保存失败';
@@ -4835,10 +5154,23 @@ function openServersDialog() {
     }
   };
 
-  saveButton.addEventListener('click', () => void submit());
-  cancelEdit.addEventListener('click', resetForm);
-  kindSelect.addEventListener('change', () => applyKind(kindSelect.value));
-  authSelect.addEventListener('change', updateAuthFields);
+  /* ---------- Events ---------- */
+  addButton.addEventListener('click', startAdd);
+  cancelButton.addEventListener('click', () => {
+    clearFields();
+    showEmpty();
+    drawList();
+  });
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submit();
+  });
+  for (const button of kindSeg.querySelectorAll('[data-kind]')) {
+    button.addEventListener('click', () => setKind(button.dataset.kind));
+  }
+  for (const button of authSeg.querySelectorAll('[data-auth]')) {
+    button.addEventListener('click', () => setAuth(button.dataset.auth));
+  }
   for (const field of [
     nameField,
     urlField,
@@ -4850,21 +5182,79 @@ function openServersDialog() {
     passphraseField,
     rootField,
   ]) {
-    field.input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        void submit();
-      }
-    });
     field.input.addEventListener('input', () => {
       if (errorEl.textContent) errorEl.textContent = '';
     });
   }
 
+  testButton.addEventListener('click', async () => {
+    if (!editingTarget) return;
+    const label = testButton.textContent;
+    testButton.disabled = true;
+    testButton.textContent = '测试中…';
+    await testTarget(editingTarget);
+    testButton.disabled = false;
+    testButton.textContent = label;
+  });
+
+  deleteButton.addEventListener('click', async () => {
+    if (!serverPanelEditing) return;
+    if (!deleteArmed) {
+      deleteArmed = true;
+      deleteButton.textContent = '再次点击确认删除';
+      deleteButton.classList.add('armed');
+      deleteTimer = setTimeout(resetDelete, 4000);
+      return;
+    }
+    const id = serverPanelEditing;
+    resetDelete();
+    deleteButton.disabled = true;
+    errorEl.textContent = '';
+    try {
+      await serversAction({ action: 'remove', id });
+      const wasActive = state.activeTabId === id;
+      state.tabs.delete(id);
+      if (wasActive) state.activeTabId = null;
+      await refreshAppInfo();
+      clearFields();
+      showEmpty();
+      drawList();
+      if (wasActive) {
+        const local = (state.app.targets || []).find(
+          (item) => item.kind === 'local',
+        );
+        if (local) await activateTab(local.id);
+      }
+      toast('连接已删除', 'info');
+    } catch (error) {
+      errorEl.textContent = error.message || '删除失败';
+    } finally {
+      deleteButton.disabled = false;
+    }
+  });
+
+  panel.onkeydown = (event) => {
+    if (event.key !== 'Tab') return;
+    const items = [...panel.querySelectorAll('button, input, select')].filter(
+      (item) => !item.disabled && !item.hidden && item.offsetParent !== null,
+    );
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   drawList();
-  resetForm();
-  setTimeout(() => nameField.input.focus(), 30);
+  showEmpty();
+  setTimeout(() => addButton.focus(), 30);
 }
+
 
 /* ---------- Wiring ---------- */
 
@@ -4905,9 +5295,43 @@ function bindEvents() {
     }
   });
   $('#btn-mkdir').addEventListener('click', createFolder);
+  $('#empty-mkdir').addEventListener('click', createFolder);
+  $('#empty-upload').addEventListener('click', () => $('#file-input').click());
   $('#btn-refresh').addEventListener('click', () => loadDir(state.cwd));
   $('#btn-history').addEventListener('click', openHistoryDialog);
   $('#btn-add-server').addEventListener('click', openServersDialog);
+  $('#conn-trigger').addEventListener('click', () => {
+    const menu = $('#conn-menu');
+    if (menu.hidden) openConnectionMenu();
+    else closeConnectionMenu({ focus: true });
+  });
+  $('#conn-trigger').addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      openConnectionMenu();
+    }
+  });
+  $('#conn-menu').addEventListener('keydown', (event) => {
+    const items = [...$('#conn-menu').querySelectorAll('.conn-item, .conn-manage')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!items.length) return;
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      const next = (index + step + items.length) % items.length;
+      items[next].focus();
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const target = event.key === 'Home' ? items[0] : items[items.length - 1];
+      target?.focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeConnectionMenu({ focus: true });
+    } else if (event.key === 'Tab') {
+      setTimeout(() => closeConnectionMenu(), 0);
+    }
+  });
   $('#btn-paste').addEventListener('click', () => void pasteClipboard());
   $('#toggle-hidden').checked = state.showHidden;
   $('#toggle-hidden').addEventListener('change', (event) => {
@@ -4917,11 +5341,21 @@ function bindEvents() {
     } catch {
       /* storage can be unavailable in a hardened webview */
     }
+    queueSettingsSave({ show_hidden: state.showHidden });
     const tab = activeTab();
     if (tab.session) {
       void loadDir(tab.cwd, { tab, skipHistory: true });
     }
   });
+  const themeSwitch = $('#theme-switch');
+  if (themeSwitch) {
+    themeSwitch.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-theme-choice]');
+      if (!button) return;
+      applyTheme(button.dataset.themeChoice, { persist: true });
+    });
+    renderThemeSwitch();
+  }
   $('#server-overlay').addEventListener('click', (event) => {
     if (event.target.closest('[data-server-close]')) closeServerPanel();
   });
@@ -4934,6 +5368,9 @@ function bindEvents() {
     if (!event.target.closest || !event.target.closest('#context-menu')) {
       closeContextMenu();
     }
+    if (!event.target.closest || !event.target.closest('.conn-picker')) {
+      closeConnectionMenu();
+    }
   });
   $('#context-menu').addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
@@ -4942,7 +5379,9 @@ function bindEvents() {
     }
   });
   window.addEventListener('blur', closeContextMenu);
+  window.addEventListener('blur', () => closeConnectionMenu());
   window.addEventListener('resize', closeContextMenu);
+  window.addEventListener('resize', () => closeConnectionMenu());
   document.addEventListener('scroll', closeContextMenu, true);
   for (const selector of ['#file-list', '#empty-state']) {
     const area = $(selector);
@@ -5076,7 +5515,7 @@ function hasFileDrag(event) {
 
 /* ---------- Desktop app updates ---------- */
 
-const UPDATE_SKIP_KEY = 'agentgod.skipped-update';
+const UPDATE_SKIP_KEY = 'rockbadger.skipped-update';
 let updateCheckBusy = false;
 let updatePollTimer = null;
 let updateInfo = null;
@@ -5158,7 +5597,7 @@ async function checkForAppUpdate(force = false) {
 }
 
 function showUpdatePanel(info) {
-  $('#update-title').textContent = `AgentGod Files v${info.latest_version} 已发布`;
+  $('#update-title').textContent = `RockBadger v${info.latest_version} 已发布`;
   $('#update-summary').textContent = `当前 v${info.current_version} · ${updatePlatformLabel(info)}`;
   const unsupportedPlatform = info.platform && info.platform !== 'macos';
   $('#update-asset').textContent = info.asset
@@ -5254,6 +5693,7 @@ async function restartAfterUpdate() {
 
 document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
+  watchSystemTheme();
   document.addEventListener('keydown', handlePreviewKeys);
   document.addEventListener('keydown', handleFileShortcuts);
   void boot();

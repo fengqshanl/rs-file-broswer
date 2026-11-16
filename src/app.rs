@@ -21,6 +21,38 @@ pub struct RootEntry {
     pub path: String,
 }
 
+/// Canonical key used to compare roots without `\\?\` prefixes or Windows
+/// case/separator differences.
+fn path_key(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut text = canonical.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/") {
+        text = rest.to_string();
+    }
+    #[cfg(windows)]
+    text.make_ascii_lowercase();
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn push_root(roots: &mut Vec<RootEntry>, name: String, path: PathBuf) {
+    let key = path_key(&path);
+    if roots
+        .iter()
+        .any(|entry| path_key(Path::new(&entry.path)) == key)
+    {
+        return;
+    }
+    roots.push(RootEntry {
+        name,
+        path: path.display().to_string(),
+    });
+}
+
 /// Roots offered by the desktop "local" companion: the user's home, the
 /// filesystem root (or every drive on Windows), and the current root if it is
 /// not one of those.
@@ -28,10 +60,7 @@ pub fn local_roots(current: &Path) -> Vec<RootEntry> {
     let mut roots = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        roots.push(RootEntry {
-            name: "主目录".to_string(),
-            path: home.display().to_string(),
-        });
+        push_root(&mut roots, "主目录".to_string(), home);
     }
 
     #[cfg(windows)]
@@ -39,29 +68,46 @@ pub fn local_roots(current: &Path) -> Vec<RootEntry> {
         for letter in b'C'..=b'Z' {
             let path = format!("{}:\\", letter as char);
             if Path::new(&path).exists() {
-                roots.push(RootEntry {
-                    name: format!("{}: 盘", letter as char),
-                    path,
-                });
+                push_root(
+                    &mut roots,
+                    format!("{}: 盘", letter as char),
+                    PathBuf::from(path),
+                );
             }
         }
     }
     #[cfg(not(windows))]
     {
-        roots.push(RootEntry {
-            name: "根目录".to_string(),
-            path: "/".to_string(),
-        });
+        push_root(&mut roots, "根目录".to_string(), PathBuf::from("/"));
     }
 
-    if !roots.iter().any(|entry| Path::new(&entry.path) == current) {
-        roots.push(RootEntry {
-            name: current.display().to_string(),
-            path: current.display().to_string(),
-        });
-    }
+    push_root(
+        &mut roots,
+        current.display().to_string(),
+        current.to_path_buf(),
+    );
 
     roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roots_are_unique_and_include_the_current_root() {
+        let current = std::env::current_dir().expect("cwd");
+        let roots = local_roots(&current);
+        let keys: Vec<String> = roots
+            .iter()
+            .map(|entry| path_key(Path::new(&entry.path)))
+            .collect();
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(keys.len(), unique.len(), "duplicate roots: {keys:?}");
+        assert!(keys.contains(&path_key(&current)));
+    }
 }
 
 pub async fn info(State(state): State<Arc<AppState>>) -> Response {

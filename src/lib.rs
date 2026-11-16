@@ -1,4 +1,4 @@
-//! AgentGod Files: encrypted self-hosted file server plus reusable building
+//! RockBadger: encrypted self-hosted file server plus reusable building
 //! blocks for the desktop companions (local mode, embedded HTTP service).
 
 pub mod api;

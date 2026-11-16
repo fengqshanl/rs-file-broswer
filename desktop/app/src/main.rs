@@ -2,13 +2,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use agentgod_desktop_common::{
-    data_dir, start_with_updater, AutoInstaller, InstallStatus, UpdateSource,
+use rockbadger_desktop_common::{
+    prepare_data_dir, start_with_updater, AutoInstaller, InstallStatus, UpdateSource,
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
 
 fn main() {
+    // Import the 0.2.x profile before the updater endpoints are read, so a
+    // mirror configured for the old app keeps working after the rename.
+    let data_dir = prepare_data_dir().expect("无法准备数据目录");
     let status = Arc::new(Mutex::new(InstallStatus::idle()));
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -16,7 +19,7 @@ fn main() {
             // The signed updater must follow the same (possibly mirrored)
             // release source the update check uses, otherwise the manifest
             // fetch still goes to github.com and fails on blocked networks.
-            let endpoints = UpdateSource::load(&data_dir()).endpoints();
+            let endpoints = UpdateSource::load(&data_dir).endpoints();
             let installer: Arc<dyn AutoInstaller> = Arc::new(DesktopUpdater {
                 app: app.handle().clone(),
                 status: status.clone(),
@@ -28,7 +31,7 @@ fn main() {
             // owns the state now instead of leaking a Box into the heap.
             app.manage(Arc::new(runtime));
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("AgentGod Files")
+                .title("岩獾 RockBadger")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
                 .disable_drag_drop_handler()
@@ -39,13 +42,13 @@ fn main() {
                 .on_download(|_webview, event| {
                     match event {
                         tauri::webview::DownloadEvent::Requested { url, destination } => {
-                            agentgod_files::error::log(&format!(
+                            rockbadger::error::log(&format!(
                                 "下载开始 {url} -> {}",
                                 destination.display()
                             ));
                         }
                         tauri::webview::DownloadEvent::Finished { url, path, success } => {
-                            agentgod_files::error::log(&format!(
+                            rockbadger::error::log(&format!(
                                 "下载结束 {url}: success={success} path={}",
                                 path.map(|value| value.display().to_string())
                                     .unwrap_or_default()
@@ -59,7 +62,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("AgentGod Files 启动失败");
+        .expect("RockBadger 启动失败");
 }
 
 fn set_status(

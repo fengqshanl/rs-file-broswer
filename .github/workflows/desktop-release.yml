@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "desktop-v*"
+      - "rockbadger-v*"
 
 permissions:
   contents: write
@@ -61,7 +61,7 @@ jobs:
           SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -uo pipefail
-          key_path="${RUNNER_TEMP}/agentgod-updater.key"
+          key_path="${RUNNER_TEMP}/rockbadger-updater.key"
 
           material_line="$(node scripts/normalize-updater-key.mjs --classify)"
           material="${material_line%% *}"
@@ -81,7 +81,7 @@ jobs:
           echo "::notice::使用 ${cli_version}"
 
           preflight="${RUNNER_TEMP}/preflight.bin"
-          printf 'agentgod updater signing preflight\n' > "$preflight"
+          printf 'rockbadger updater signing preflight\n' > "$preflight"
           sign_log="${RUNNER_TEMP}/updater-sign.log"
           if ! npx --yes @tauri-apps/cli@2 signer sign \
                 --private-key-path "$key_path" \
@@ -106,11 +106,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tag="desktop-v${VERSION}"
+          tag="rockbadger-v${VERSION}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
               --target "$GITHUB_SHA" \
-              --title "AgentGod Files 桌面版 v${VERSION}" \
+              --title "岩獾 RockBadger 桌面版 v${VERSION}" \
               --notes-file .github/desktop-release-notes.md
           fi
           gh release view "$tag" --json databaseId --jq .databaseId
@@ -155,13 +155,13 @@ jobs:
           SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          key_path="${RUNNER_TEMP}/agentgod-updater.key"
+          key_path="${RUNNER_TEMP}/rockbadger-updater.key"
           node scripts/normalize-updater-key.mjs "$key_path"
           echo "TAURI_SIGNING_PRIVATE_KEY=$key_path" >> "$GITHUB_ENV"
           {
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<AGENTGOD_EOF"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<ROCKBADGER_EOF"
             printf '%s\n' "${SIGNING_PASSWORD:-}"
-            echo "AGENTGOD_EOF"
+            echo "ROCKBADGER_EOF"
           } >> "$GITHUB_ENV"
 
       # MSI is the only published installer. Tauri emits `<name>.msi.sig` when
@@ -198,9 +198,9 @@ jobs:
             echo "::error::没有找到 Windows 安装包（$msi_dir）"
             exit 1
           fi
-          upload="${RUNNER_TEMP}/AgentGod.Files_${VERSION}_x64.msi"
+          upload="${RUNNER_TEMP}/RockBadger_${VERSION}_x64.msi"
           cp "$msi" "$upload"
-          gh release upload "desktop-v${VERSION}" "$upload" --clobber
+          gh release upload "rockbadger-v${VERSION}" "$upload" --clobber
           echo "::notice::uploaded $(basename "$upload")"
 
       # Verify the exact bytes users will download against the pubkey compiled
@@ -222,9 +222,9 @@ jobs:
           fi
           node scripts/verify-updater-signature.mjs "$bundle" "${bundle}.sig" "${app_dir}/tauri.conf.json"
 
-          upload="${RUNNER_TEMP}/AgentGod.Files_${VERSION}_x64.msi"
+          upload="${RUNNER_TEMP}/RockBadger_${VERSION}_x64.msi"
           cp "${bundle}.sig" "${upload}.sig"
-          gh release upload "desktop-v${VERSION}" "${upload}.sig" --clobber
+          gh release upload "rockbadger-v${VERSION}" "${upload}.sig" --clobber
           echo "::notice::uploaded $(basename "$upload").sig"
 
   manifest:
@@ -243,7 +243,7 @@ jobs:
       - name: Publish updater manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: desktop-v${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: rockbadger-v${{ needs.prepare.outputs.version }}
           EXPECT_SIGNED: ${{ needs.prepare.outputs.signing == 'true' && '1' || '0' }}
         run: |
           set -euo pipefail

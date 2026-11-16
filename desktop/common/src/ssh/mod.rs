@@ -4,6 +4,10 @@
 //! identical to the local service, so the companion's proxy and the whole
 //! frontend work unchanged.
 
+// `SshError` carries a user-facing message plus optional host-key details; it
+// is matched directly at call sites, so boxing it would only add noise.
+#![allow(clippy::result_large_err)]
+
 pub mod connect;
 pub mod fs;
 pub mod service;

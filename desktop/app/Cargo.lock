@@ -81,67 +81,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentgod-desktop-common"
-version = "0.2.2"
-dependencies = [
- "aes-gcm 0.10.3",
- "agentgod-files",
- "anyhow",
- "axum",
- "base64 0.22.1",
- "dashmap",
- "dirs 5.0.1",
- "futures-util",
- "keyring",
- "rand 0.8.8",
- "reqwest 0.12.28",
- "russh",
- "russh-sftp",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "agentgod-files"
-version = "0.2.2"
-dependencies = [
- "aes-gcm 0.10.3",
- "anyhow",
- "argon2 0.5.3",
- "axum",
- "axum-server",
- "base64 0.22.1",
- "bytes",
- "dashmap",
- "dirs 5.0.1",
- "fs2",
- "futures-util",
- "rand 0.8.8",
- "rcgen",
- "rsa 0.9.10",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "time",
- "tokio",
-]
-
-[[package]]
-name = "agentgod-files-app"
-version = "0.2.2"
-dependencies = [
- "agentgod-desktop-common",
- "agentgod-files",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-updater",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4183,6 +4122,67 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rockbadger"
+version = "0.3.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "anyhow",
+ "argon2 0.5.3",
+ "axum",
+ "axum-server",
+ "base64 0.22.1",
+ "bytes",
+ "dashmap",
+ "dirs 5.0.1",
+ "fs2",
+ "futures-util",
+ "rand 0.8.8",
+ "rcgen",
+ "rsa 0.9.10",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "time",
+ "tokio",
+]
+
+[[package]]
+name = "rockbadger-app"
+version = "0.3.0"
+dependencies = [
+ "rockbadger",
+ "rockbadger-desktop-common",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-updater",
+]
+
+[[package]]
+name = "rockbadger-desktop-common"
+version = "0.3.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dashmap",
+ "dirs 5.0.1",
+ "futures-util",
+ "keyring",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "rockbadger",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -94,7 +94,7 @@ const waitFor = async (expression, timeout = 20_000, label = expression) => {
 
 const pass = (label) => console.log(`PASS  ${label}`);
 const tabExists = (name) =>
-  `[...document.querySelectorAll('.workspace-tab-label')].some((node) => node.textContent === ${JSON.stringify(name)})`;
+  `[...document.querySelectorAll('#conn-menu .conn-item-name')].some((node) => node.textContent === ${JSON.stringify(name)})`;
 
 const setField = (label, value) =>
   evaluate(`(() => {
@@ -109,8 +109,12 @@ const setField = (label, value) =>
     return true;
   })()`);
 
-const openPanel = () =>
-  evaluate("document.querySelector('#btn-add-server').click(); true");
+const openPanel = async () => {
+  await evaluate("document.querySelector('#btn-add-server').click(); true");
+  await waitFor("!document.querySelector('#server-overlay').hidden", 5_000, 'panel');
+  await evaluate("document.querySelector('[data-testid=add-connection]').click(); true");
+  await waitFor("!document.querySelector('#server-panel .cm-form').hidden", 5_000, 'form');
+};
 
 const clickButton = (text) =>
   evaluate(`(() => {
@@ -121,8 +125,17 @@ const clickButton = (text) =>
     return true;
   })()`);
 
+const openItem = (name) =>
+  evaluate(`(() => {
+    const item = [...document.querySelectorAll('#server-panel [data-testid=connection-item]')]
+      .find((node) => node.textContent.includes(${JSON.stringify(name)}));
+    if (!item) return false;
+    item.click();
+    return true;
+  })()`);
+
 const rowFor = (name) =>
-  `[...document.querySelectorAll('#server-panel .server-row')]
+  `[...document.querySelectorAll('#server-panel [data-testid=connection-item]')]
      .find((row) => row.textContent.includes(${JSON.stringify(name)}))`;
 
 try {
@@ -132,20 +145,17 @@ try {
     'workspace boot',
   );
   const initialTabs = await evaluate(
-    "[...document.querySelectorAll('.workspace-tab-label')].map((node) => node.textContent)",
+    "[...document.querySelectorAll('#conn-menu .conn-item-name')].map((node) => node.textContent)",
   );
   if (initialTabs.length !== 1 || initialTabs[0] !== '本机') {
     throw new Error(`SSH smoke needs a fresh profile, got ${JSON.stringify(initialTabs)}`);
   }
 
   await openPanel();
-  await waitFor("!document.querySelector('#server-overlay').hidden", 5_000, 'panel');
   const switched = await evaluate(`(() => {
-    const select = [...document.querySelectorAll('#server-panel select')]
-      .find((node) => [...node.options].some((option) => option.value === 'ssh'));
-    if (!select) return false;
-    select.value = 'ssh';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const button = document.querySelector('#server-panel [data-testid=connection-kind] [data-kind=ssh]');
+    if (!button) return false;
+    button.click();
     return true;
   })()`);
   if (!switched) throw new Error('SSH type selector missing');
@@ -185,11 +195,7 @@ try {
   }
   pass('manager lists the SSH target with kind and endpoint');
 
-  await evaluate(`(() => {
-    const row = ${rowFor(SSH_NAME)};
-    [...row.querySelectorAll('button')].find((button) => button.textContent === '编辑').click();
-    return true;
-  })()`);
+  if (!(await openItem(SSH_NAME))) throw new Error('SSH row not clickable');
   const prefill = await evaluate(`(() => {
     const value = (label) => {
       const field = [...document.querySelectorAll('#server-panel .field')]
@@ -221,11 +227,15 @@ try {
 
   await openPanel();
   await waitFor(`${rowFor(renamed)}`, 5_000, 'renamed row');
-  await evaluate(`(() => {
-    const row = ${rowFor(renamed)};
-    [...row.querySelectorAll('button')].find((button) => button.textContent === '删除').click();
-    return true;
-  })()`);
+  if (!(await openItem(renamed))) throw new Error('renamed row not clickable');
+  await waitFor(
+    "!document.querySelector('[data-testid=connection-delete]').hidden",
+    5_000,
+    'delete button',
+  );
+  await evaluate("document.querySelector('[data-testid=connection-delete]').click(); true");
+  await sleep(100);
+  await evaluate("document.querySelector('[data-testid=connection-delete]').click(); true");
   await waitFor(`!${tabExists(renamed)}`, 10_000, 'SSH tab removed');
   await waitFor("!document.querySelector('#workspace-bar').hidden", 5_000, 'local survives');
   pass('deleting the SSH target closes its tab');

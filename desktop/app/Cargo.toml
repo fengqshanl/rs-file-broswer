@@ -1,16 +1,20 @@
 [package]
-name = "agentgod-files-app"
-version = "0.2.2"
+name = "rockbadger-app"
+version = "0.3.0"
 edition = "2021"
-description = "AgentGod Files desktop app: local files, AgentGod servers and SSH hosts in one window"
+description = "RockBadger desktop app: local files, RockBadger servers and SSH hosts in one window"
 license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-agentgod-desktop-common = { path = "../common" }
-agentgod-files = { path = "../.." }
+rockbadger-desktop-common = { path = "../common" }
+rockbadger = { path = "../.." }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-updater = "2"
+
+[[bin]]
+name = "rockbadger"
+path = "src/main.rs"

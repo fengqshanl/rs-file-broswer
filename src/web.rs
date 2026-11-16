@@ -21,10 +21,7 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'
 pub fn router(state: Arc<AppState>) -> Router {
     let local_mode = state.cfg.local_mode;
     let router = Router::new()
-        .route("/", get(index))
-        .route("/app.js", get(app_js))
-        .route("/style.css", get(style_css))
-        .route("/favicon.svg", get(favicon))
+        .route("/", get(api_only_notice))
         .route("/healthz", get(health))
         .route("/app/info", get(app::info))
         .route("/app/local/root", post(app::set_root))
@@ -43,8 +40,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/download", post(files::download))
         .route("/api/download_folder", post(files::download_folder))
         .route("/api/preview/stream", post(preview::stream))
-        .route("/vendor/mammoth.js", get(mammoth_js))
-        .route("/vendor/xlsx.js", get(xlsx_js))
         .route("/api/upload/init", post(files::upload_init))
         .route("/api/upload/chunk/{id}/{seq}", put(files::upload_chunk))
         .route("/api/upload/finish", post(files::upload_finish))
@@ -185,6 +180,17 @@ pub async fn app_js() -> Response {
     )
 }
 
+/// Tiny synchronous script loaded before the stylesheet. It applies the saved
+/// (or system) theme before first paint. Kept external because the CSP only
+/// allows `script-src 'self'`.
+pub async fn theme_init_js() -> Response {
+    asset(
+        include_str!("../static/theme-init.js"),
+        "application/javascript; charset=utf-8",
+        "no-cache",
+    )
+}
+
 pub async fn style_css() -> Response {
     asset(
         include_str!("../static/style.css"),
@@ -219,6 +225,15 @@ pub async fn xlsx_js() -> Response {
 
 async fn health() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "ok")
+}
+
+/// The standalone server is API-only: the UI ships inside the desktop app.
+async fn api_only_notice() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "RockBadger 服务端已改为纯 API。\n请使用 RockBadger 桌面 App 的「添加连接」连接此地址。\n健康检查：/healthz\n",
+    )
 }
 
 #[cfg(test)]

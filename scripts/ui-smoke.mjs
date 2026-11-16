@@ -13,14 +13,17 @@ const DEBUG_URL = (process.env.CHROME_DEBUG_URL || 'http://127.0.0.1:9223').repl
 const PAGE_URL = process.env.UI_URL || 'https://127.0.0.1:18443/';
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/tmp/agentgod-ui-downloads';
-const TEST_VIDEO = process.env.TEST_VIDEO_PATH || '/tmp/agentgod-ui-test.webm';
+// The desktop front opens the local target without a login form; set UI_LOCAL=1
+// when pointing this test at `dev_app` (the standalone server is API-only now).
+const LOCAL_MODE = process.env.UI_LOCAL === '1';
+const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/tmp/rockbadger-ui-downloads';
+const TEST_VIDEO = process.env.TEST_VIDEO_PATH || '/tmp/rockbadger-ui-test.webm';
 
 import { readdir, rm, stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 
-if (!ADMIN_PASSWORD) {
-  console.error('ADMIN_PASSWORD is required');
+if (!LOCAL_MODE && !ADMIN_PASSWORD) {
+  console.error('ADMIN_PASSWORD is required (or set UI_LOCAL=1 for dev_app)');
   process.exit(2);
 }
 
@@ -186,11 +189,20 @@ async function main() {
   };
 
   await send('Page.navigate', { url: PAGE_URL });
-  await waitFor(
-    "document.readyState === 'complete' && !!document.querySelector('#login-form')",
-    15_000,
-    'login page',
-  );
+  if (LOCAL_MODE) {
+    await waitFor(
+      "document.readyState === 'complete' && !!document.querySelector('#app-view') && !document.querySelector('#app-view').hidden",
+      20_000,
+      'local workspace',
+    );
+    console.log('PASS  local workspace opened without login');
+  } else {
+    await waitFor(
+      "document.readyState === 'complete' && !!document.querySelector('#login-form')",
+      15_000,
+      'login page',
+    );
+  }
 
   const secure = await evaluate(
     "typeof crypto.subtle === 'object' && typeof crypto.getRandomValues === 'function'",
@@ -202,21 +214,23 @@ async function main() {
   if (cspErrors.length) throw new Error(`CSP violations: ${cspErrors.join(' | ')}`);
   console.log('PASS  no CSP violations');
 
-  await evaluate(`(() => {
-    document.querySelector('#username').value = ${JSON.stringify(ADMIN_USER)};
-    document.querySelector('#password').value = ${JSON.stringify(ADMIN_PASSWORD)};
-    document.querySelector('#login-btn').click();
-    return true;
-  })()`);
+  if (!LOCAL_MODE) {
+    await evaluate(`(() => {
+      document.querySelector('#username').value = ${JSON.stringify(ADMIN_USER)};
+      document.querySelector('#password').value = ${JSON.stringify(ADMIN_PASSWORD)};
+      document.querySelector('#login-btn').click();
+      return true;
+    })()`);
 
-  await waitFor(
-    "!document.querySelector('#app-view').hidden && document.querySelector('#login-view').hidden",
-    15_000,
-    'login to finish',
-  );
-  const badge = await evaluate("document.querySelector('#user-badge').textContent");
-  if (!badge.includes(ADMIN_USER)) throw new Error(`unexpected user badge: ${badge}`);
-  console.log(`PASS  UI login and directory load (user=${badge})`);
+    await waitFor(
+      "!document.querySelector('#app-view').hidden && document.querySelector('#login-view').hidden",
+      15_000,
+      'login to finish',
+    );
+    const badge = await evaluate("document.querySelector('#user-badge').textContent");
+    if (!badge.includes(ADMIN_USER)) throw new Error(`unexpected user badge: ${badge}`);
+    console.log(`PASS  UI login and directory load (user=${badge})`);
+  }
 
   const folder = `ui-smoke-${Date.now()}`;
   await evaluate("document.querySelector('#btn-mkdir').click()");
@@ -581,7 +595,7 @@ async function main() {
 
   /* ---------- preview: Word (.docx) and Excel (.xlsx) ---------- */
 
-  const docxBase64 = buildDocx('AgentGod Word 预览测试').toString('base64');
+  const docxBase64 = buildDocx('RockBadger Word 预览测试').toString('base64');
   await evaluate(`(() => {
     const bytes = Uint8Array.from(atob(${JSON.stringify(docxBase64)}), (c) => c.charCodeAt(0));
     enqueueUploads(
@@ -597,7 +611,7 @@ async function main() {
   );
   await evaluate("openPreview({ name: 'ui-doc.docx', size: 2048, modified: Date.now(), is_dir: false }); true");
   await waitFor(
-    "!!document.querySelector('.preview-docx') && document.querySelector('.preview-docx').textContent.includes('AgentGod Word 预览测试')",
+    "!!document.querySelector('.preview-docx') && document.querySelector('.preview-docx').textContent.includes('RockBadger Word 预览测试')",
     30_000,
     'docx preview content',
   );
@@ -659,44 +673,48 @@ async function main() {
 
   const changedUser = `${ADMIN_USER}_ui`;
   const changedPassword = 'ui-test-password-123';
-  try {
-    await evaluate("document.querySelector('#btn-account').click(); true");
-    await waitFor("document.querySelectorAll('#modal input').length === 4", 10_000, 'account dialog');
-    await evaluate(`(() => {
-      const inputs = [...document.querySelectorAll('#modal input')];
-      inputs[0].value = ${JSON.stringify(ADMIN_PASSWORD)};
-      inputs[1].value = ${JSON.stringify(changedUser)};
-      inputs[2].value = ${JSON.stringify(changedPassword)};
-      inputs[3].value = ${JSON.stringify(changedPassword)};
-      [...document.querySelectorAll('#modal .modal-actions button')].pop().click();
-      return true;
-    })()`);
-    await waitFor(
-      `document.querySelector('#user-badge').textContent === ${JSON.stringify(changedUser)}`,
-      20_000,
-      'username badge after update',
-    );
-    console.log('PASS  account dialog changes username and password');
-  } finally {
-    const restored = await evaluate(`(async () => {
-      const attempts = [
-        { current_password: ${JSON.stringify(changedPassword)}, new_username: ${JSON.stringify(ADMIN_USER)}, new_password: ${JSON.stringify(ADMIN_PASSWORD)} },
-        { current_password: ${JSON.stringify(ADMIN_PASSWORD)}, new_username: ${JSON.stringify(ADMIN_USER)}, new_password: '' },
-      ];
-      for (const payload of attempts) {
-        try {
-          await api('/api/account/update', payload);
-          const tab = activeTab();
-          if (tab.session) tab.session.user = ${JSON.stringify(ADMIN_USER)};
-          document.querySelector('#user-badge').textContent = ${JSON.stringify(ADMIN_USER)};
-          return true;
-        } catch {
-          /* try the next credential pair */
+  if (!LOCAL_MODE) {
+    try {
+      await evaluate("document.querySelector('#btn-account').click(); true");
+      await waitFor("document.querySelectorAll('#modal input').length === 4", 10_000, 'account dialog');
+      await evaluate(`(() => {
+        const inputs = [...document.querySelectorAll('#modal input')];
+        inputs[0].value = ${JSON.stringify(ADMIN_PASSWORD)};
+        inputs[1].value = ${JSON.stringify(changedUser)};
+        inputs[2].value = ${JSON.stringify(changedPassword)};
+        inputs[3].value = ${JSON.stringify(changedPassword)};
+        [...document.querySelectorAll('#modal .modal-actions button')].pop().click();
+        return true;
+      })()`);
+      await waitFor(
+        `document.querySelector('#user-badge').textContent === ${JSON.stringify(changedUser)}`,
+        20_000,
+        'username badge after update',
+      );
+      console.log('PASS  account dialog changes username and password');
+    } finally {
+      const restored = await evaluate(`(async () => {
+        const attempts = [
+          { current_password: ${JSON.stringify(changedPassword)}, new_username: ${JSON.stringify(ADMIN_USER)}, new_password: ${JSON.stringify(ADMIN_PASSWORD)} },
+          { current_password: ${JSON.stringify(ADMIN_PASSWORD)}, new_username: ${JSON.stringify(ADMIN_USER)}, new_password: '' },
+        ];
+        for (const payload of attempts) {
+          try {
+            await api('/api/account/update', payload);
+            const tab = activeTab();
+            if (tab.session) tab.session.user = ${JSON.stringify(ADMIN_USER)};
+            document.querySelector('#user-badge').textContent = ${JSON.stringify(ADMIN_USER)};
+            return true;
+          } catch {
+            /* try the next credential pair */
+          }
         }
-      }
-      return false;
-    })()`);
-    if (!restored) throw new Error('failed to restore original credentials');
+        return false;
+      })()`);
+      if (!restored) throw new Error('failed to restore original credentials');
+    }
+  } else {
+    console.log('SKIP  account dialog (local mode has no server credentials)');
   }
 
   const cleanup = await evaluate(`Promise.all([

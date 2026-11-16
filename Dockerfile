@@ -21,11 +21,11 @@ FROM ${ALPINE_IMAGE}
 # ca-certificates is only used by the busybox-wget container healthcheck.
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /build/target/release/agentgod-files /usr/local/bin/agentgod-files
+COPY --from=builder /build/target/release/rockbadger /usr/local/bin/rockbadger
 
 # Runs as root on purpose: the mounted host data tree is root-owned and the
 # service exists to manage those files. Compose drops every capability except
 # the two file-access ones and applies memory/CPU/PID limits.
 WORKDIR /data
 EXPOSE 8090
-ENTRYPOINT ["/usr/local/bin/agentgod-files"]
+ENTRYPOINT ["/usr/local/bin/rockbadger"]

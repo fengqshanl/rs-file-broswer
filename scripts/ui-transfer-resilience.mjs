@@ -20,9 +20,12 @@ const DEBUG_URL = (process.env.CHROME_DEBUG_URL || 'http://127.0.0.1:9223').repl
 const PAGE_URL = process.env.UI_URL || 'https://127.0.0.1:18443/';
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+// Point this at the desktop front (`dev_app`) with UI_LOCAL=1; the local target
+// signs in automatically and the standalone server no longer serves a UI.
+const LOCAL_MODE = process.env.UI_LOCAL === '1';
 
-if (!ADMIN_PASSWORD) {
-  console.error('ADMIN_PASSWORD is required');
+if (!LOCAL_MODE && !ADMIN_PASSWORD) {
+  console.error('ADMIN_PASSWORD is required (or set UI_LOCAL=1 for dev_app)');
   process.exit(2);
 }
 
@@ -124,15 +127,24 @@ const itemText = (name) =>
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Page.navigate', { url: PAGE_URL });
-await waitFor("document.readyState === 'complete' && !!document.querySelector('#login-form')", 15_000, 'login page');
-await evaluate(`(() => {
-  document.querySelector('#username').value = ${JSON.stringify(ADMIN_USER)};
-  document.querySelector('#password').value = ${JSON.stringify(ADMIN_PASSWORD)};
-  document.querySelector('#login-btn').click();
-  return true;
-})()`);
-await waitFor("!document.querySelector('#app-view').hidden", 15_000, 'login');
-console.log('PASS  UI login');
+if (LOCAL_MODE) {
+  await waitFor(
+    "document.readyState === 'complete' && !!document.querySelector('#app-view') && !document.querySelector('#app-view').hidden",
+    20_000,
+    'local workspace',
+  );
+  console.log('PASS  local workspace opened without login');
+} else {
+  await waitFor("document.readyState === 'complete' && !!document.querySelector('#login-form')", 15_000, 'login page');
+  await evaluate(`(() => {
+    document.querySelector('#username').value = ${JSON.stringify(ADMIN_USER)};
+    document.querySelector('#password').value = ${JSON.stringify(ADMIN_PASSWORD)};
+    document.querySelector('#login-btn').click();
+    return true;
+  })()`);
+  await waitFor("!document.querySelector('#app-view').hidden", 15_000, 'login');
+  console.log('PASS  UI login');
+}
 
 await send('Fetch.enable', {
   patterns: [{ urlPattern: '*api/upload/chunk*', requestStage: 'Request' }],

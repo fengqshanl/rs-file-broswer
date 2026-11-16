@@ -6,15 +6,15 @@
  * path), per-tab encrypted login, remote previews, cross-tab copy/move, second
  * server removal and reload behaviour. Run it against `dev_app`:
  *
- *   AGENTGOD_DATA_DIR=/tmp/agentgod-tabs-data \
- *     AGENTGOD_LOCAL_ROOT=/tmp/agentgod-tabs-home \
- *     AGENTGOD_MEMORY_SECRETS=1 \
+ *   ROCKBADGER_DATA_DIR=/tmp/rockbadger-tabs-data \
+ *     ROCKBADGER_LOCAL_ROOT=/tmp/rockbadger-tabs-home \
+ *     ROCKBADGER_MEMORY_SECRETS=1 \
  *     ./desktop/common/target/release/dev_app
  *
  *   FRONT_URL=http://127.0.0.1:<printed-port>/ \
  *   REMOTE_URL=https://127.0.0.1:18443 \
  *   REMOTE_USER=admin REMOTE_PASS=... \
- *   LOCAL_DIR=/tmp/agentgod-tabs-home \
+ *   LOCAL_DIR=/tmp/rockbadger-tabs-home \
  *   CHROME_DEBUG_URL=http://127.0.0.1:9223 \
  *   node scripts/ui-tabs.mjs
  *
@@ -124,17 +124,19 @@ const waitFor = async (expression, timeout = 20_000, label = expression) => {
 const pass = (label) => console.log(`PASS  ${label}`);
 
 const tabExpression = (name) =>
-  `[...document.querySelectorAll('.workspace-tab')].find((node) => node.textContent.trim() === ${JSON.stringify(name)})`;
+  `[...document.querySelectorAll('#conn-menu .conn-item')].find((node) => node.querySelector('.conn-item-name')?.textContent === ${JSON.stringify(name)})`;
 
 const clickTab = async (name) => {
   const clicked = await evaluate(`(() => {
+    const menu = document.querySelector('#conn-menu');
+    if (menu.hidden) document.querySelector('#conn-trigger').click();
     const tab = ${tabExpression(name)};
     if (!tab) return false;
     tab.click();
     return true;
   })()`);
   if (!clicked) throw new Error(`tab not found: ${name}`);
-  await sleep(200);
+  await sleep(250);
 };
 
 const rowAction = async (name, title) => {
@@ -182,8 +184,13 @@ try {
     20_000,
     'workspace boot',
   );
+  await waitFor(
+    "!document.querySelector('#app-view').hidden",
+    20_000,
+    'local workspace ready',
+  );
   const boot = await evaluate(`({
-    tabs: [...document.querySelectorAll('.workspace-tab-label')].map((node) => node.textContent),
+    tabs: [...document.querySelectorAll('#conn-menu .conn-item-name')].map((node) => node.textContent),
     appHidden: document.querySelector('#app-view').hidden,
     addVisible: !!document.querySelector('#btn-add-server') && !document.querySelector('#btn-add-server').hidden,
   })`);
@@ -195,10 +202,12 @@ try {
 
   await evaluate("document.querySelector('#btn-add-server').click(); true");
   await waitFor(
-    "!document.querySelector('#server-overlay').hidden && !!document.querySelector('#server-panel .server-form')",
+    "!document.querySelector('#server-overlay').hidden && !!document.querySelector('#server-panel .cm')",
     5_000,
     'add-server panel',
   );
+  await evaluate("document.querySelector('[data-testid=add-connection]').click(); true");
+  await waitFor("!document.querySelector('#server-panel .cm-form').hidden", 5_000, 'connection form');
   pass('add-server panel opens without blocking');
 
   await evaluate(`(() => {
@@ -207,13 +216,13 @@ try {
     inputs[1].value = ${JSON.stringify(REMOTE_URL)};
     const box = document.querySelector('#server-panel input[type=checkbox]');
     if (box) box.checked = true;
-    [...document.querySelectorAll('#server-panel .server-form button')]
+    [...document.querySelectorAll('#server-panel .cm-form button')]
       .find((button) => button.textContent === '添加服务器')
       .click();
     return true;
   })()`);
   await waitFor(
-    `[...document.querySelectorAll('.workspace-tab-label')].some((node) => node.textContent === ${JSON.stringify(serverName)})`,
+    `[...document.querySelectorAll('#conn-menu .conn-item-name')].some((node) => node.textContent === ${JSON.stringify(serverName)})`,
     10_000,
     'remote tab',
   );
@@ -266,7 +275,7 @@ try {
   pass('remote encrypted preview');
 
   await clickTab('本机');
-  await evaluate("loadDir('/', { tab: activeTab() }); true");
+  await evaluate("(async () => { await loadDir(\"/\", { tab: activeTab() }); return true; })()");
   await waitRow(localFile, 10_000);
   if (!(await rowAction(localFile, '复制'))) throw new Error('local copy button missing');
   await clickTab(serverName);
@@ -284,7 +293,7 @@ try {
   pass('copy local file to remote, content verified');
 
   await clickTab(serverName);
-  await evaluate("loadDir('/', { tab: activeTab() }); true");
+  await evaluate("(async () => { await loadDir(\"/\", { tab: activeTab() }); return true; })()");
   await waitRow(remoteFolder, 15_000);
   if (!(await rowAction(remoteFolder, '复制'))) throw new Error('remote folder copy button missing');
   await clickTab('本机');
@@ -297,7 +306,7 @@ try {
   pass('copy remote folder to local recursively');
 
   await clickTab(serverName);
-  await evaluate("loadDir('/', { tab: activeTab() }); true");
+  await evaluate("(async () => { await loadDir(\"/\", { tab: activeTab() }); return true; })()");
   await waitRow(remoteTop, 15_000);
   if (!(await rowAction(remoteTop, '剪切'))) throw new Error('remote cut button missing');
   await clickTab('本机');
@@ -322,13 +331,13 @@ try {
     inputs[0].value = ${JSON.stringify(secondServerName)};
     inputs[1].value = ${JSON.stringify(REMOTE_URL)};
     document.querySelector('#server-panel input[type=checkbox]').checked = true;
-    [...document.querySelectorAll('#server-panel .server-form button')]
+    [...document.querySelectorAll('#server-panel .cm-form button')]
       .find((button) => button.textContent === '添加服务器')
       .click();
     return true;
   })()`);
   await waitFor(
-    `[...document.querySelectorAll('.workspace-tab-label')].some((node) => node.textContent === ${JSON.stringify(secondServerName)})`,
+    `[...document.querySelectorAll('#conn-menu .conn-item-name')].some((node) => node.textContent === ${JSON.stringify(secondServerName)})`,
     10_000,
     'second server tab',
   );
@@ -336,18 +345,26 @@ try {
 
   await evaluate("document.querySelector('#btn-add-server').click(); true");
   await waitFor(
-    `[...document.querySelectorAll('#server-panel .server-row')].some((row) => row.textContent.includes(${JSON.stringify(secondServerName)}))`,
+    `[...document.querySelectorAll('#server-panel [data-testid=connection-item]')].some((row) => row.textContent.includes(${JSON.stringify(secondServerName)}))`,
     5_000,
     'server list',
   );
   await evaluate(`(() => {
-    const row = [...document.querySelectorAll('#server-panel .server-row')]
+    const row = [...document.querySelectorAll('#server-panel [data-testid=connection-item]')]
       .find((node) => node.textContent.includes(${JSON.stringify(secondServerName)}));
-    [...row.querySelectorAll('button')].find((button) => button.textContent === '删除').click();
+    row.click();
     return true;
   })()`);
   await waitFor(
-    `![...document.querySelectorAll('.workspace-tab-label')].some((node) => node.textContent === ${JSON.stringify(secondServerName)})`,
+    "!document.querySelector('[data-testid=connection-delete]').hidden",
+    5_000,
+    'delete button',
+  );
+  await evaluate("document.querySelector('[data-testid=connection-delete]').click(); true");
+  await sleep(100);
+  await evaluate("document.querySelector('[data-testid=connection-delete]').click(); true");
+  await waitFor(
+    `![...document.querySelectorAll('#conn-menu .conn-item-name')].some((node) => node.textContent === ${JSON.stringify(secondServerName)})`,
     10_000,
     'second server tab removed',
   );
@@ -361,8 +378,8 @@ try {
   );
   await waitRow(localFile, 20_000);
   const afterReload = await evaluate(`({
-    tabs: [...document.querySelectorAll('.workspace-tab-label')].map((node) => node.textContent),
-    active: document.querySelector('.workspace-tab.active')?.textContent.trim(),
+    tabs: [...document.querySelectorAll('#conn-menu .conn-item-name')].map((node) => node.textContent),
+    active: document.querySelector('.conn-item.active .conn-item-name')?.textContent.trim(),
   })`);
   if (
     !afterReload.tabs.includes('本机') ||
