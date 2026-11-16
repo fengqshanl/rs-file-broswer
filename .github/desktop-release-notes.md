@@ -1,12 +1,17 @@
-# 岩獾 RockBadger 桌面版
+# RockBadger 桌面版
 
-**岩獾 RockBadger** 是一个单一桌面应用：默认展示本机文件系统；顶部操作栏的「添加连接」可添加 RockBadger 服务器（HTTPS / HTTP）或 SSH / SFTP 主机，连接下拉菜单可随时切换。
+**RockBadger** 是一个单一桌面应用：默认展示本机文件系统；顶部操作栏的「添加连接」可添加 RockBadger 服务器（HTTPS / HTTP）或 SSH / SFTP 主机，连接下拉菜单可随时切换。
 
 > **发布范围**：当前只提供 Windows x64 `.msi` 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍支持 Linux / Windows 部署。
 
+## 0.3.1 更新
+
+- 应用名称统一为 **RockBadger**：窗口标题、登录页、操作栏、更新清单与 Release 标题不再带中文副名
+- 功能与 0.3.0 一致；已安装 0.3.0 的用户可直接应用内更新
+
 ## 0.3.0 更新
 
-- **品牌改名**：AgentGod Files → **岩獾 RockBadger**（进程名 `rockbadger.exe`、应用标识 `com.rockbadger.files`、数据目录 `%APPDATA%\RockBadger`）
+- **品牌改名**：AgentGod Files → **RockBadger**（进程名 `rockbadger.exe`、应用标识 `com.rockbadger.files`、数据目录 `%APPDATA%\RockBadger`）
 - **升级说明**：应用标识与 UpgradeCode 已变化，0.2.x 无法覆盖安装或应用内升级。请先安装 RockBadger，确认本机/服务器/SSH 连接与凭据已自动迁移，再从「应用和功能」手动卸载 AgentGod Files；旧数据目录与系统凭据会保留作备份
 - 首次启动自动迁移旧 `%APPDATA%\AgentGodFiles` 中的 `targets.json`、`known_hosts.json`、`update-source.json` 与设置；SSH 密码/私钥口令从旧凭据库逐条复制，旧条目不删除
 - 顶部改为统一操作栏：品牌、连接下拉（本机 / 服务器 / SSH）、位置选择、显示隐藏文件、主题切换、检查更新、版本与「添加连接」集中在一行

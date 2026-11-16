@@ -141,7 +141,7 @@ export async function buildManifest(release, tag, outputDir) {
   }
   const manifest = {
     version,
-    notes: `岩獾 RockBadger 桌面版 v${version}`,
+    notes: `RockBadger 桌面版 v${version}`,
     pub_date: release.published_at || new Date().toISOString(),
     platforms,
   };

@@ -110,7 +110,7 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
               --target "$GITHUB_SHA" \
-              --title "岩獾 RockBadger 桌面版 v${VERSION}" \
+              --title "RockBadger 桌面版 v${VERSION}" \
               --notes-file .github/desktop-release-notes.md
           fi
           gh release view "$tag" --json databaseId --jq .databaseId

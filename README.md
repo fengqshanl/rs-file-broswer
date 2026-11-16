@@ -1,4 +1,4 @@
-# 岩獾 RockBadger
+# RockBadger
 
 一个用 Rust 编写的轻量级自托管文件服务器：单二进制、低内存占用，面向低功耗设备（ARM64 单板机、NAS、旧笔记本）设计。自带加密登录、应用层加密传输、在线预览、带宽与并发保护，用 Docker 一条命令即可部署；同时提供 Windows 桌面应用（macOS / Linux 桌面端暂不发布）。
 
@@ -60,12 +60,12 @@
 
 > 当前只发布 Windows x64 MSI 安装包。macOS 与 Linux 桌面端暂停发布，历史 Release 中的对应安装包已移除；服务端仍可通过 Docker 或二进制在 Linux / Windows 上运行。
 
-**岩獾 RockBadger** 将原来的 Local / Client 两个应用合并为一个：启动即浏览本机文件，顶部操作栏「添加连接」可以添加远程目标，连接下拉菜单可随时切换。
+**RockBadger** 将原来的 Local / Client 两个应用合并为一个：启动即浏览本机文件，顶部操作栏「添加连接」可以添加远程目标，连接下拉菜单可随时切换。
 
 | 目标类型 | 认证方式 | 能力 |
 | --- | --- | --- |
 | **本机** | 无需登录（仅本机回环服务） | 浏览、上传、下载、预览、重命名、删除 |
-| **岩獾 RockBadger 服务器** | 用户名 + 密码（加密会话） | 与上面相同，支持 HTTPS / HTTP 与自签名证书 |
+| **RockBadger 服务器** | 用户名 + 密码（加密会话） | 与上面相同，支持 HTTPS / HTTP 与自签名证书 |
 | **SSH / SFTP** | 密码或私钥 | 与上面相同，直接管理远程服务器文件 |
 
 安装包：
@@ -84,7 +84,7 @@ SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串�
 - 跨连接复制时，数据先按源端密钥解密，再按目标端密钥重新加密上传；源端和目标端之间的网络传输只包含密文
 - 桌面端复用与服务端相同的界面、加密登录和传输协议。伴生服务只监听本机回环地址，局域网不可访问
 
-桌面端的远程连接面向同版本 岩獾 RockBadger 服务端（HTTPS / 明文 HTTP，HTTP 仅建议用于回环或可信内网），并内置 SSH / SFTP 目标；WebDAV、SMB 等通用文件协议尚未支持。
+桌面端的远程连接面向同版本 RockBadger 服务端（HTTPS / 明文 HTTP，HTTP 仅建议用于回环或可信内网），并内置 SSH / SFTP 目标；WebDAV、SMB 等通用文件协议尚未支持。
 
 安装包未做商业代码签名：首次运行时 Windows SmartScreen 可能提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可。
 
@@ -121,7 +121,7 @@ SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串�
 
 > **从 0.1.6 升级**：0.2.0 起产品曾命名为 **AgentGod Files**，安装包标识与 UpgradeCode 均已变化，无法覆盖安装或应用内更新。请先卸载旧版 Local / Client，再安装 0.2.0 一次；旧版的 `servers-local.json` / `servers-client.json` 会在首次启动时自动合并为 `targets.json`。
 
-> **从 0.2.x 升级到 0.3.0**：产品更名为 **岩獾 RockBadger**，应用标识与 UpgradeCode 再次变化，0.2.x 无法覆盖安装或应用内升级。请先安装 0.3.0 并确认连接、主机指纹与设置已从 `%APPDATA%\AgentGodFiles` 自动迁移，再从「应用和功能」手动卸载 AgentGod Files。旧数据目录与凭据库条目会保留作备份；0.3.0 的服务端只提供 API，不再提供网页界面。
+> **从 0.2.x 升级到 0.3.x**：产品更名为 **RockBadger**，应用标识与 UpgradeCode 再次变化，0.2.x 无法覆盖安装或应用内升级。请先安装 0.3.1 并确认连接、主机指纹与设置已从 `%APPDATA%\AgentGodFiles` 自动迁移，再从「应用和功能」手动卸载 AgentGod Files。旧数据目录与凭据库条目会保留作备份；0.3.x 的服务端只提供 API，不再提供网页界面。
 
 **维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
 
@@ -385,7 +385,7 @@ desktop/common/  共享伴生运行时：回环前端、本机服务、HTTP 代�
   src/secrets.rs   系统凭据库中的 SSH 密码 / 私钥口令
   src/ssh/         SSH 连接、SFTP 文件系统、流式 tar 与逐目标回环服务
   src/update.rs    版本检查、Windows 安装包匹配、静默更新状态桥接
-desktop/app/     岩獾 RockBadger Tauri 2 应用（本机 + 服务器 + SSH）
+desktop/app/     RockBadger Tauri 2 应用（本机 + 服务器 + SSH）
 desktop/web/     打包用占位页面（真实界面由伴生服务提供）
 scripts/         Node E2E 协议测试、Chrome UI 冒烟测试、测试视频生成
   build-updater-manifest.mjs  生成单应用的签名更新清单
@@ -612,7 +612,7 @@ WebView 不支持该容器或编码（例如 H.265/HEVC、部分 MKV）。可下
 
 **桌面客户端支持哪些服务器协议？**
 
-当前支持同版本 岩獾 RockBadger 服务端的 HTTPS / HTTP 连接，每台服务器一个连接；HTTP 只建议用于本机回环或可信内网。SFTP、WebDAV、SMB、FTP 等通用协议尚未内置，不在当前版本的能力范围内。
+当前支持同版本 RockBadger 服务端的 HTTPS / HTTP 连接，每台服务器一个连接；HTTP 只建议用于本机回环或可信内网。SFTP、WebDAV、SMB、FTP 等通用协议尚未内置，不在当前版本的能力范围内。
 
 **Windows 提示「Windows 已保护你的电脑」或 SmartScreen 拦截？**
 
@@ -632,7 +632,7 @@ WebView 不支持该容器或编码（例如 H.265/HEVC、部分 MKV）。可下
 - 文件在宿主机磁盘上不额外加密存储，访问控制依赖容器与宿主机文件权限
 - 符号链接按保守策略处理：列表会解析指向并拒绝越出数据根目录的目标，删除只删除链接本身，文件夹打包跳过全部符号链接，避免把链接目标带出根目录
 - 自签名证书有效期 365 天、到期前 30 天自动轮换；运维自行放置的受信证书不会被覆盖
-- 桌面客户端目前只支持连接同版本 岩獾 RockBadger 服务端（HTTPS / HTTP），不支持 SFTP、WebDAV、SMB、FTP
+- 桌面客户端目前只支持连接同版本 RockBadger 服务端（HTTPS / HTTP），不支持 SFTP、WebDAV、SMB、FTP
 - 桌面安装包未做商业代码签名，首次安装需要手动放行
 - 0.1.2 及更早的桌面安装包没有内置更新检查，需要手动升级一次到 0.1.3 或更新版本；未配置 `TAURI_SIGNING_PRIVATE_KEY` 的发布不含静默更新包，只能下载安装包手动升级
 - 桌面本机连接按「同一台机器的本地访问即可信」设计，不设登录；多人共用电脑时请使用操作系统账户隔离

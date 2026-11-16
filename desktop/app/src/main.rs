@@ -31,7 +31,7 @@ fn main() {
             // owns the state now instead of leaking a Box into the heap.
             app.manage(Arc::new(runtime));
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("岩獾 RockBadger")
+                .title("RockBadger")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
                 .disable_drag_drop_handler()
