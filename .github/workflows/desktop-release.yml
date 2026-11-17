@@ -231,6 +231,24 @@ jobs:
           gh release upload "rockbadger-v${VERSION}" "${upload}.sig" --clobber
           echo "::notice::uploaded $(basename "$upload").sig"
 
+      # Build the updater manifest from the local MSI and signature. Reading
+      # them back through the REST releases API is impossible while the release
+      # is a draft: the Actions GITHUB_TOKEN only sees published releases.
+      - name: Build and upload updater manifest
+        if: needs.prepare.outputs.signing == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          msi_dir="desktop/app/target/release/bundle/msi"
+          bundle="$(find "$msi_dir" -maxdepth 1 -type f -name '*.msi' | sort | head -n 1)"
+          manifest="${RUNNER_TEMP}/latest.json"
+          node scripts/build-updater-manifest-local.mjs "$bundle" "${bundle}.sig" "$manifest"
+          gh release upload "rockbadger-v${VERSION}" "$manifest" --clobber
+          echo "::notice::uploaded latest.json"
+
   manifest:
     needs: [prepare, build]
     runs-on: ubuntu-latest
@@ -244,22 +262,23 @@ jobs:
       - name: Test manifest builder
         run: node scripts/build-updater-manifest.mjs --self-test
 
-      - name: Publish updater manifests
+      - name: Verify updater assets
+        if: needs.prepare.outputs.signing == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: rockbadger-v${{ needs.prepare.outputs.version }}
-          EXPECT_SIGNED: ${{ needs.prepare.outputs.signing == 'true' && '1' || '0' }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          OUTPUT_DIR=.update-manifests \
-            node scripts/build-updater-manifest.mjs
-          file=".update-manifests/latest.json"
-          if [ -f "$file" ]; then
-            gh release upload "$RELEASE_TAG" "$file" --clobber
-            echo "uploaded $(basename "$file")"
-          else
-            echo "::notice::没有签名更新包，跳过 latest.json"
-          fi
+          assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          printf '%s\n' "$assets"
+          for required in "RockBadger_${VERSION}_x64.msi" "RockBadger_${VERSION}_x64.msi.sig" "latest.json"; do
+            grep -qx "$required" <<<"$assets" || {
+              echo "::error::Release 缺少 $required"
+              exit 1
+            }
+          done
+          echo "::notice::MSI、签名与 latest.json 均已上传"
 
       # Only now is the release safe for update checks: the MSI, its signature
       # and latest.json are all attached. Until this step it stays a draft.

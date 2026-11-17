@@ -118,8 +118,11 @@ try {
     commandBarInTop:
       !!document.querySelector('#workspace-bar #btn-add-server') &&
       !!document.querySelector('#workspace-bar #btn-check-update') &&
-      !!document.querySelector('#workspace-bar #root-select') &&
+      !!document.querySelector('#root-select') &&
       !!document.querySelector('#workspace-bar #app-version'),
+    menuBarPresent:
+      document.querySelectorAll('#workspace-bar .menu-title').length >= 4 &&
+      !!document.querySelector('#workspace-bar .menu-panel'),
     appBarGone: !document.querySelector('#app-bar'),
     addVisible: !!document.querySelector('#btn-add-server'),
     updateVisible: !!document.querySelector('#btn-check-update'),
@@ -132,6 +135,7 @@ try {
   })`);
   if (
     !chrome.commandBarInTop ||
+    !chrome.menuBarPresent ||
     !chrome.appBarGone ||
     !chrome.addVisible ||
     !chrome.updateVisible ||
@@ -145,7 +149,6 @@ try {
     throw new Error(`actions column still rendered: ${JSON.stringify(chrome.columns)}`);
   }
   pass('top command bar owns add-server, update check, root select and version');
-
   await waitRow(VISIBLE_FILE);
   const hiddenBefore = await evaluate(`!!(${rowExpression(HIDDEN_FILE)})`);
   if (hiddenBefore) throw new Error('hidden file shown by default');

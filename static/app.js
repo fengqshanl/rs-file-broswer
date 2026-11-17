@@ -108,7 +108,7 @@ const state = {
   standaloneTab: null,
   clipboard: null,
   showHidden: readStoredShowHidden(),
-  themeChoice: document.documentElement.getAttribute('data-theme-choice') || 'auto',
+  themeChoice: document.documentElement.getAttribute('data-theme-choice') || 'light',
   pageSize: LIST_PAGE_SIZE,
   autoLoadPaging: true,
 };
@@ -192,6 +192,9 @@ Object.defineProperties(state, {
 
 const uploadQueue = [];
 const activeUploads = new Set();
+/// Tabs whose current listing gained entries during the running batch. The
+/// listing is refreshed once the queue drains, never after each single file.
+const uploadRefreshTabs = new Set();
 let uploadRunning = false;
 let dragDepth = 0;
 
@@ -558,6 +561,7 @@ function clearTabSession(tab) {
   tab.freeSpace = null;
   tab.loaded = false;
   tab.needsRefresh = false;
+  uploadRefreshTabs.delete(tab);
   for (let index = uploadQueue.length - 1; index >= 0; index -= 1) {
     if (uploadQueue[index].tab !== tab) continue;
     const [entry] = uploadQueue.splice(index, 1);
@@ -1891,6 +1895,14 @@ function handleFileShortcuts(event) {
   const key = event.key.toLowerCase();
   const mod = event.metaKey || event.ctrlKey;
   if (mod && !event.altKey && !event.shiftKey) {
+    if (key === 'f') {
+      const input = $('#filter');
+      if (!input) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+      return;
+    }
     if (key === 'a') {
       event.preventDefault();
       selectAllEntries(tab);
@@ -2355,7 +2367,13 @@ function enqueueUploads(input, dir, directories = [], tab = activeTab()) {
   if (!items.length && !directorySet.size) return;
 
   if (directorySet.size) {
-    void ensureDirectories(base, [...directorySet], tab);
+    // A dropped folder that only holds empty directories has no transfers at
+    // all, so nothing else would ever refresh the listing for it.
+    void ensureDirectories(base, [...directorySet], tab).then(() => {
+      if (items.length) return; // the upload batch refreshes once it drains
+      markListingTouched(tab, base);
+      if (!uploadRunning && !uploadQueue.length) void flushUploadRefreshes();
+    });
   }
 
   // Create the UI row as soon as the file is queued. Previously the row only
@@ -2474,9 +2492,45 @@ async function pumpUploads() {
         toast(message, 'error');
       }
     }
+    // A batch (one selection, a dropped folder, or several drops in a row) only
+    // touches the listing once, after the last transfer finished.
+    await flushUploadRefreshes();
   } finally {
     uploadRunning = false;
+    if (uploadQueue.length) void pumpUploads();
   }
+}
+
+/// Refresh the listings touched by the finished batch, at most once per tab.
+async function flushUploadRefreshes() {
+  if (!uploadRefreshTabs.size) return;
+  const tabs = [...uploadRefreshTabs];
+  uploadRefreshTabs.clear();
+  for (const tab of tabs) {
+    const alive = tab === state.standaloneTab || state.tabs.get(tab.id) === tab;
+    if (!alive || !tab.session) continue;
+    if (tab !== activeTab()) {
+      tab.needsRefresh = true;
+      continue;
+    }
+    try {
+      await loadDir(tab.cwd, { tab, skipHistory: true });
+    } catch {
+      tab.needsRefresh = true;
+    }
+  }
+}
+
+/// Note that `dir` (an upload or folder-creation target) changed the listing of
+/// `tab`, so the batch-end refresh reloads it once. Uploads into another folder
+/// only mark the tab dirty, so switching back reloads it lazily.
+function markListingTouched(tab, dir) {
+  const cwd = tab.cwd;
+  if (dir === cwd || dir.startsWith(`${cwd === '/' ? '' : cwd}/`)) {
+    uploadRefreshTabs.add(tab);
+    return;
+  }
+  if (tab !== activeTab()) tab.needsRefresh = true;
 }
 
 async function uploadFile(entry) {
@@ -2572,16 +2626,9 @@ async function uploadFile(entry) {
     uploadId = null;
     ui.done(result.path || file.name);
     toast(`已上传：${display || file.name}`, 'success');
-    if (tab === activeTab() && (dir === tab.cwd || dir.startsWith(`${tab.cwd === '/' ? '' : tab.cwd}/`))) {
-      // The upload already succeeded; a failed refresh must not mark it failed.
-      try {
-        await loadDir(tab.cwd, { tab });
-      } catch {
-        /* the next refresh will pick it up */
-      }
-    } else {
-      tab.needsRefresh = true;
-    }
+    // Queue a single refresh for the whole batch instead of reloading the
+    // listing after every file (a 100-file folder used to mean 100 reloads).
+    markListingTouched(tab, dir);
   } catch (error) {
     const message = entry.cancelled
       ? entry.cancelMessage || '已取消'
@@ -4170,6 +4217,281 @@ function closeConnectionMenu({ focus = false } = {}) {
   if (focus) $('#conn-trigger').focus();
 }
 
+/* ---------- Application menu bar ---------- */
+
+const BRAND_MARK_SVG =
+  '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M24 4.5 39.5 11v11.2c0 9.8-6.4 17.9-15.5 21.8C14.9 40.1 8.5 32 8.5 22.2V11Z"/>' +
+  '<path d="M17.5 18.2a1.8 1.8 0 0 1 1.8-1.8h3.8l2.4 2.6h5.2a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H19.3a1.8 1.8 0 0 1-1.8-1.8Z"/></svg>';
+
+function appMenus() {
+  return [...document.querySelectorAll('#workspace-bar .menu')];
+}
+
+function menuPanelOf(menu) {
+  return menu ? menu.querySelector('.menu-panel') : null;
+}
+
+function menusOpen() {
+  return appMenus().some((menu) => {
+    const panel = menuPanelOf(menu);
+    return Boolean(panel) && !panel.hidden;
+  });
+}
+
+function closeAppMenus({ focus = false } = {}) {
+  for (const menu of appMenus()) {
+    const panel = menuPanelOf(menu);
+    if (!panel || panel.hidden) continue;
+    panel.hidden = true;
+    menu.querySelector('.menu-title')?.setAttribute('aria-expanded', 'false');
+    if (focus) menu.querySelector('.menu-title')?.focus();
+  }
+}
+
+/// Items that forward to a real control in the chrome are greyed out whenever
+/// that control is unavailable for the current target (local disks cannot be
+/// uploaded into, passwordless targets have no account dialog, and so on).
+function syncMenuAvailability(panel) {
+  for (const item of panel.querySelectorAll('[data-invoke]')) {
+    const target = item.dataset.invoke ? document.querySelector(item.dataset.invoke) : null;
+    item.disabled = !target || target.hidden || target.disabled;
+  }
+}
+
+function menuFocusables(panel) {
+  return [...panel.querySelectorAll('.menu-item:not(:disabled), .menu-check input')];
+}
+
+function focusFirstMenuItem(panel) {
+  menuFocusables(panel)[0]?.focus();
+}
+
+function openAppMenu(menu, { focusItem = false } = {}) {
+  closeAppMenus();
+  closeConnectionMenu();
+  const panel = menuPanelOf(menu);
+  if (!panel) return;
+  syncMenuAvailability(panel);
+  panel.hidden = false;
+  menu.querySelector('.menu-title')?.setAttribute('aria-expanded', 'true');
+  if (focusItem) focusFirstMenuItem(panel);
+}
+
+function toggleAppMenu(menu) {
+  const panel = menuPanelOf(menu);
+  if (!panel) return;
+  if (panel.hidden) openAppMenu(menu);
+  else closeAppMenus();
+}
+
+function invokeChrome(selector) {
+  const target = selector ? document.querySelector(selector) : null;
+  if (!target || target.hidden || target.disabled) return;
+  target.click();
+}
+
+function runMenuAction(action) {
+  if (action === 'about') {
+    void openAboutDialog();
+    return;
+  }
+  if (action === 'shortcuts') {
+    void openShortcutDialog();
+    return;
+  }
+  if (action === 'filter') {
+    const input = $('#filter');
+    if (!input) return;
+    input.focus();
+    input.select();
+    return;
+  }
+  if (action === 'select-all') {
+    const tab = activeTab();
+    if (tab.session) selectAllEntries(tab);
+  }
+}
+
+function wireAppMenubar() {
+  const nav = $('.menubar-nav');
+  if (!nav) return;
+
+  nav.addEventListener('click', (event) => {
+    const title = event.target.closest('.menu-title');
+    if (title) {
+      if (title.dataset.action) {
+        closeAppMenus();
+        runMenuAction(title.dataset.action);
+        return;
+      }
+      toggleAppMenu(title.closest('.menu'));
+      return;
+    }
+
+    const item = event.target.closest('.menu-item');
+    if (!item) return;
+    // The theme switch and checkbox rows stay open on purpose: the user keeps
+    // seeing the state they just toggled.
+    const keepOpen = Boolean(event.target.closest('.menu-field, .menu-check'));
+    if (!keepOpen) closeAppMenus();
+    if (item.dataset.invoke) invokeChrome(item.dataset.invoke);
+    if (item.dataset.action) runMenuAction(item.dataset.action);
+  });
+
+  for (const title of nav.querySelectorAll('.menu-title')) {
+    title.addEventListener('mouseenter', () => {
+      if (!menusOpen()) return;
+      const menu = title.closest('.menu');
+      if (!menuPanelOf(menu)) {
+        closeAppMenus();
+        return;
+      }
+      if (menuPanelOf(menu).hidden) openAppMenu(menu);
+    });
+    title.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'Enter' && event.key !== ' ') return;
+      const menu = title.closest('.menu');
+      if (!menuPanelOf(menu)) return;
+      event.preventDefault();
+      openAppMenu(menu, { focusItem: true });
+    });
+  }
+
+  nav.addEventListener('keydown', (event) => {
+    const panel = event.target.closest('.menu-panel');
+    if (!panel) return;
+    const items = menuFocusables(panel);
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!items.length) return;
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[(index + step + items.length) % items.length].focus();
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      (event.key === 'Home' ? items[0] : items[items.length - 1])?.focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeAppMenus({ focus: true });
+    } else if (event.key === 'Tab') {
+      setTimeout(() => closeAppMenus(), 0);
+    }
+  });
+
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest || !event.target.closest('.menubar-nav')) closeAppMenus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && menusOpen()) closeAppMenus({ focus: true });
+  });
+  window.addEventListener('blur', () => closeAppMenus());
+}
+
+function platformLabel(platform) {
+  if (platform === 'windows') return 'Windows';
+  if (platform === 'macos') return 'macOS';
+  if (platform === 'linux') return 'Linux';
+  return platform || '未知';
+}
+
+function openAboutDialog() {
+  const info = state.app || {};
+  const tab = activeTab();
+  const version = info.version ? `v${info.version}` : '未知';
+  const desktop = info.mode === 'desktop';
+  return openModal((dialog, finish) => {
+    dialog.classList.add('about-dialog');
+    const body = div('modal-body about-body');
+
+    const head = div('about-head');
+    const mark = span('about-mark');
+    mark.innerHTML = BRAND_MARK_SVG;
+    const titleWrap = div('about-title');
+    const heading = document.createElement('h2');
+    heading.textContent = 'RockBadger';
+    const tagline = document.createElement('p');
+    tagline.className = 'about-tagline';
+    tagline.textContent = '私有文件空间 · 端到端加密的浏览与传输';
+    titleWrap.append(heading, tagline);
+    head.append(mark, titleWrap);
+
+    const meta = document.createElement('dl');
+    meta.className = 'about-meta';
+    const rows = [
+      ['版本', version],
+      ['运行方式', desktop ? '桌面版本机服务' : '独立服务器'],
+      ['当前连接', tab.target ? `${targetLabel(tab.target)}${tab.session ? '' : '（未连接）'}` : '未选择'],
+      ['传输加密', 'RSA-OAEP 登录 · AES-256-GCM'],
+    ];
+    if (desktop) rows.push(['平台', platformLabel(info.platform)]);
+    for (const [label, value] of rows) {
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const desc = document.createElement('dd');
+      desc.textContent = value;
+      meta.append(term, desc);
+    }
+
+    const note = document.createElement('p');
+    note.className = 'about-note';
+    note.textContent = '会话密钥仅保存在当前页面内存中，刷新后需要重新登录。';
+
+    const actions = div('modal-actions');
+    const check = buttonEl('检查更新', 'btn ghost');
+    check.addEventListener('click', () => {
+      finish(null);
+      $('#btn-check-update')?.click();
+    });
+    const close = buttonEl('关闭', 'btn primary');
+    close.addEventListener('click', () => finish(null));
+    actions.append(check, close);
+
+    body.append(head, meta, note, actions);
+    dialog.append(body);
+  });
+}
+
+function openShortcutDialog() {
+  const items = [
+    ['刷新当前目录', 'F5'],
+    ['重命名', 'F2'],
+    ['删除所选', 'Del'],
+    ['打开 / 进入', 'Enter'],
+    ['全选', 'Ctrl + A'],
+    ['复制 / 剪切 / 粘贴', 'Ctrl + C / X / V'],
+    ['筛选当前目录', 'Ctrl + F'],
+    ['取消选择 / 关闭菜单', 'Esc'],
+  ];
+  return openModal((dialog, finish) => {
+    dialog.classList.add('shortcut-dialog');
+    const body = div('modal-body');
+    const heading = document.createElement('h2');
+    heading.textContent = '快捷键';
+    const hint = document.createElement('p');
+    hint.className = 'modal-text';
+    hint.textContent = '列表获得焦点后可用以下快捷键操作当前目录。';
+    const list = document.createElement('div');
+    list.className = 'shortcut-list';
+    for (const [label, keys] of items) {
+      const row = div('shortcut-row');
+      const name = span('shortcut-name');
+      name.textContent = label;
+      const combo = span('shortcut-keys');
+      combo.textContent = keys;
+      row.append(name, combo);
+      list.append(row);
+    }
+    const actions = div('modal-actions');
+    const close = buttonEl('知道了', 'btn primary');
+    close.addEventListener('click', () => finish(null));
+    actions.append(close);
+    body.append(heading, hint, list, actions);
+    dialog.append(body);
+  });
+}
+
 function renderConnectionPicker() {
   const bar = $('#workspace-bar');
   if (!state.app) {
@@ -4378,7 +4700,7 @@ function writeThemeCache(choice) {
 /// backend, which is the source of truth across restarts (the desktop front
 /// binds a random port, so localStorage is not shared between launches).
 function applyTheme(choice, { persist = false } = {}) {
-  const valid = THEME_CHOICES.includes(choice) ? choice : 'auto';
+  const valid = THEME_CHOICES.includes(choice) ? choice : 'light';
   state.themeChoice = valid;
   const resolved = resolveTheme(valid);
   const root = document.documentElement;
@@ -5295,6 +5617,7 @@ function openServersDialog() {
 
 function bindEvents() {
   $('#login-form').addEventListener('submit', onLogin);
+  wireAppMenubar();
 
   $('#btn-upload').addEventListener('click', () => $('#file-input').click());
   $('#file-input').addEventListener('change', (event) => {

@@ -17,8 +17,10 @@ pub const SETTINGS_FILENAME: &str = "settings.json";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeChoice {
-    #[default]
     Auto,
+    /// Shipped default: a light UI reads better for a file browser, and the
+    /// dark palette stays one click away from the 视图 menu.
+    #[default]
     Light,
     Dark,
 }
@@ -107,9 +109,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_follow_system_and_hide_dotfiles() {
+    fn defaults_use_light_theme_and_hide_dotfiles() {
         let settings = AppSettings::default();
-        assert_eq!(settings.theme, ThemeChoice::Auto);
+        assert_eq!(settings.theme, ThemeChoice::Light);
         assert!(!settings.show_hidden);
     }
 
@@ -139,7 +141,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(settings_path(dir.path()), b"{not json").unwrap();
         let settings = load(dir.path());
-        assert_eq!(settings.theme, ThemeChoice::Auto);
+        assert_eq!(settings.theme, ThemeChoice::Light);
         let backups = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())

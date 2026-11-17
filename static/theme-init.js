@@ -7,7 +7,9 @@
  */
 (function () {
   var root = document.documentElement;
-  var choice = 'auto';
+  // Light is the shipped default; "auto" is still available as an opt-in from
+  // the 视图 menu for users who want to follow the operating system.
+  var choice = 'light';
   var cookie = document.cookie || '';
   var match = cookie.match(/(?:^|;\s*)rockbadger_theme=(auto|light|dark)/);
   if (!match) {

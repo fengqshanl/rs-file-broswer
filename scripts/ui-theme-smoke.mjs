@@ -119,12 +119,17 @@ try {
   await waitFor("!!document.querySelector('#theme-switch')", 5_000, 'theme switch');
 
   const initial = await themeState();
-  if (initial.choice !== 'auto') throw new Error(`unexpected initial theme choice: ${JSON.stringify(initial)}`);
-  const initialSettings = await settings();
-  if (!initialSettings || initialSettings.theme !== 'auto') {
-    throw new Error(`settings endpoint missing auto theme: ${JSON.stringify(initialSettings)}`);
+  if (initial.choice !== 'light' || initial.theme !== 'light') {
+    throw new Error(`unexpected initial theme choice: ${JSON.stringify(initial)}`);
   }
-  pass('settings endpoint and automatic theme boot');
+  const initialSettings = await settings();
+  if (!initialSettings || initialSettings.theme !== 'light') {
+    throw new Error(`settings endpoint missing light default: ${JSON.stringify(initialSettings)}`);
+  }
+  pass('light theme is the shipped default');
+
+  await click('#theme-switch [data-theme-choice="auto"]');
+  await sleep(450);
 
   await emulateScheme('light');
   await waitFor("document.documentElement.dataset.theme === 'light'", 5_000, 'system light');
