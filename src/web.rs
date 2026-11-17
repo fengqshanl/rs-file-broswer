@@ -14,7 +14,7 @@ use axum::{
 };
 use tokio::time::MissedTickBehavior;
 
-use crate::{analyze, app, auth, error::log, files, preview, thumbnail, state::AppState};
+use crate::{analyze, app, auth, error::log, files, preview, state::AppState, stream, thumbnail};
 
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
 
@@ -36,6 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/analyze", post(analyze::analyze))
         .route("/api/volumes", post(analyze::volumes))
         .route("/api/thumbnail", post(thumbnail::thumbnail))
+        .route("/api/thumb", get(thumbnail::thumb_get))
         .route("/api/mkdir", post(files::mkdir))
         .route("/api/ensure_dirs", post(files::ensure_dirs))
         .route("/api/rename", post(files::rename))
@@ -43,6 +44,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/download", post(files::download))
         .route("/api/download_folder", post(files::download_folder))
         .route("/api/preview/stream", post(preview::stream))
+        .route("/api/stream", get(stream::stream))
+        .route("/api/stream/ticket", post(stream::issue_ticket))
         .route("/api/upload/init", post(files::upload_init))
         .route("/api/upload/chunk/{id}/{seq}", put(files::upload_chunk))
         .route("/api/upload/finish", post(files::upload_finish))
@@ -150,10 +153,17 @@ async fn security_headers(request: Request, next: Next) -> Response {
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
-    if is_api {
+    if is_api && !keeps_own_cache_control(&path) {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     response
+}
+
+/// Media and thumbnail responses pick their own short cache lifetime: a player
+/// that re-seeks must not refetch every byte, and a re-rendered grid should
+/// repaint from the browser cache instead of asking the server again.
+fn keeps_own_cache_control(path: &str) -> bool {
+    path == "/api/stream" || path == "/api/thumb"
 }
 
 fn asset(content: &'static str, content_type: &'static str, cache: &'static str) -> Response {

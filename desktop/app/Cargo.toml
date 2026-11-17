@@ -1,6 +1,6 @@
 [package]
 name = "rockbadger-app"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "RockBadger desktop app: local files, RockBadger servers and SSH hosts in one window"
 license = "MIT"

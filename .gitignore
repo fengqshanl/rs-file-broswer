@@ -6,5 +6,6 @@
 /.env
 /testdata
 /.workbuddy
+/.tmp-*
 *.log
 .DS_Store

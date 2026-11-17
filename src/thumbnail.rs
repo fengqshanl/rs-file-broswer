@@ -15,11 +15,10 @@ use std::{
     sync::Arc,
     time::UNIX_EPOCH,
 };
-
 use axum::{
     body::Body,
-    extract::{OriginalUri, State},
-    http::Method,
+    extract::{OriginalUri, Query, State},
+    http::{header, HeaderValue, Method, StatusCode},
     response::Response,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -77,15 +76,69 @@ pub async fn thumbnail(
     let aad = crypto::request_aad(&method, &uri);
     let request: ThumbnailRequest = read_encrypted(&session, &aad, body).await?;
     let (path, _clean, name, _size) = resolve_file(&state, &request.path).await?;
-    if !decodable(&name) {
-        return Err(ApiError::bad("该文件不支持缩略图"));
-    }
     let edge = request
         .size
         .unwrap_or(DEFAULT_EDGE)
         .clamp(MIN_EDGE, MAX_EDGE);
+    let (bytes, width, height) = cached_jpeg(&state, &path, &name, edge).await?;
+    encrypted_response(
+        &session,
+        &aad,
+        json!({
+            "data": STANDARD.encode(&bytes),
+            "width": width,
+            "height": height,
+        }),
+    )
+}
 
-    let metadata = tokio::fs::metadata(&path)
+#[derive(Deserialize)]
+pub struct ThumbQuery {
+    path: String,
+    ticket: String,
+    #[serde(default)]
+    size: Option<u32>,
+}
+
+/// Serves the same cached JPEG over plain GET so a grid tile can simply point
+/// `<img src>` at it: the browser then reuses its own cache, and no WebCrypto
+/// round trip stands between a scroll and a painted tile.
+pub async fn thumb_get(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ThumbQuery>,
+) -> Result<Response, ApiError> {
+    crate::stream::verify_ticket(&state, &query.ticket, &query.path)?;
+    let (path, _clean, name, _size) = resolve_file(&state, &query.path).await?;
+    let edge = query.size.unwrap_or(DEFAULT_EDGE).clamp(MIN_EDGE, MAX_EDGE);
+    let (bytes, _width, _height) = cached_jpeg(&state, &path, &name, edge).await?;
+
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = StatusCode::OK;
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=600"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
+/// Renders one thumbnail, reusing the on-disk cache when the source has not
+/// changed since the last visit.
+async fn cached_jpeg(
+    state: &AppState,
+    path: &Path,
+    name: &str,
+    edge: u32,
+) -> Result<(Vec<u8>, u32, u32), ApiError> {
+    if !decodable(name) {
+        return Err(ApiError::bad("该文件不支持缩略图"));
+    }
+    let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|_| ApiError::not_found("文件不存在"))?;
     if metadata.len() > MAX_SOURCE_BYTES {
@@ -99,18 +152,12 @@ pub async fn thumbnail(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let cache_dir = state.cfg.state_dir.join("thumbnails");
-    let key = cache_key(&path, metadata.len(), modified, edge);
+    let key = cache_key(path, metadata.len(), modified, edge);
     let cache_path = cache_dir.join(format!("{key}.jpg"));
 
     if let Ok(bytes) = tokio::fs::read(&cache_path).await {
-        return encrypted_response(
-            &session,
-            &aad,
-            json!({
-                "data": STANDARD.encode(&bytes),
-                "cached": true,
-            }),
-        );
+        let (width, height) = jpeg_size(&bytes).unwrap_or((0, 0));
+        return Ok((bytes, width, height));
     }
 
     let permit = state
@@ -119,12 +166,11 @@ pub async fn thumbnail(
         .acquire_owned()
         .await
         .map_err(|_| ApiError::internal("缩略图并发控制器已关闭"))?;
-    let source = path.clone();
-    let (bytes, width, height) =
-        tokio::task::spawn_blocking(move || render(&source, edge))
-            .await
-            .map_err(|err| ApiError::internal(err.to_string()))?
-            .map_err(|err| ApiError::bad(err))?;
+    let source = path.to_path_buf();
+    let (bytes, width, height) = tokio::task::spawn_blocking(move || render(&source, edge))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))?
+        .map_err(|err| ApiError::bad(err))?;
     drop(permit);
 
     // The cache is best effort: a read-only state directory must not turn a
@@ -135,16 +181,16 @@ pub async fn thumbnail(
         }
     }
 
-    encrypted_response(
-        &session,
-        &aad,
-        json!({
-            "data": STANDARD.encode(&bytes),
-            "width": width,
-            "height": height,
-            "cached": false,
-        }),
-    )
+    Ok((bytes, width, height))
+}
+
+/// Reads the pixel size back from a cached JPEG header so a cache hit can still
+/// report dimensions to the caller.
+fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.into_dimensions().ok()
 }
 
 fn cache_key(path: &Path, len: u64, modified: u64, edge: u32) -> String {

@@ -43,6 +43,9 @@ pub struct AppState {
     pub download_sem: Arc<Semaphore>,
     pub preview_sem: Arc<Semaphore>,
     pub login_sem: Arc<Semaphore>,
+    /// Signs the short-lived tickets that let native `<img>`/`<video>` elements
+    /// stream bytes without an `Authorization` header.
+    pub stream_secret: [u8; 32],
 }
 
 pub struct Session {
@@ -304,6 +307,7 @@ impl AppState {
             uploads: DashMap::new(),
             login_guard: LoginGuard::new(cfg.login_max_failures, cfg.login_window),
             login_challenges: LoginChallenges::new(Duration::from_secs(120)),
+            stream_secret: crate::crypto::random_key(),
             cfg,
             crypto,
         };

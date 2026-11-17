@@ -2329,6 +2329,54 @@ async function startFolderDownload(path, name, tab = activeTab()) {
   });
 }
 
+/** Pipes raw bytes straight to the save target. Returns false when the server
+ *  cannot serve this URL, so the caller can fall back to the encrypted stream. */
+async function streamDirectDownload({
+  url,
+  target,
+  suggestedName,
+  progress,
+  armIdle,
+  controller,
+}) {
+  const response = await fetch(url, { signal: controller.signal, cache: 'default' });
+  if (!response.ok) return false;
+
+  const total = Number(response.headers.get('content-length') || 0);
+  if (!target.usePicker && total > BLOB_DOWNLOAD_LIMIT) {
+    throw new Error('当前浏览器不支持流式保存，超过 1 GB 的文件请使用 Chrome 或 Edge 下载');
+  }
+  const parts = target.usePicker ? null : [];
+  let received = 0;
+  for await (const value of responseChunks(response)) {
+    armIdle();
+    if (target.usePicker) {
+      await target.writable.write(value);
+    } else {
+      parts.push(value);
+    }
+    received += value.length;
+    progress.update(
+      total > 0 ? received / total : null,
+      total > 0
+        ? `${formatSize(received)} / ${formatSize(total)}`
+        : formatSize(received),
+    );
+  }
+  if (total > 0 && received !== total) {
+    throw new Error('下载数据不完整，请重试');
+  }
+
+  if (target.usePicker) {
+    await target.writable.close();
+  } else {
+    triggerBlobDownload(new Blob(parts, { type: 'application/octet-stream' }), suggestedName);
+  }
+  progress.done(`已保存 ${suggestedName}`);
+  toast(`下载完成：${suggestedName}`, 'success');
+  return true;
+}
+
 async function streamEncryptedDownload({
   endpoint,
   payload,
@@ -2366,6 +2414,26 @@ async function streamEncryptedDownload({
   };
   armIdle();
   try {
+    // Single files can travel as plain bytes over the ticket URL: no per-chunk
+    // AES framing, no WebCrypto on the main thread. Folder archives keep the
+    // encrypted path because they are generated on the fly.
+    if (endpoint === '/api/download') {
+      const direct = await streamUrl(payload.path, tab);
+      if (
+        direct &&
+        (await streamDirectDownload({
+          url: direct,
+          target,
+          suggestedName,
+          progress,
+          armIdle,
+          controller,
+        }))
+      ) {
+        return;
+      }
+    }
+
     const aad = `POST ${endpoint}`;
     const envelope = await encryptWithKey(session.key, aad, payload);
     const response = await fetch(endpoint, {
@@ -3160,6 +3228,16 @@ function pumpThumbnails() {
 async function loadThumbnail(job) {
   try {
     if (!job.tab.session || !job.node.isConnected) return;
+    // A direct URL lets the browser paint the tile while the bytes arrive, and
+    // its own cache covers a re-render far better than a JS-side Map.
+    const direct = await streamUrl(job.fullPath, job.tab, {
+      endpoint: '/api/thumb',
+      size: THUMBNAIL_EDGE,
+    });
+    if (direct) {
+      if (job.node.isConnected) applyThumbnail(job.node, direct);
+      return;
+    }
     const data = await api(
       '/api/thumbnail',
       { path: job.fullPath, size: THUMBNAIL_EDGE },
@@ -3961,7 +4039,7 @@ function previewTooLarge(content, limit, action) {
   content.replaceChildren(
     previewMessage(
       '文件过大，无法在线预览',
-      `加密预览需要先在浏览器内完整接收并解密，上限为 ${formatSize(limit)}，请下载后${action}。`,
+      `此类型需要在浏览器内完整解析，上限为 ${formatSize(limit)}，请下载后${action}。`,
     ),
   );
 }
@@ -4105,6 +4183,177 @@ function joinChunks(parts, total) {
   return bytes;
 }
 
+/* ---------- Direct, range-capable streaming ---------- */
+
+/**
+ * `__target` names the tab's server for requests a native `<img>`/`<video>`
+ * element makes on its own: only `fetch()` can attach the target header.
+ */
+function targetQuery(tab) {
+  if (!state.app || !tab || !tab.target || tab.target.kind === 'standalone') return '';
+  return `&__target=${encodeURIComponent(tab.id)}`;
+}
+
+function parentPath(path) {
+  const index = path.lastIndexOf('/');
+  return index <= 0 ? '/' : path.slice(0, index);
+}
+
+/** Directory-scoped tickets, so a listing needs one call for every tile. */
+const streamTickets = new Map();
+/** Servers that predate range streaming keep the encrypted preview path. */
+const streamUnsupported = new Set();
+/** In-flight ticket requests, so a grid does not ask four times at once. */
+const streamTicketRequests = new Map();
+const STREAM_TICKET_MARGIN_MS = 20_000;
+
+function streamTicketFor(dirPath, tab) {
+  if (!tab.session || streamUnsupported.has(tab.id)) return Promise.resolve(null);
+  const key = `${tab.id}|${dirPath}`;
+  const cached = streamTickets.get(key);
+  if (cached && cached.expiresAt - STREAM_TICKET_MARGIN_MS > Date.now()) {
+    return Promise.resolve(cached.ticket);
+  }
+  const pending = streamTicketRequests.get(key);
+  if (pending) return pending;
+  const request = requestStreamTicket(key, dirPath, tab).finally(() => {
+    streamTicketRequests.delete(key);
+  });
+  streamTicketRequests.set(key, request);
+  return request;
+}
+
+async function requestStreamTicket(key, dirPath, tab) {
+  const endpoint = '/api/stream/ticket';
+  const aad = `POST ${endpoint}`;
+  let response;
+  try {
+    const envelope = await encryptWithKey(tab.session.key, aad, { path: dirPath, dir: true });
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tab.session.token}`,
+        ...targetHeaders(tab),
+      },
+      body: JSON.stringify(envelope),
+      cache: 'no-store',
+    });
+  } catch {
+    return null;
+  }
+  if (response.status === 404 || response.status === 405) {
+    streamUnsupported.add(tab.id);
+    return null;
+  }
+  if (!response.ok) return null;
+  try {
+    const data = await decryptWithKey(tab.session.key, aad, await response.json());
+    if (!data || !data.ticket) return null;
+    streamTickets.set(key, {
+      ticket: data.ticket,
+      expiresAt: Number(data.expires_at || 0) * 1000,
+    });
+    return data.ticket;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Builds a same-origin URL a media element can load directly. Returning null
+ * means the server is too old, and the caller falls back to the encrypted
+ * preview stream.
+ */
+async function streamUrl(path, tab, options = {}) {
+  const ticket = await streamTicketFor(options.dir ? path : parentPath(path), tab);
+  if (!ticket) return null;
+  const endpoint = options.endpoint || '/api/stream';
+  const size = options.size ? `&size=${encodeURIComponent(options.size)}` : '';
+  return (
+    `${endpoint}?path=${encodeURIComponent(path)}&ticket=${encodeURIComponent(ticket)}` +
+    `${size}${targetQuery(tab)}`
+  );
+}
+
+/**
+ * URL for `<img>`/`<video>`/`<audio>`: streamed with ranges when possible, so
+ * playback starts on the first chunk and seeking costs one range request.
+ * Older servers still get the whole file decrypted into a blob.
+ */
+async function previewMediaUrl(path, tab, options = {}) {
+  const url = await streamUrl(path, tab);
+  if (url) return { url, streamed: true };
+  const source = await requestPreviewStream(path, tab);
+  const limit = options.limit || 0;
+  if (limit && source.size > limit) {
+    await source.reader.cancel().catch(() => {});
+    return { tooLarge: true };
+  }
+  const { parts } = await collectPreviewChunks(source, options.onProgress);
+  const blob = new Blob(parts, {
+    type: source.contentType || 'application/octet-stream',
+  });
+  return { url: options.trackUrl(URL.createObjectURL(blob)), streamed: false };
+}
+
+/**
+ * Reads a preview's bytes for in-page parsing (text, HTML, PDF, Office). The
+ * raw stream avoids a WebCrypto round trip per 64 KiB frame.
+ */
+async function readPreviewBytes(path, tab, options = {}) {
+  const limit = options.limit || 0;
+  const url = await streamUrl(path, tab);
+  if (url) {
+    const response = await fetch(url, { cache: 'default' });
+    if (!response.ok) {
+      throw new Error(
+        response.status === 403
+          ? '预览凭证已失效，请重新打开'
+          : `读取文件失败 (${response.status})`,
+      );
+    }
+    const total = Number(response.headers.get('content-length') || 0);
+    const parts = [];
+    let received = 0;
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        received += value.length;
+        if (options.onProgress) options.onProgress(received, total);
+        if (limit && received >= limit) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+      }
+    }
+    return {
+      bytes: joinChunks(parts, received),
+      total: received,
+      declared: total,
+      truncated: Boolean(limit && total > limit),
+      contentType: response.headers.get('content-type') || '',
+    };
+  }
+
+  const source = await requestPreviewStream(path, tab);
+  if (limit && source.size > limit) {
+    await source.reader.cancel().catch(() => {});
+    return { tooLarge: true, limit, size: source.size };
+  }
+  const { parts, total } = await collectPreviewChunks(source, options.onProgress);
+  return {
+    bytes: joinChunks(parts, total),
+    total,
+    declared: total,
+    truncated: false,
+    contentType: source.contentType || '',
+  };
+}
+
 function mediaProgress(status, received, total, label) {
   status.hidden = false;
   status.textContent =
@@ -4121,56 +4370,62 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     return;
   }
 
+  const path = joinPath(tab.cwd, entry.name);
+  // Parsed previews still hold the whole file in memory. Streamed media does
+  // not, so images, video and audio have no size ceiling any more.
   const limit = previewByteLimit(kind);
-  if (limit && entry.size > limit) {
-    previewTooLarge(
-      content,
-      limit,
-      kind === 'video' || kind === 'audio' ? '播放' : '查看',
-    );
+  const streamed = kind === 'image' || kind === 'svg' || kind === 'video' || kind === 'audio';
+  if (limit && entry.size > limit && !streamed) {
+    previewTooLarge(content, limit, '查看');
     return;
   }
-
-  const path = joinPath(tab.cwd, entry.name);
 
   if (kind === 'image' || kind === 'svg') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
-    const status = mediaStatus('正在接收图片…');
+    const status = mediaStatus('正在加载图片…');
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > IMAGE_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const media = await previewMediaUrl(path, tab, { trackUrl, limit: IMAGE_PREVIEW_BYTES });
+    if (media.tooLarge) {
       previewTooLarge(content, IMAGE_PREVIEW_BYTES, '查看');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      mediaProgress(status, received, size || entry.size, '正在接收图片');
-    });
-    if (!wrapper.isConnected || total === 0) {
-      if (total === 0 && wrapper.isConnected) {
-        content.classList.remove('media-mode');
-        content.replaceChildren(previewMessage('图片为空', ''));
-      }
-      return;
-    }
-    const type = source.contentType || 'application/octet-stream';
-    const url = trackUrl(URL.createObjectURL(new Blob(parts, { type })));
+    if (!wrapper.isConnected) return;
+
     const image = document.createElement('img');
     image.className = 'preview-image';
     image.alt = entry.name;
     image.decoding = 'async';
-    image.addEventListener('load', () => status.remove(), { once: true });
+    image.addEventListener('load', () => status.remove());
     image.addEventListener('error', () => {
       content.classList.remove('media-mode');
       content.replaceChildren(
-        previewMessage('图片加载失败', '文件可能已损坏或格式不受支持。'),
+        previewMessage('图片加载失败', '文件可能已损坏、格式不受支持，或预览凭证已过期。'),
       );
     });
-    status.textContent = '正在解码图片…';
-    image.src = url;
+
+    // A cached 512px tile paints immediately, then the full picture replaces it
+    // as it arrives: a 40 MB photo no longer leaves an empty frame for seconds.
+    const thumb =
+      media.streamed && entry.size > 1_500_000
+        ? await streamUrl(path, tab, { endpoint: '/api/thumb', size: 512 })
+        : null;
+    if (thumb) {
+      image.src = thumb;
+      const full = new Image();
+      full.addEventListener(
+        'load',
+        () => {
+          if (wrapper.isConnected) image.src = media.url;
+        },
+        { once: true },
+      );
+      full.src = media.url;
+    } else {
+      image.src = media.url;
+    }
     wrapper.append(image);
     return;
   }
@@ -4178,34 +4433,24 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
   if (kind === 'video') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
-    const status = mediaStatus('正在接收视频…');
+    const status = mediaStatus('正在加载视频…');
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > MEDIA_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const media = await previewMediaUrl(path, tab, { trackUrl, limit: MEDIA_PREVIEW_BYTES });
+    if (media.tooLarge) {
       previewTooLarge(content, MEDIA_PREVIEW_BYTES, '播放');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      mediaProgress(status, received, size || entry.size, '正在接收视频');
-    });
     if (!wrapper.isConnected) return;
-    if (total === 0) {
-      content.classList.remove('media-mode');
-      content.replaceChildren(previewMessage('视频为空', ''));
-      return;
-    }
-    const url = trackUrl(
-      URL.createObjectURL(new Blob(parts, { type: source.contentType || 'video/mp4' })),
-    );
+
     const video = document.createElement('video');
     video.className = 'preview-video';
     video.controls = true;
     video.autoplay = true;
     video.playsInline = true;
-    video.preload = 'metadata';
+    // A streamed file only needs its index to start; the rest follows on demand.
+    video.preload = media.streamed ? 'metadata' : 'auto';
     const showStatus = (text) => {
       status.hidden = false;
       status.textContent = text;
@@ -4217,6 +4462,7 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     video.addEventListener('stalled', () => showStatus('正在缓冲…'));
     video.addEventListener('playing', hideStatus);
     video.addEventListener('canplay', hideStatus);
+    video.addEventListener('loadedmetadata', hideStatus);
     video.addEventListener('error', () => {
       content.classList.remove('media-mode');
       content.replaceChildren(
@@ -4226,8 +4472,7 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
         ),
       );
     });
-    status.textContent = '正在加载视频…';
-    video.src = url;
+    video.src = media.url;
     wrapper.append(video);
     return;
   }
@@ -4235,32 +4480,22 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
   if (kind === 'audio') {
     content.classList.add('media-mode');
     const wrapper = div('preview-media-wrap');
-    const status = mediaStatus('正在接收音频…');
+    const status = mediaStatus('正在加载音频…');
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > MEDIA_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const media = await previewMediaUrl(path, tab, { trackUrl, limit: MEDIA_PREVIEW_BYTES });
+    if (media.tooLarge) {
       previewTooLarge(content, MEDIA_PREVIEW_BYTES, '播放');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      mediaProgress(status, received, size || entry.size, '正在接收音频');
-    });
     if (!wrapper.isConnected) return;
-    if (total === 0) {
-      content.classList.remove('media-mode');
-      content.replaceChildren(previewMessage('音频为空', ''));
-      return;
-    }
-    const url = trackUrl(
-      URL.createObjectURL(new Blob(parts, { type: source.contentType || 'audio/mpeg' })),
-    );
+
     const audio = document.createElement('audio');
     audio.className = 'preview-audio';
     audio.controls = true;
     audio.autoplay = true;
+    audio.preload = media.streamed ? 'metadata' : 'auto';
     audio.addEventListener('waiting', () => {
       status.hidden = false;
       status.textContent = '正在缓冲…';
@@ -4269,14 +4504,13 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
       status.hidden = false;
       status.textContent = '正在缓冲…';
     });
-    audio.addEventListener('playing', () => {
+    const hideStatus = () => {
       status.hidden = true;
-    });
-    audio.addEventListener('canplay', () => {
-      status.hidden = true;
-    });
-    status.textContent = '正在加载音频…';
-    audio.src = url;
+    };
+    audio.addEventListener('playing', hideStatus);
+    audio.addEventListener('canplay', hideStatus);
+    audio.addEventListener('loadedmetadata', hideStatus);
+    audio.src = media.url;
     wrapper.append(audio);
     return;
   }
@@ -4288,17 +4522,17 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     wrapper.append(status);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > PDF_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const data = await readPreviewBytes(path, tab, {
+      limit: PDF_PREVIEW_BYTES,
+      onProgress: (received, total) =>
+        mediaProgress(status, received, total || entry.size, '正在接收 PDF'),
+    });
+    if (data.tooLarge) {
       previewTooLarge(content, PDF_PREVIEW_BYTES, '查看');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      mediaProgress(status, received, size || entry.size, '正在接收 PDF');
-    });
     if (!wrapper.isConnected) return;
-    if (total === 0) {
+    if (!data.total) {
       content.classList.remove('media-mode');
       content.replaceChildren(previewMessage('PDF 为空', ''));
       return;
@@ -4306,9 +4540,7 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     const frame = document.createElement('iframe');
     frame.className = 'preview-frame';
     frame.title = entry.name;
-    const url = trackUrl(
-      URL.createObjectURL(new Blob(parts, { type: 'application/pdf' })),
-    );
+    const url = trackUrl(URL.createObjectURL(new Blob([data.bytes], { type: 'application/pdf' })));
     status.textContent = '正在加载 PDF…';
     frame.addEventListener('load', () => status.remove(), { once: true });
     frame.src = url;
@@ -4327,18 +4559,18 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     wrapper.append(note, frameWrap);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > HTML_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const data = await readPreviewBytes(path, tab, {
+      limit: HTML_PREVIEW_BYTES,
+      onProgress: (received, total) =>
+        mediaProgress(status, received, total || entry.size, '正在接收 HTML'),
+    });
+    if (data.tooLarge) {
       previewTooLarge(content, HTML_PREVIEW_BYTES, '查看');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      mediaProgress(status, received, size || entry.size, '正在接收 HTML');
-    });
     if (!wrapper.isConnected) return;
     const html = securePreviewHtml(
-      new TextDecoder('utf-8', { fatal: false }).decode(joinChunks(parts, total)),
+      new TextDecoder('utf-8', { fatal: false }).decode(data.bytes),
     );
     const frame = document.createElement('iframe');
     frame.className = 'preview-frame';
@@ -4366,37 +4598,24 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     wrapper.append(banner, pre);
     content.replaceChildren(wrapper);
 
-    const source = await requestPreviewStream(path, tab);
-    const total = source.size || entry.size || 0;
-    const textDecoder = new TextDecoder('utf-8', { fatal: false });
-    let received = 0;
-    let truncated = false;
     let lastPaint = 0;
-    await readEncryptedPreview(source, (chunk, count) => {
-      if (!wrapper.isConnected) return true;
-      received = count;
-      textNode.appendData(textDecoder.decode(chunk, { stream: true }));
-      const now = performance.now();
-      if (now - lastPaint > 120) {
+    const data = await readPreviewBytes(path, tab, {
+      limit: TEXT_STREAM_BYTES,
+      onProgress: (received, total) => {
+        const now = performance.now();
+        if (now - lastPaint < 150) return;
         lastPaint = now;
         banner.textContent =
           total > 0
-            ? `正在接收 ${formatSize(received)} / ${formatSize(total)}（内容已可边收边看）`
-            : `正在接收 ${formatSize(received)}（内容已可边收边看）`;
-      }
-      if (received >= TEXT_STREAM_BYTES) {
-        truncated = true;
-        return true;
-      }
-      return false;
+            ? `正在接收 ${formatSize(received)} / ${formatSize(total)}`
+            : `正在接收 ${formatSize(received)}`;
+      },
     });
     if (!wrapper.isConnected) return;
-    textNode.appendData(textDecoder.decode());
-    banner.textContent = truncated
-      ? `文件较大，仅显示前 ${formatSize(TEXT_STREAM_BYTES)}（已接收 ${formatSize(received)}），完整内容请下载查看。`
-      : total > 0 && received >= total
-        ? `已接收全部 ${formatSize(received)}`
-        : `已接收 ${formatSize(received)}`;
+    textNode.appendData(new TextDecoder('utf-8', { fatal: false }).decode(data.bytes));
+    banner.textContent = data.truncated
+      ? `文件较大，仅显示前 ${formatSize(data.total)}，完整内容请下载查看。`
+      : `已接收 ${formatSize(data.total)}`;
     return;
   }
 
@@ -4408,19 +4627,17 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     content.replaceChildren(wrapper);
     await loadScript('/vendor/mammoth.js');
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > OFFICE_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const data = await readPreviewBytes(path, tab, {
+      limit: OFFICE_PREVIEW_BYTES,
+      onProgress: (received, total) => progress.update(received, total || entry.size),
+    });
+    if (data.tooLarge) {
       previewTooLarge(content, OFFICE_PREVIEW_BYTES, '查看');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      progress.update(received, size || entry.size);
-    });
     if (!wrapper.isConnected) return;
     progress.parse('正在解析文档…');
-    const bytes = joinChunks(parts, total);
-    const result = await window.mammoth.convertToHtml({ arrayBuffer: bytes.buffer });
+    const result = await window.mammoth.convertToHtml({ arrayBuffer: data.bytes.buffer });
     documentView.append(sanitizeHtml(result.value || ''));
     if (!documentView.textContent.trim() && !documentView.querySelector('img, table')) {
       documentView.append(previewMessage('文档没有可显示的文本内容', ''));
@@ -4435,18 +4652,17 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
     content.replaceChildren(wrapper);
     await loadScript('/vendor/xlsx.js');
 
-    const source = await requestPreviewStream(path, tab);
-    if (source.size > OFFICE_PREVIEW_BYTES) {
-      await source.reader.cancel().catch(() => {});
+    const data = await readPreviewBytes(path, tab, {
+      limit: OFFICE_PREVIEW_BYTES,
+      onProgress: (received, total) => progress.update(received, total || entry.size),
+    });
+    if (data.tooLarge) {
       previewTooLarge(content, OFFICE_PREVIEW_BYTES, '查看');
       return;
     }
-    const { parts, total } = await collectPreviewChunks(source, (received, size) => {
-      progress.update(received, size || entry.size);
-    });
     if (!wrapper.isConnected) return;
     progress.parse('正在解析表格…');
-    const bytes = joinChunks(parts, total);
+    const bytes = data.bytes;
     const extension = fileExtension(entry.name);
     let workbook;
     if (extension === 'csv' || extension === 'tsv') {

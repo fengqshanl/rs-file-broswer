@@ -15,6 +15,7 @@ pub mod preview;
 pub mod rate;
 pub mod server;
 pub mod state;
+pub mod stream;
 pub mod thumbnail;
 pub mod tls;
 pub mod web;

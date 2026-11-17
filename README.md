@@ -38,10 +38,11 @@
 - **大目录分页**：目录扫描一次并缓存，前端按页加载（滚动到底自动续载），加载期间显示骨架屏
 - **账户管理**：登录后可修改用户名和密码，其他会话立即失效
 - **加密登录**：RSA-OAEP 包装随机会话密钥，一次性 challenge + 强制时间戳防重放，Argon2id 校验密码
-- **加密传输**：API、上传、下载与预览全程 AES-256-GCM，AEAD 附加数据绑定方法与 URI/流序号，防重放
+- **加密传输**：控制 API、上传与文件夹打包全程 AES-256-GCM，AEAD 附加数据绑定方法与 URI/流序号，防重放；文件内容本身走 TLS（伴生模式为回环）并用短时票据授权
 - **HTTPS-only**：内置自签名证书生成，可替换为受信证书
 - **资源保护**：全局令牌桶限速、传输/预览并发上限、磁盘安全余量、容器资源限制
 - **单文件部署**：前端资源编译进二进制，运行时镜像约 15 MB，空闲内存约 1–3 MB
+- **秒开的预览**：图片、音视频通过带 `Range` 的直连流边下边看，视频能直接拖动进度条、只按需取片段；缩略图走同一类直连地址并复用浏览器缓存，滚动照片墙不再逐个等解密
 - **应用菜单栏**：顶部是 文件 / 编辑 / 视图 / 帮助 / 关于 菜单，菜单项带快捷键提示，会按当前连接的可用性自动置灰；支持 `Esc`、`↑`/`↓`、悬停切换
 - **多连接切换**：本机、RockBadger 服务器与 SSH 主机各自保持独立会话，可通过右侧连接胶囊随时切换；连接之间可复制、剪切、粘贴文件与文件夹，传输全程经加密流中转；支持原生窗口与系统文件拖拽
 - **浅色 / 深色主题**：默认浅色，可在 视图 → 主题 切换 自动 / 浅色 / 深色；主题与「显示隐藏文件」偏好持久化到 `settings.json`
@@ -127,6 +128,8 @@ SSH 凭据只写入系统凭据库（Windows 凭据管理器 / macOS 钥匙串�
 > **从 0.2.x 升级到 0.3.x**：产品名统一为 **RockBadger**（旧名 AgentGod Files，中文可称「岩獾」），应用标识与 UpgradeCode 再次变化，0.2.x 无法覆盖安装或应用内升级。请先安装 0.3.4 并确认连接、主机指纹与设置已从 `%APPDATA%\AgentGodFiles` 自动迁移，再从「应用和功能」手动卸载 AgentGod Files。旧数据目录与凭据库条目会保留作备份；0.3.x 的服务端只提供 API，不再提供网页界面。
 
 > **从 0.3.x 升级到 0.3.4**：顶栏改为常规桌面应用的菜单栏（文件 / 编辑 / 视图 / 帮助 / 关于），默认浅色主题；批量上传与文件夹上传改为整批完成后只刷新一次列表。数据目录、连接配置与凭据均不变，可直接应用内更新。
+
+> **从 0.3.4 升级到 0.3.5**：预览与下载改走带 `Range` 的直连流，图片、音视频不再需要整包接收和解密；缩略图改为直连 JPEG 并复用浏览器缓存。桌面端可应用内更新；**服务端需要同步升级到 0.3.5 才有新接口**，否则客户端会自动回退到旧的加密预览流（功能不受影响，只是不提速）。
 
 **维护者：启用静默热更新**（Tauri updater 强制要求签名，无法关闭）：
 
@@ -303,7 +306,7 @@ docker compose up -d --force-recreate
 
 - **上传**：点击「上传」多选文件；点击「文件夹」选择整个目录；也可以把文件或文件夹直接拖进页面
 - **下载**：右键文件或文件夹选择「下载」/「下载文件夹 (.tar)」；文件夹会打包为 `<名称>.tar` 下载
-- **预览**：点击文件名。图片、视频、音频、PDF、HTML、文本、Office 文档均可在线查看
+- **预览**：点击文件名。图片、视频、音频、PDF、HTML、文本、Office 文档均可在线查看；图片与音视频按需流式加载，不必等整个文件传完，视频可直接拖到任意位置
 - **右键菜单**：文件与文件夹的操作（打开、下载、复制、剪切、重命名、删除）都在右键菜单中；列表不再占用一列显示操作按钮
 - **多选与快捷键**：`Ctrl/Cmd+单击` 多选、`Shift+单击` 连续选择；`Ctrl/Cmd+C` / `X` / `V` 复制、剪切、粘贴，`Ctrl/Cmd+A` 全选，`F2` 重命名，`Delete` 删除，`Enter` 打开，`F5` 刷新
 - **预览快捷键**：预览打开时，视频 `←`/`→` 快退/快进 5 秒、`空格` 播放/暂停；图片 `←`/`→` 循环切换目录内图片
@@ -335,13 +338,14 @@ docker compose up -d --force-recreate
 
 ### 文件预览的安全模型
 
-预览不再暴露任何明文文件地址，`/preview/<token>` 已移除：
+预览内容不再经过应用层 AES 逐帧加密，因为浏览器自带的 `<img>` / `<video>` 无法解密自定义帧格式：
 
-- `POST /api/preview/stream` 使用正常的 Bearer 会话与加密请求 `{path}`，响应是 AES-256-GCM 帧流；每帧 AAD 绑定随机流 ID 与序号，响应头只包含大小、MIME 和流 ID，不包含文件内容。
-- 前端通过 `fetch()` 接收密文并在内存逐帧解密。文本边解密边追加；图片、PDF、HTML、Office 与音视频在完整接收后创建短期 `blob:` URL 呈现，切换或关闭预览时立即吊销。原生 `<img>` / `<video>` / `<iframe>` 从不接触明文 HTTP 流。
-- 预览仍受全局下载限速与预览并发限制。为避免客户端内存耗尽，加密预览有大小上限：图片 128 MB、PDF 256 MB、音视频 512 MB、HTML 32 MB；超过上限请下载后查看。
-- HTML 预览运行在 `iframe sandbox` 的独立不透明源中（没有 `allow-same-origin`），并注入禁止脚本、外部网络和表单提交的 CSP，因此只做静态渲染，无法读取本应用 DOM、令牌或调用已认证接口。SVG 通过 `<img>` 加载，脚本不会执行。
-- Word / Excel 完全在客户端本地解析（仓库内打包的 mammoth.js 与 SheetJS，按需加载），文件不会发送给第三方；docx 生成的 HTML 在插入前经过白名单清洗。
+- 控制面仍然全加密：申请预览凭证走 `POST /api/stream/ticket`，这是一个普通的 Bearer + AES-GCM 请求，服务端确认路径存在后签发票据。
+- 票据用进程内随机密钥做 HMAC-SHA256 签名，内容绑定 `类型 + 路径 + 过期时间`，5 分钟有效；改路径或用文件票据去读同级文件都会被拒。
+- `GET /api/stream` 直接返回文件字节，支持 `Range` / `206` / `416`；`GET /api/thumb` 返回缓存的 JPEG 缩略图。两者的机密性由传输层保证：独立服务端是 HTTPS（自签名证书需手动信任），桌面伴生服务只监听 `127.0.0.1`。
+- 文本、HTML、Office、PDF 这类需要在页面内解析的类型仍用 `fetch()` 取字节，但不再逐帧解密；HTML 依旧注入禁止脚本与外部网络的 CSP 并运行在 `iframe sandbox` 的不透明源中，Office 解析全部在本地完成。
+- 仍受全局下载限速与预览并发限制。需要整体接收后再解析的类型保留上限：PDF 256 MB、HTML 32 MB、文本 32 MB（超出只显示前 32 MB）、Office 64 MB；图片与音视频改为流式后不再有大小上限。
+- 0.3.4 及更早的服务端没有这些接口，前端探测到 404 会自动回退到 `POST /api/preview/stream` 的加密帧流。
 
 > 应用层加密保护的是「客户端 ↔ 本服务」这条会话。自签名证书需要手动信任；若用户在已被 MITM 的环境里强行信任伪造证书，应用层密钥交换无法阻止。需要严格防护时请使用受信证书。
 
@@ -379,7 +383,8 @@ src/
   api.rs         加密请求读取与加密响应
   files.rs       浏览、批量/文件夹上传、下载、重命名、删除
   archive.rs     流式 tar 打包（目录下载）
-  preview.rs     加密预览流、MIME 推断
+  preview.rs     旧版加密预览流（回退用）、MIME 推断
+  stream.rs      票据鉴权 + 支持 Range 的原始字节流（预览 / 缩略图 / 下载）
   rate.rs        全局令牌桶
   state.rs       应用状态、上传会话、会话表、预览并发控制
   tls.rs         自签名证书生成/复用
@@ -420,7 +425,10 @@ docker-compose.yml
 | `POST /api/upload/finish` | 校验大小并原子移动；`/abort` 清理临时文件 |
 | `POST /api/download` | 加密 `{path}`；响应为带 `x-file-size`/`x-chunk-size` 的加密帧流 |
 | `POST /api/download_folder` | 加密 `{path}`；tar 加密帧流，最后一帧为 `AGF_TAR_END_v1` |
-| `POST /api/preview/stream` | 加密 `{path}`；响应为 `x-file-size` / `x-chunk-size` / `x-stream-id` / `x-preview-content-type` 的 AES-GCM 帧流 |
+| `POST /api/stream/ticket` | 加密 `{path, dir?}` → `{ticket, expires_at}`；`dir` 为真时票据覆盖该目录下所有子项，有效期 5 分钟 |
+| `GET /api/stream?path=&ticket=` | 原始字节流，支持 `Range`（`206` + `Content-Range`，越界返回 `416`），按 MIME 返回，供 `<img>` / `<video>` / `<audio>` 直接加载 |
+| `GET /api/thumb?path=&ticket=&size=` | 原始 JPEG 缩略图（`size` 限制 64–512），带 `private, max-age=600`，供网格 `<img>` 直接加载 |
+| `POST /api/preview/stream` | 兼容旧客户端的加密帧流（加密 `{path}`，响应含 `x-file-size` / `x-chunk-size` / `x-stream-id` / `x-preview-content-type`）；新前端仅在服务端不支持 `/api/stream` 时使用 |
 | `POST /api/analyze` | 加密 `{path}` → 当前目录的直接子项（含递归大小、文件/目录计数、类型）按占用降序、类型聚合占比、卷容量与剩余空间；超大目录受时间与条目预算限制并标记 `truncated`，结果缓存 45 秒 |
 | `POST /api/volumes` | 加密 `{path}` → 可访问磁盘的 `{name,path,total,free,used}` 列表 |
 | `POST /api/thumbnail` | 加密 `{path,size}` → `{data}`（base64 JPEG，最长边 `size`）；服务端解码缩放并缓存到 `state/thumbnails`，超过 64 MB 或 8000 万像素的源文件直接拒绝 |
@@ -483,6 +491,23 @@ BASE_URL=https://127.0.0.1:18443 \
 ADMIN_PASSWORD='local-test-password-123' \
 NODE_TLS_REJECT_UNAUTHORIZED=0 \
 node scripts/e2e-test.mjs
+```
+
+预览流协议测试（票据范围、`Range`/`206`/`416`、缩略图、越权与篡改拒绝，并对比直连流与加密帧的吞吐）：
+
+```bash
+BASE_URL=http://127.0.0.1:18090 \
+STREAM_FIXTURE=$PWD/.tmp-fixture \
+node scripts/stream-smoke.mjs
+```
+
+媒体预览 UI 测试（网格缩略图、图片、音频与文本预览必须命中 `/api/stream` 或 `/api/thumb`）：
+
+```bash
+FRONT_URL=http://127.0.0.1:<dev_app 端口>/ \
+CHROME_DEBUG_URL=http://127.0.0.1:9223 \
+AUDIO_FILE=song.wav TEXT_FILE=notes.txt \
+node scripts/ui-media-smoke.mjs
 ```
 
 Chrome UI 冒烟测试（需要本地 Chrome 与调试端口；界面由 `dev_app` 提供，独立服务端已不再提供网页；视频快捷键测试需要 ffmpeg 生成 6 秒测试片段）：

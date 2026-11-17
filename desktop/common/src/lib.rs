@@ -490,6 +490,52 @@ fn target_header(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Native `<img>`/`<video>`/`<audio>` elements open their own connection, so
+/// they cannot carry the `X-RockBadger-Target` header every `fetch()` sends.
+/// They name the target in `__target` instead; this splits it off and returns
+/// the query to forward upstream.
+fn split_query_target(path_and_query: &str) -> (Option<String>, String) {
+    let Some((path, query)) = path_and_query.split_once('?') else {
+        return (None, path_and_query.to_owned());
+    };
+    let mut target = None;
+    let mut kept: Vec<&str> = Vec::new();
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("__target", value)) if target.is_none() => {
+                target = Some(percent_decode(value));
+            }
+            _ if pair.is_empty() => {}
+            _ => kept.push(pair),
+        }
+    }
+    let forwarded = if kept.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    (target, forwarded)
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
+            if let Some(byte) = hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 async fn app_info(State(front): State<Arc<FrontState>>, headers: HeaderMap) -> Response {
     // A tab asking for its own info (SSH roots, local roots) must reach that
     // target's service; only the header-less bootstrap call builds the list.
@@ -1234,7 +1280,14 @@ async fn local_set_root(State(front): State<Arc<FrontState>>, request: Request) 
 }
 
 async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Response {
-    let requested = target_header(request.headers());
+    let raw_path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/")
+        .to_owned();
+    let (query_target, forwarded_path) = split_query_target(&raw_path_and_query);
+    let requested = target_header(request.headers()).or(query_target);
     let (target_id, route) = match requested {
         Some(id) => match route_for(&front, &id).await {
             Some(route) => (id, route),
@@ -1258,12 +1311,7 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
         },
     };
 
-    let path_and_query = request
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/");
-    let url = format!("{}{}", route.base_url.trim_end_matches('/'), path_and_query);
+    let url = format!("{}{}", route.base_url.trim_end_matches('/'), forwarded_path);
     let method = request.method().clone();
     let headers = request.headers().clone();
 
@@ -1319,6 +1367,29 @@ fn to_reqwest_method(method: &Method) -> reqwest::Method {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_target_is_split_off_before_forwarding() {
+        let (target, forwarded) =
+            split_query_target("/api/stream?path=%E7%85%A7%E7%89%87.jpg&__target=abc123&ticket=v1");
+        assert_eq!(target.as_deref(), Some("abc123"));
+        assert_eq!(forwarded, "/api/stream?path=%E7%85%A7%E7%89%87.jpg&ticket=v1");
+
+        let (target, forwarded) = split_query_target("/api/stream?__target=only");
+        assert_eq!(target.as_deref(), Some("only"));
+        assert_eq!(forwarded, "/api/stream");
+
+        let (target, forwarded) = split_query_target("/api/list");
+        assert!(target.is_none());
+        assert_eq!(forwarded, "/api/list");
+    }
+
+    #[test]
+    fn percent_decoding_handles_utf8_and_literal_percent() {
+        assert_eq!(percent_decode("%E4%B8%AD%E6%96%87"), "中文");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("a%zzb"), "a%zzb");
+    }
 
     #[test]
     fn loopback_origins_are_accepted() {
