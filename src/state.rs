@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
+    analyze::CachedAnalysis,
     config::Config,
     credentials::Credentials,
     crypto::Crypto,
@@ -28,6 +29,8 @@ pub struct AppState {
     /// Recursive directory sizes, measured on demand and invalidated whenever
     /// the tree changes.
     pub folder_sizes: DashMap<PathBuf, CachedFolderSize>,
+    /// Result of a storage analysis run, keyed by the scanned folder.
+    pub analyses: DashMap<PathBuf, CachedAnalysis>,
     /// Mutable in desktop local mode (switch between home, filesystem root,
     /// drives); fixed to `cfg.data_root` for the standalone server.
     current_root: StdRwLock<PathBuf>,
@@ -267,6 +270,7 @@ impl AppState {
         *self.current_root.write().expect("data root lock poisoned") = root;
         self.listings.clear();
         self.folder_sizes.clear();
+        self.analyses.clear();
     }
 
     pub fn new(
@@ -295,6 +299,7 @@ impl AppState {
             sessions: DashMap::new(),
             listings: DashMap::new(),
             folder_sizes: DashMap::new(),
+            analyses: DashMap::new(),
             current_root: StdRwLock::new(cfg.data_root.clone()),
             uploads: DashMap::new(),
             login_guard: LoginGuard::new(cfg.login_max_failures, cfg.login_window),

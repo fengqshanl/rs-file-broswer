@@ -14,7 +14,7 @@ use axum::{
 };
 use tokio::time::MissedTickBehavior;
 
-use crate::{app, auth, error::log, files, preview, state::AppState};
+use crate::{analyze, app, auth, error::log, files, preview, thumbnail, state::AppState};
 
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
 
@@ -33,6 +33,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/account/update", post(auth::update_credentials))
         .route("/api/list", post(files::list))
         .route("/api/folder_size", post(files::folder_size))
+        .route("/api/analyze", post(analyze::analyze))
+        .route("/api/volumes", post(analyze::volumes))
+        .route("/api/thumbnail", post(thumbnail::thumbnail))
         .route("/api/mkdir", post(files::mkdir))
         .route("/api/ensure_dirs", post(files::ensure_dirs))
         .route("/api/rename", post(files::rename))

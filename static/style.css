@@ -3369,3 +3369,627 @@ progress::-moz-progress-bar {
     justify-content: flex-end;
   }
 }
+
+/* ---------- Listing layouts (list / grid / details) ---------- */
+
+/* Analyses and listings share the content area; only one is ever visible. */
+.content.is-analyzing > .list-head,
+.content.is-analyzing > #file-list,
+.content.is-analyzing > #list-footer,
+.content.is-analyzing > #empty-state,
+.content.is-analyzing > #list-skeleton {
+  display: none !important;
+}
+
+.file-list.view-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.file-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.file-card:hover {
+  background: var(--surface-2);
+}
+
+.file-card.selected {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: rgba(var(--accent-rgb), 0.09);
+}
+
+.card-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+
+.card-thumb .file-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+}
+
+.card-thumb .file-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.card-thumb .thumb-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--surface-1);
+}
+
+.card-thumb.has-thumb .file-icon {
+  display: none;
+}
+
+.card-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.card-name {
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.card-name {
+  cursor: pointer;
+}
+
+button.card-name:hover {
+  color: var(--accent);
+}
+
+.card-meta {
+  color: var(--faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.content.view-details .list-head,
+.content.view-details .file-row {
+  grid-template-columns: minmax(0, 1fr) 132px 104px 150px;
+  min-height: 34px;
+  padding: 0 14px;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.content.view-details .file-row {
+  border-bottom-color: rgba(var(--slate-rgb), 0.08);
+}
+
+.content.view-details .file-row .file-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.content.view-details .file-row .file-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.content.view-details .name-cell {
+  gap: 8px;
+}
+
+/* The type column only exists in the details layout. */
+.col-kind {
+  display: none;
+}
+
+.content.view-details .col-kind {
+  display: block;
+}
+
+.cell.kind {
+  color: var(--faint);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Storage analysis panel ---------- */
+
+/* The directory toolbar belongs to the listing; the panel brings its own. */
+body.is-analyzing .toolbar {
+  display: none;
+}
+
+/* While analysing, the top bar names the panel instead of showing a path that
+   belongs to the (hidden) listing. */
+.analyze-topbar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.analyze-topbar .icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+
+.analyze-topbar .icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+body.is-analyzing .analyze-topbar {
+  display: inline-flex;
+}
+
+body.is-analyzing #local-root-wrap,
+body.is-analyzing #breadcrumbs {
+  display: none !important;
+}
+
+.analyze-section-label {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  margin-top: 2px;
+}
+
+.btn.active {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text);
+}
+
+.btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.analyze-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 0 8px;
+}
+
+.analyze-view[hidden] {
+  display: none;
+}
+
+.analyze-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.analyze-vols {
+  display: flex;
+  flex: 1 1 320px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.volume-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-1);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.volume-chip:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.volume-chip.current {
+  border-color: rgba(var(--accent-rgb), 0.4);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text);
+}
+
+.volume-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.volume-track {
+  display: inline-block;
+  width: 54px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
+
+.volume-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-strong);
+}
+
+.volume-fill[data-level="warn"] {
+  background: #f59e0b;
+}
+
+.volume-fill[data-level="critical"] {
+  background: var(--danger);
+}
+
+.volume-used {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.analyze-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.analyze-status {
+  color: var(--faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.analyze-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--input-bg);
+}
+
+.crumb {
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.crumb:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.crumb.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.crumb:disabled {
+  cursor: default;
+}
+
+.crumb-sep {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.analyze-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.analyze-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.analyze-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-solid);
+}
+
+.metric-label {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.metric-value {
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-hint {
+  color: var(--warning-text);
+  font-size: 11px;
+}
+
+.volume-bar {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--surface-3);
+}
+
+.volume-note {
+  color: var(--faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.analyze-warn {
+  color: var(--warning-text);
+  font-size: 12px;
+}
+
+.analyze-catbar {
+  display: flex;
+  height: 14px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.cat-seg {
+  display: block;
+  flex: none;
+  height: 100%;
+}
+
+.analyze-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+
+.analyze-table-head,
+.analyze-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px 62px;
+  gap: 12px;
+  align-items: center;
+}
+
+.analyze-table-head {
+  height: 30px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.analyze-table-head > span:nth-child(2),
+.analyze-table-head > span:nth-child(3) {
+  text-align: right;
+}
+
+.analyze-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--panel-solid);
+}
+
+.analyze-row {
+  position: relative;
+  min-height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.analyze-row:last-child {
+  border-bottom: none;
+}
+
+.analyze-row:hover {
+  background: var(--surface-1);
+}
+
+.analyze-row.selected {
+  background: rgba(var(--accent-rgb), 0.08);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.analyze-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+/* Muted families such as "程序" disappear against a dark panel at the light
+   opacity, so the bars get more presence in the dark palette. */
+:root[data-theme="dark"] .analyze-bar {
+  opacity: 0.3;
+}
+
+.analyze-row.selected .analyze-bar {
+  opacity: 0.32;
+}
+
+:root[data-theme="dark"] .analyze-row.selected .analyze-bar {
+  opacity: 0.42;
+}
+
+.analyze-row.hidden-entry .analyze-label {
+  color: var(--muted);
+}
+
+.analyze-name {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.analyze-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: var(--muted);
+}
+
+.analyze-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.analyze-label {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyze-count {
+  flex: none;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.analyze-size,
+.analyze-pct {
+  position: relative;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.analyze-size {
+  font-size: 12.5px;
+}
+
+.analyze-pct {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.analyze-empty {
+  padding: 32px 16px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .analyze-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .analyze-table-head,
+  .analyze-row {
+    grid-template-columns: minmax(0, 1fr) 78px;
+  }
+
+  .analyze-table-head > span:nth-child(3),
+  .analyze-pct {
+    display: none;
+  }
+
+  .content.view-details .list-head,
+  .content.view-details .file-row {
+    grid-template-columns: minmax(0, 1fr) 96px;
+  }
+
+  .content.view-details .col-kind,
+  .content.view-details .cell.kind,
+  .content.view-details .col-time,
+  .content.view-details .cell.time {
+    display: none;
+  }
+
+  .file-list.view-grid {
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  }
+}

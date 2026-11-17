@@ -133,10 +133,31 @@
       <div class="menu">
         <button class="menu-title" type="button" data-menu-toggle aria-haspopup="true" aria-expanded="false">视图</button>
         <div class="menu-panel" role="menu" aria-label="视图" hidden>
+          <div class="menu-field">
+            <span class="menu-field-label">布局</span>
+            <div id="view-switch" class="segmented" role="group" aria-label="列表布局">
+              <button type="button" data-view-mode="list" aria-pressed="true" title="列表布局">列表</button>
+              <button type="button" data-view-mode="grid" aria-pressed="false" title="网格布局，图片显示缩略图">网格</button>
+              <button type="button" data-view-mode="details" aria-pressed="false" title="详细布局，显示类型与修改时间">详细</button>
+            </div>
+          </div>
+          <div class="menu-sep" role="separator"></div>
           <label class="menu-check" title="显示以 . 开头或带隐藏属性的项目">
             <input id="toggle-hidden" type="checkbox">
             <span class="menu-text">显示隐藏文件</span>
           </label>
+          <label class="menu-check" title="开启后可在工具栏随时分析磁盘占用">
+            <input id="toggle-analyze" type="checkbox">
+            <span class="menu-text">存储分析（扩展功能）</span>
+          </label>
+          <button class="menu-item" type="button" role="menuitem" data-action="open-analyze">
+            <span class="menu-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3a9 9 0 1 0 9 9h-9Z"/><path d="M14.5 3.6A9 9 0 0 1 20.4 9.5H14.5Z"/>
+              </svg>
+            </span>
+            <span class="menu-text">打开存储分析</span>
+          </button>
           <div class="menu-sep" role="separator"></div>
           <div class="menu-field">
             <span class="menu-field-label">主题</span>
@@ -248,6 +269,14 @@
   <section id="app-view" class="app-view" hidden>
     <header class="topbar">
       <div class="topbar-path">
+        <span class="analyze-topbar" aria-hidden="true">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a9 9 0 1 0 9 9h-9Z"/><path d="M14.5 3.6A9 9 0 0 1 20.4 9.5H14.5Z"/>
+            </svg>
+          </span>
+          存储分析
+        </span>
         <span id="local-root-wrap" class="app-root" hidden>
           <span class="app-label">位置</span>
           <select id="root-select" class="app-select" aria-label="选择文件位置"></select>
@@ -297,6 +326,13 @@
             </svg>
           </span>
         </button>
+        <button id="btn-analyze" class="btn icon-only" type="button" title="存储分析：查看磁盘与文件夹占用" aria-label="存储分析" hidden>
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a9 9 0 1 0 9 9h-9Z"/><path d="M14.5 3.6A9 9 0 0 1 20.4 9.5H14.5Z"/>
+            </svg>
+          </span>
+        </button>
         <button id="btn-account" class="btn" type="button" title="账户设置：修改用户名和密码" aria-label="账户设置：修改用户名和密码">
           <span class="icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -329,6 +365,7 @@
     <main class="content">
       <div class="list-head" aria-hidden="true">
         <span>名称</span>
+        <span class="col-kind">类型</span>
         <span class="col-size">大小</span>
         <span class="col-time">修改时间</span>
       </div>
@@ -348,6 +385,31 @@
           <button id="empty-mkdir" class="btn small" type="button">新建文件夹</button>
         </div>
       </div>
+
+      <section id="analyze-view" class="analyze-view" aria-label="存储分析" hidden>
+        <div class="analyze-head">
+          <div id="analyze-vols" class="analyze-vols"></div>
+          <div class="analyze-actions">
+            <span id="analyze-status" class="analyze-status"></span>
+            <button id="analyze-delete" class="btn small danger" type="button" hidden>删除所选</button>
+            <button id="analyze-up" class="btn small ghost" type="button" title="返回上一层">上一层</button>
+            <button id="analyze-rescan" class="btn small" type="button" title="重新扫描当前目录">重新分析</button>
+            <button id="analyze-close" class="btn small ghost" type="button">关闭</button>
+          </div>
+        </div>
+        <nav id="analyze-crumbs" class="analyze-crumbs" aria-label="分析路径"></nav>
+        <div id="analyze-overview" class="analyze-overview"></div>
+        <div id="analyze-cats-label" class="analyze-section-label">类型分布</div>
+        <div id="analyze-toggle-cats" class="analyze-catbar" hidden></div>
+        <div id="analyze-legend" class="analyze-legend"></div>
+        <div class="analyze-table-head" aria-hidden="true">
+          <span>项目</span>
+          <span>大小</span>
+          <span>占比</span>
+        </div>
+        <div id="analyze-list" class="analyze-list" role="list"></div>
+        <div id="analyze-empty" class="analyze-empty" hidden></div>
+      </section>
     </main>
 
     <footer class="status-bar">

@@ -1,6 +1,7 @@
 //! RockBadger: encrypted self-hosted file server plus reusable building
 //! blocks for the desktop companions (local mode, embedded HTTP service).
 
+pub mod analyze;
 pub mod api;
 pub mod app;
 pub mod archive;
@@ -14,6 +15,7 @@ pub mod preview;
 pub mod rate;
 pub mod server;
 pub mod state;
+pub mod thumbnail;
 pub mod tls;
 pub mod web;
 

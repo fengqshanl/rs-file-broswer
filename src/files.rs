@@ -175,7 +175,7 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn clean_rel(input: &str) -> Result<String, ApiError> {
+pub(crate) fn clean_rel(input: &str) -> Result<String, ApiError> {
     let mut parts = Vec::new();
     for component in input.split('/') {
         match component {
@@ -194,7 +194,7 @@ fn clean_rel(input: &str) -> Result<String, ApiError> {
     Ok(parts.join("/"))
 }
 
-fn logical_path(clean: &str) -> String {
+pub(crate) fn logical_path(clean: &str) -> String {
     if clean.is_empty() {
         "/".to_string()
     } else {
@@ -235,7 +235,7 @@ fn ensure_allowed(state: &AppState, canonical: &Path) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn resolve_dir(state: &AppState, input: &str) -> Result<(PathBuf, String), ApiError> {
+pub(crate) async fn resolve_dir(state: &AppState, input: &str) -> Result<(PathBuf, String), ApiError> {
     let clean = clean_rel(input)?;
     let root = state.data_root();
     let joined = if clean.is_empty() {
@@ -495,9 +495,10 @@ fn scan_directory(root: &Path, tmp_root: &Path) -> io::Result<(Vec<Entry>, bool)
     Ok((entries, truncated))
 }
 
-fn invalidate_listings(state: &AppState) {
+pub(crate) fn invalidate_listings(state: &AppState) {
     state.listings.clear();
     state.folder_sizes.clear();
+    state.analyses.clear();
 }
 
 pub async fn folder_size(
@@ -613,7 +614,7 @@ fn measure_folder(root: &Path, tmp_root: &Path) -> io::Result<(u64, u64, u64, bo
 
 /// Dotfiles count as hidden everywhere; Windows also marks a file with the
 /// hidden attribute.
-fn is_hidden(name: &str, metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_hidden(name: &str, metadata: &std::fs::Metadata) -> bool {
     if name.starts_with('.') {
         return true;
     }

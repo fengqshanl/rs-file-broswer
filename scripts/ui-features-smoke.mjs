@@ -131,7 +131,15 @@ try {
       document.querySelector('#btn-upload-folder').hidden,
     pasteGone: !document.querySelector('#btn-paste'),
     version: document.querySelector('#app-version').textContent,
-    columns: [...document.querySelectorAll('.list-head > span')].map((node) => node.textContent),
+    // The type column only exists in the details layout, so it is excluded
+    // rather than filtered by visibility (narrow viewports hide columns too).
+    columns: [...document.querySelectorAll('.list-head > span:not(.col-kind)')].map(
+      (node) => node.textContent,
+    ),
+    layout: document.querySelector('.content')?.className || '',
+    viewSwitch: [...document.querySelectorAll('#view-switch [data-view-mode]')].map(
+      (node) => node.dataset.viewMode,
+    ),
   })`);
   if (
     !chrome.commandBarInTop ||
@@ -147,6 +155,9 @@ try {
   }
   if (chrome.columns.length !== 3 || chrome.columns.includes('操作')) {
     throw new Error(`actions column still rendered: ${JSON.stringify(chrome.columns)}`);
+  }
+  if (chrome.viewSwitch.join(',') !== 'list,grid,details') {
+    throw new Error(`view switch missing: ${JSON.stringify(chrome.viewSwitch)}`);
   }
   pass('top command bar owns add-server, update check, root select and version');
   await waitRow(VISIBLE_FILE);

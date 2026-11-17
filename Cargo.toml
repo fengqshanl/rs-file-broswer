@@ -18,6 +18,9 @@ dashmap = "6"
 dirs = "5"
 fs2 = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Thumbnails only: decoders without the editor/encoder surface keeps the
+# Alpine image small. SVG is handled in the UI, not here.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 rand = "0.8"
 rcgen = "0.12"
 rsa = { version = "0.9", features = ["sha2"] }

@@ -53,6 +53,45 @@ const UPLOAD_REQUEST_TIMEOUT_MS = 60_000;
 const DOWNLOAD_IDLE_TIMEOUT_MS = 60_000;
 const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024;
 
+const VIEW_MODES = ['list', 'grid', 'details'];
+const VIEW_MODE_KEY = 'rockbadger.view-mode';
+
+/** Grid tiles ask for a 256px thumbnail; larger edges waste bandwidth. */
+const THUMBNAIL_EDGE = 256;
+/** Thumbnails decode on the server, so a gallery must not open 60 sockets. */
+const THUMBNAIL_CONCURRENCY = 4;
+const THUMBNAIL_CACHE_LIMIT = 320;
+/** Mirrors the server cap: bigger sources fall back to a file icon. */
+const THUMBNAIL_MAX_BYTES = 64 * 1024 * 1024;
+/** Formats the server can decode; SVG needs a renderer and keeps its icon. */
+const THUMBNAIL_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'bmp', 'ico',
+]);
+
+const CATEGORY_LABELS = {
+  image: '图片',
+  video: '视频',
+  audio: '音频',
+  document: '文档',
+  code: '代码',
+  archive: '压缩包',
+  binary: '程序',
+  other: '其他',
+  folder: '文件夹',
+};
+
+const CATEGORY_COLORS = {
+  image: '#3b82f6',
+  video: '#8b5cf6',
+  audio: '#ec4899',
+  document: '#f59e0b',
+  code: '#10b981',
+  archive: '#ef4444',
+  binary: '#64748b',
+  other: '#94a3b8',
+  folder: '#0ea5e9',
+};
+
 const IMAGE_EXTENSIONS = new Set([
   'png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'avif', 'bmp', 'ico', 'svg',
 ]);
@@ -75,6 +114,25 @@ function readStoredShowHidden() {
     return localStorage.getItem(SHOW_HIDDEN_KEY) === '1';
   } catch {
     return false;
+  }
+}
+
+/// Local copy of the layout so the first paint matches the last session even
+/// before `/app/info` answers.
+function readStoredViewMode() {
+  try {
+    const stored = localStorage.getItem(VIEW_MODE_KEY);
+    return VIEW_MODES.includes(stored) ? stored : 'list';
+  } catch {
+    return 'list';
+  }
+}
+
+function storeViewMode(mode) {
+  try {
+    localStorage.setItem(VIEW_MODE_KEY, mode);
+  } catch {
+    /* storage can be unavailable in a hardened webview */
   }
 }
 
@@ -111,6 +169,13 @@ const state = {
   themeChoice: document.documentElement.getAttribute('data-theme-choice') || 'light',
   pageSize: LIST_PAGE_SIZE,
   autoLoadPaging: true,
+  /// Listing layout, persisted through `settings.json`.
+  viewMode: readStoredViewMode(),
+  /// Storage analysis is opt-in; the toolbar entry only exists once enabled.
+  analyzeEnabled: false,
+  analyzeOpen: false,
+  analyzeTabId: null,
+  analyze: null,
 };
 
 state.standaloneTab = makeTab({ id: 'standalone', kind: 'standalone', name: '服务器' });
@@ -583,6 +648,7 @@ function clearTabSession(tab) {
 function handleSessionLost(message, tab = activeTab()) {
   const wasActive = tab === activeTab();
   clearTabSession(tab);
+  if (wasActive) closeAnalyze();
   if (!wasActive) {
     renderConnectionPicker();
     updatePasteButton();
@@ -953,10 +1019,12 @@ function showListSkeleton(show) {
 function renderFiles() {
   const list = $('#file-list');
   resetFolderSizeObserver();
+  resetThumbnailObserver();
   list.replaceChildren();
+  applyListLayout(list);
   const visible = visibleEntries();
   const hasEntries = visible.length > 0;
-  $('.list-head').hidden = !hasEntries;
+  $('.list-head').hidden = !hasEntries || state.viewMode === 'grid';
   list.hidden = !hasEntries;
   const empty = $('#empty-state');
   empty.hidden = hasEntries || state.list.loading;
@@ -1039,12 +1107,13 @@ function appendRows(fromIndex) {
     return;
   }
   const list = $('#file-list');
+  applyListLayout(list);
   const visible = visibleEntries();
   for (let index = fromIndex; index < visible.length; index += 1) {
     list.append(renderRow(visible[index], activeTab()));
   }
   const hasEntries = visible.length > 0;
-  $('.list-head').hidden = !hasEntries;
+  $('.list-head').hidden = !hasEntries || state.viewMode === 'grid';
   list.hidden = !hasEntries;
   $('#empty-state').hidden = hasEntries;
   updateListSummary();
@@ -1117,11 +1186,60 @@ function flashRow(row) {
   setTimeout(() => row.classList.remove('highlight'), 3200);
 }
 
+/// Layout class lives on the container, so switching modes never needs to
+/// rebuild the listing: only the next render picks up the new class.
+function applyListLayout(list = $('#file-list')) {
+  list.className = `file-list view-${state.viewMode}`;
+  // The header lives outside the list, so the layout class goes on the shared
+  // container instead of being duplicated on both nodes.
+  const content = $('.content');
+  if (content) {
+    content.classList.remove('view-list', 'view-grid', 'view-details');
+    content.classList.add(`view-${state.viewMode}`);
+  }
+}
+
+function setViewMode(mode, { persist = true, rerender = true } = {}) {
+  const next = VIEW_MODES.includes(mode) ? mode : 'list';
+  if (next === state.viewMode) {
+    renderViewSwitch();
+    return;
+  }
+  state.viewMode = next;
+  storeViewMode(next);
+  renderViewSwitch();
+  if (persist) queueSettingsSave({ view_mode: next });
+  if (rerender) {
+    applyListLayout();
+    renderFiles();
+  }
+}
+
+function renderViewSwitch() {
+  const group = $('#view-switch');
+  if (!group) return;
+  for (const button of group.querySelectorAll('[data-view-mode]')) {
+    const active = button.dataset.viewMode === state.viewMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+}
+
+/// Short family label for the details layout's type column.
+function entryKindLabel(entry) {
+  if (entry.is_dir) return entry.is_symlink ? '快捷方式' : '文件夹';
+  const extension = fileExtension(entry.name);
+  return extension ? `${extension.toUpperCase()} 文件` : '文件';
+}
+
 function renderRow(entry, tab = activeTab()) {
-  const row = div('file-row');
+  const grid = state.viewMode === 'grid';
+  const detailed = state.viewMode === 'details';
+  const row = div(grid ? 'file-card' : 'file-row');
   row.setAttribute('role', 'listitem');
   const fullPath = entryPath(tab, entry);
   row.dataset.path = fullPath;
+  row.dataset.name = entry.name;
   if (entry.hidden) row.classList.add('hidden-entry');
   if (tab.selectedPaths.has(fullPath)) row.classList.add('selected');
   row.addEventListener('click', (event) => {
@@ -1147,6 +1265,14 @@ function renderRow(entry, tab = activeTab()) {
     openRowContextMenu(event.clientX, event.clientY, tab);
   });
 
+  if (grid) buildGridCard(row, entry, tab, fullPath);
+  else buildRowCells(row, entry, tab, fullPath, detailed);
+  return row;
+}
+
+/// Name + size + time shared by the list and details layouts. Details adds the
+/// type column and a tighter row height.
+function buildRowCells(row, entry, tab, fullPath, detailed) {
   const nameCell = div('cell name-cell');
   const icon = span('file-icon ' + (entry.is_dir ? 'is-dir' : 'is-file'));
   icon.innerHTML = entry.is_dir ? ICONS.folder : ICONS.file;
@@ -1192,8 +1318,53 @@ function renderRow(entry, tab = activeTab()) {
   const timeCell = div('cell time');
   timeCell.textContent = formatDate(entry.modified);
 
-  row.append(nameCell, sizeCell, timeCell);
-  return row;
+  if (detailed) {
+    const kindCell = div('cell kind');
+    kindCell.textContent = entryKindLabel(entry);
+    row.append(nameCell, kindCell, sizeCell, timeCell);
+  } else {
+    row.append(nameCell, sizeCell, timeCell);
+  }
+}
+
+/// Grid tile: a preview area plus a two-line caption, the way Explorer's
+/// "large icons" view reads. Images ask for a server thumbnail once the tile
+/// scrolls into view.
+function buildGridCard(row, entry, tab, fullPath) {
+  const thumb = div('card-thumb');
+  const icon = span('file-icon ' + (entry.is_dir ? 'is-dir' : 'is-file'));
+  icon.innerHTML = entry.is_dir ? ICONS.folder : ICONS.file;
+  thumb.append(icon);
+  if (thumbnailable(entry)) observeThumbnail(thumb, tab, entry, fullPath);
+
+  const caption = div('card-caption');
+  if (entry.is_dir) {
+    const nameButton = buttonEl(entry.name, 'card-name');
+    nameButton.title = entry.name;
+    nameButton.addEventListener('click', (event) => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+      loadDir(joinPath(tab.cwd, entry.name), { tab });
+    });
+    caption.append(nameButton);
+  } else {
+    const name = span('card-name');
+    name.textContent = entry.name;
+    name.title = entry.name;
+    if (previewKindOf(entry.name) !== 'none') {
+      name.classList.add('previewable');
+      name.addEventListener('click', (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+        openPreview(entry, tab);
+      });
+    }
+    caption.append(name);
+  }
+
+  const meta = span('card-meta');
+  meta.textContent = entry.is_dir ? '文件夹' : formatSize(entry.size);
+  caption.append(meta);
+
+  row.append(thumb, caption);
 }
 
 function selectRow(row, entry, tab, event = null) {
@@ -1879,6 +2050,26 @@ function handleFileShortcuts(event) {
 
   const tab = activeTab();
   if (!tab.session) return;
+
+  // While the analysis panel is open it owns Escape and Delete, so the keys act
+  // on the ranked rows instead of the (hidden) file list behind them.
+  if (state.analyzeOpen) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeAnalyze();
+      return;
+    }
+    if (
+      event.key === 'Delete' &&
+      state.analyze &&
+      state.analyze.selection &&
+      state.analyze.selection.size
+    ) {
+      event.preventDefault();
+      void deleteAnalyzeSelection();
+    }
+    return;
+  }
 
   if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
     const entries = selectedEntries(tab);
@@ -2871,6 +3062,614 @@ function confirmDialog({ title, message, confirmText = '删除' }) {
     dialog.append(body);
     setTimeout(() => confirm.focus(), 0);
   }).then((value) => value === true);
+}
+
+/* ---------- Thumbnails (grid layout) ---------- */
+
+/// Blob URLs keyed by path+version. Bounded because a gallery folder can show
+/// thousands of tiles; the oldest entries stop being produced for new tiles but
+/// stay painted, so nothing on screen breaks.
+const thumbnailCache = new Map();
+const thumbnailQueue = [];
+let thumbnailActive = 0;
+let thumbnailObserver = null;
+
+function thumbnailable(entry) {
+  if (!entry || entry.is_dir) return false;
+  if (!THUMBNAIL_EXTENSIONS.has(fileExtension(entry.name))) return false;
+  const size = Number(entry.size) || 0;
+  return size > 0 && size <= THUMBNAIL_MAX_BYTES;
+}
+
+function thumbnailKey(entry, fullPath) {
+  return `${fullPath}|${entry.modified || 0}|${entry.size || 0}`;
+}
+
+function applyThumbnail(node, url) {
+  const image = document.createElement('img');
+  image.className = 'thumb-image';
+  image.alt = '';
+  image.decoding = 'async';
+  image.draggable = false;
+  image.src = url;
+  node.classList.add('has-thumb');
+  node.replaceChildren(image);
+}
+
+function rememberThumbnail(key, url) {
+  if (thumbnailCache.has(key)) return;
+  thumbnailCache.set(key, url);
+  while (thumbnailCache.size > THUMBNAIL_CACHE_LIMIT) {
+    const oldest = thumbnailCache.keys().next().value;
+    if (oldest === undefined) break;
+    thumbnailCache.delete(oldest);
+  }
+}
+
+function observeThumbnail(node, tab, entry, fullPath) {
+  const key = thumbnailKey(entry, fullPath);
+  const cached = thumbnailCache.get(key);
+  if (cached) {
+    applyThumbnail(node, cached);
+    return;
+  }
+  const job = { node, tab, entry, fullPath, key };
+  if (typeof IntersectionObserver !== 'function') {
+    queueThumbnail(job);
+    return;
+  }
+  if (!thumbnailObserver) {
+    thumbnailObserver = new IntersectionObserver(
+      (records, observer) => {
+        for (const record of records) {
+          if (!record.isIntersecting) continue;
+          observer.unobserve(record.target);
+          const pending = record.target.__thumbJob;
+          record.target.__thumbJob = null;
+          if (pending) queueThumbnail(pending);
+        }
+      },
+      { rootMargin: '320px 0px' },
+    );
+  }
+  node.__thumbJob = job;
+  thumbnailObserver.observe(node);
+}
+
+/// Dropping the observer also drops jobs for tiles that no longer exist, which
+/// keeps a fast scroll from hammering the server.
+function resetThumbnailObserver() {
+  if (thumbnailObserver) thumbnailObserver.disconnect();
+  thumbnailQueue.length = 0;
+}
+
+function queueThumbnail(job) {
+  if (!job.node.isConnected) return;
+  thumbnailQueue.push(job);
+  pumpThumbnails();
+}
+
+function pumpThumbnails() {
+  while (thumbnailActive < THUMBNAIL_CONCURRENCY && thumbnailQueue.length) {
+    const job = thumbnailQueue.shift();
+    thumbnailActive += 1;
+    void loadThumbnail(job);
+  }
+}
+
+async function loadThumbnail(job) {
+  try {
+    if (!job.tab.session || !job.node.isConnected) return;
+    const data = await api(
+      '/api/thumbnail',
+      { path: job.fullPath, size: THUMBNAIL_EDGE },
+      'POST',
+      job.tab,
+      { timeoutMs: 60_000 },
+    );
+    if (!data || !data.data) return;
+    const url = URL.createObjectURL(
+      new Blob([base64ToBytes(data.data)], { type: 'image/jpeg' }),
+    );
+    rememberThumbnail(job.key, url);
+    if (job.node.isConnected) applyThumbnail(job.node, url);
+  } catch {
+    // A missing decoder or an oversized source is not an error the user needs:
+    // the generic file icon simply stays.
+    if (job.node.isConnected) job.node.classList.add('thumb-failed');
+  } finally {
+    thumbnailActive -= 1;
+    pumpThumbnails();
+  }
+}
+
+/* ---------- Storage analysis ---------- */
+
+function formatDuration(milliseconds) {
+  const value = Number(milliseconds) || 0;
+  if (value < 1000) return `${value} 毫秒`;
+  return `${(value / 1000).toFixed(1)} 秒`;
+}
+
+function analyzeParent(path) {
+  const trimmed = (path || '/').replace(/\/+$/, '');
+  const index = trimmed.lastIndexOf('/');
+  if (index <= 0) return '/';
+  return trimmed.slice(0, index);
+}
+
+function analyzeSegments(path) {
+  const clean = (path || '/').replace(/^\/+|\/+$/g, '');
+  return clean ? clean.split('/') : [];
+}
+
+/// The toolbar entry only exists while the extension is enabled; turning it off
+/// while the panel is open closes the panel instead of leaving an orphan view.
+function syncAnalyzeChrome() {
+  const button = $('#btn-analyze');
+  if (button) {
+    button.hidden = !state.analyzeEnabled;
+    button.classList.toggle('active', state.analyzeOpen);
+    button.setAttribute('aria-pressed', state.analyzeOpen ? 'true' : 'false');
+  }
+  const toggle = $('#toggle-analyze');
+  if (toggle) toggle.checked = state.analyzeEnabled;
+  if (!state.analyzeEnabled && state.analyzeOpen) closeAnalyze();
+}
+
+async function openAnalyze(path = null) {
+  const tab = activeTab();
+  if (!tab || !tab.session) {
+    toast('请先登录后再使用存储分析', 'error');
+    return;
+  }
+  if (!state.analyzeEnabled) {
+    state.analyzeEnabled = true;
+    syncAnalyzeChrome();
+    queueSettingsSave({ analyze_enabled: true });
+  }
+  closeAppMenus();
+  state.analyzeOpen = true;
+  state.analyzeTabId = tab.id;
+  const view = $('#analyze-view');
+  if (view) view.hidden = false;
+  const content = $('.content');
+  if (content) content.classList.add('is-analyzing');
+  document.body.classList.add('is-analyzing');
+  syncAnalyzeChrome();
+  state.analyze = {
+    loading: true,
+    path: path || tab.cwd,
+    data: null,
+    volumes: [],
+    error: null,
+    selection: new Set(),
+  };
+  renderAnalyze();
+  await runAnalyze(path || tab.cwd);
+}
+
+function closeAnalyze() {
+  if (!state.analyzeOpen) return;
+  state.analyzeOpen = false;
+  state.analyzeTabId = null;
+  state.analyze = null;
+  const view = $('#analyze-view');
+  if (view) view.hidden = true;
+  const content = $('.content');
+  if (content) content.classList.remove('is-analyzing');
+  document.body.classList.remove('is-analyzing');
+  syncAnalyzeChrome();
+  renderFiles();
+}
+
+/// Guards against a slow scan of an abandoned folder landing on top of a newer
+/// one: only the newest request is allowed to write the view state.
+let analyzeToken = 0;
+
+async function runAnalyze(path) {
+  const tab = activeTab();
+  if (!tab || !tab.session) return;
+  const token = (analyzeToken += 1);
+  const previous = state.analyze;
+  state.analyze = {
+    loading: true,
+    path,
+    // Re-scanning the same folder keeps the old numbers on screen instead of
+    // flashing an empty panel.
+    data: previous && previous.path === path ? previous.data : null,
+    volumes: (previous && previous.volumes) || [],
+    error: null,
+    selection: new Set(),
+  };
+  renderAnalyze();
+  try {
+    const [data, volumes] = await Promise.all([
+      api('/api/analyze', { path }, 'POST', tab, { timeoutMs: 180_000 }),
+      api('/api/volumes', { path }, 'POST', tab, { timeoutMs: 30_000 }).catch(() => null),
+    ]);
+    if (!state.analyzeOpen || token !== analyzeToken) return;
+    state.analyze = {
+      loading: false,
+      path,
+      data,
+      volumes: (volumes && volumes.volumes) || state.analyze.volumes || [],
+      error: null,
+      selection: new Set(),
+    };
+  } catch (error) {
+    if (!state.analyzeOpen || token !== analyzeToken) return;
+    const message = error.message || '分析失败';
+    // An older server has no /api/analyze endpoint at all; say so instead of
+    // surfacing a bare status code.
+    const hint = /404/.test(message) ? '服务端版本过旧，请先升级服务端再使用存储分析' : message;
+    state.analyze = {
+      loading: false,
+      path,
+      data: null,
+      volumes: state.analyze.volumes || [],
+      error: hint,
+      selection: new Set(),
+    };
+  }
+  renderAnalyze();
+}
+
+function renderAnalyze() {
+  if (!state.analyzeOpen) return;
+  const view = state.analyze;
+  const path = (view && view.path) || activeTab().cwd;
+  renderAnalyzeVolumes((view && view.volumes) || [], path);
+  renderAnalyzeCrumbs(path);
+  const up = $('#analyze-up');
+  if (up) up.disabled = path === '/';
+
+  const status = $('#analyze-status');
+  const overview = $('#analyze-overview');
+  const catbar = $('#analyze-toggle-cats');
+  const legend = $('#analyze-legend');
+  const list = $('#analyze-list');
+  const empty = $('#analyze-empty');
+  list.replaceChildren();
+  empty.hidden = true;
+  overview.replaceChildren();
+  catbar.replaceChildren();
+  catbar.hidden = true;
+  legend.replaceChildren();
+
+  if (!view || (view.loading && !view.data)) {
+    if (status) status.textContent = '正在扫描…';
+    empty.hidden = false;
+    empty.textContent = '正在统计该目录的占用，大目录可能需要一会儿。';
+    updateAnalyzeDeleteButton();
+    return;
+  }
+  if (view.error) {
+    if (status) status.textContent = '';
+    empty.hidden = false;
+    empty.textContent = view.error;
+    updateAnalyzeDeleteButton();
+    return;
+  }
+
+  const data = view.data;
+  if (status) {
+    status.textContent = view.loading
+      ? '正在刷新…'
+      : `扫描耗时 ${formatDuration(data.duration_ms)}`;
+  }
+  renderAnalyzeOverview(data);
+  renderAnalyzeCategories(data);
+  renderAnalyzeRows(data, list);
+  if (!data.children.length) {
+    empty.hidden = false;
+    empty.textContent = '这个文件夹是空的';
+  }
+  updateAnalyzeDeleteButton();
+}
+
+function renderAnalyzeOverview(data) {
+  const box = $('#analyze-overview');
+  if (!box) return;
+  const metrics = div('analyze-metrics');
+  const add = (label, value, hint) => {
+    const cell = div('analyze-metric');
+    const name = span('metric-label');
+    name.textContent = label;
+    const amount = span('metric-value');
+    amount.textContent = value;
+    cell.append(name, amount);
+    if (hint) {
+      const note = span('metric-hint');
+      note.textContent = hint;
+      cell.append(note);
+    }
+    metrics.append(cell);
+  };
+  add('当前目录占用', formatSize(data.total_size), data.truncated ? '已达扫描上限，数值偏小' : '');
+  add('文件', `${data.total_files} 个`);
+  add('文件夹', `${data.total_dirs} 个`);
+  box.append(metrics);
+
+  if (data.total_space && typeof data.free_space === 'number') {
+    const used = Math.max(data.total_space - data.free_space, 0);
+    const ratio = data.total_space ? Math.min((used / data.total_space) * 100, 100) : 0;
+    const bar = div('volume-bar');
+    const fill = div('volume-fill');
+    fill.style.width = `${ratio}%`;
+    fill.dataset.level = ratio > 92 ? 'critical' : ratio > 75 ? 'warn' : 'ok';
+    bar.append(fill);
+    const note = div('volume-note');
+    note.textContent = `所在磁盘 ${formatSize(used)} / ${formatSize(data.total_space)} 已用 · 剩余 ${formatSize(data.free_space)}`;
+    box.append(bar, note);
+  }
+  if (data.truncated) {
+    const warn = div('analyze-warn');
+    warn.textContent = '目录规模超出扫描预算，结果是最小值；下探到子目录可得到更准确的数字。';
+    box.append(warn);
+  }
+  if (data.children_truncated) {
+    const note = div('analyze-warn');
+    note.textContent = `共 ${data.child_total} 个项目，仅列出占用最大的 ${data.children.length} 个。`;
+    box.append(note);
+  }
+}
+
+function renderAnalyzeCategories(data) {
+  const bar = $('#analyze-toggle-cats');
+  const legend = $('#analyze-legend');
+  if (!bar || !legend) return;
+  const total = data.categories.reduce((sum, item) => sum + item.size, 0);
+  if (!total) return;
+  bar.hidden = false;
+  for (const item of data.categories) {
+    if (!item.size) continue;
+    const segment = span('cat-seg');
+    segment.style.width = `${(item.size / total) * 100}%`;
+    segment.style.background = CATEGORY_COLORS[item.kind] || CATEGORY_COLORS.other;
+    segment.title = `${CATEGORY_LABELS[item.kind] || item.kind}：${formatSize(item.size)}`;
+    bar.append(segment);
+  }
+  for (const item of data.categories) {
+    if (!item.size) continue;
+    const chip = span('legend-item');
+    const dot = span('legend-dot');
+    dot.style.background = CATEGORY_COLORS[item.kind] || CATEGORY_COLORS.other;
+    const text = span('legend-text');
+    const share = ((item.size / total) * 100).toFixed(1);
+    text.textContent = `${CATEGORY_LABELS[item.kind] || item.kind} ${formatSize(item.size)} · ${share}%`;
+    chip.append(dot, text);
+    legend.append(chip);
+  }
+}
+
+function renderAnalyzeRows(data, list) {
+  if (!list) return;
+  const total = data.total_size || data.children.reduce((sum, child) => sum + child.size, 0) || 1;
+  for (const child of data.children) {
+    list.append(renderAnalyzeRow(child, total, data.path));
+  }
+}
+
+function renderAnalyzeRow(child, total, parentPath) {
+  const path = joinPath(parentPath, child.name);
+  const row = div('analyze-row');
+  row.setAttribute('role', 'listitem');
+  row.dataset.path = path;
+  row.dataset.kind = child.kind;
+  if (child.hidden) row.classList.add('hidden-entry');
+  if (state.analyze && state.analyze.selection && state.analyze.selection.has(path)) {
+    row.classList.add('selected');
+  }
+
+  const share = total ? (child.size / total) * 100 : 0;
+  const bar = div('analyze-bar');
+  bar.style.width = `${Math.max(share, child.size ? 0.5 : 0)}%`;
+  bar.style.background = CATEGORY_COLORS[child.kind] || CATEGORY_COLORS.other;
+  row.append(bar);
+
+  const name = div('analyze-name');
+  const icon = span('analyze-icon ' + (child.is_dir ? 'is-dir' : 'is-file'));
+  icon.innerHTML = child.is_dir ? ICONS.folder : ICONS.file;
+  const label = span('analyze-label');
+  label.textContent = child.name;
+  label.title = child.name;
+  name.append(icon, label);
+  if (child.is_dir) {
+    const count = span('analyze-count');
+    count.textContent = `${child.files} 个文件`;
+    name.append(count);
+  }
+
+  const size = div('analyze-size');
+  size.textContent = formatSize(child.size);
+
+  const ratio = div('analyze-pct');
+  ratio.textContent = `${share >= 10 ? share.toFixed(0) : share.toFixed(1)}%`;
+
+  row.append(name, size, ratio);
+  row.addEventListener('click', (event) => toggleAnalyzeSelection(child, path, event));
+  row.addEventListener('dblclick', () => {
+    if (child.is_dir) void runAnalyze(path);
+  });
+  return row;
+}
+
+/// A plain click on a folder drills in — that is the whole point of the panel.
+/// Ctrl/Cmd+click is the escape hatch that selects folders for deletion.
+function toggleAnalyzeSelection(child, path, event) {
+  const view = state.analyze;
+  if (!view) return;
+  const multi = Boolean(event && (event.metaKey || event.ctrlKey));
+  if (!multi && child.is_dir) {
+    void runAnalyze(path);
+    return;
+  }
+  if (!view.selection) view.selection = new Set();
+  if (view.selection.has(path)) view.selection.delete(path);
+  else view.selection.add(path);
+  for (const node of document.querySelectorAll('#analyze-list .analyze-row')) {
+    node.classList.toggle('selected', view.selection.has(node.dataset.path));
+  }
+  updateAnalyzeDeleteButton();
+}
+
+function updateAnalyzeDeleteButton() {
+  const button = $('#analyze-delete');
+  if (!button) return;
+  const count = (state.analyze && state.analyze.selection && state.analyze.selection.size) || 0;
+  button.hidden = count === 0;
+  button.textContent = count > 1 ? `删除所选 (${count})` : '删除所选';
+}
+
+async function deleteAnalyzeSelection() {
+  const view = state.analyze;
+  const tab = activeTab();
+  if (!view || !view.selection || !view.selection.size || !tab.session) return;
+  const paths = [...view.selection];
+  const label =
+    paths.length === 1
+      ? paths[0].split('/').filter(Boolean).pop() || paths[0]
+      : `${paths.length} 个项目`;
+  const ok = await confirmDialog({
+    title: '删除所选项目',
+    message: `将永久删除 ${label}，文件夹内的所有内容都会被移除，且无法恢复。`,
+  });
+  if (!ok) return;
+
+  const button = $('#analyze-delete');
+  if (button) button.disabled = true;
+  let failed = 0;
+  for (const path of paths) {
+    try {
+      await api('/api/delete', { path }, 'POST', tab);
+    } catch {
+      failed += 1;
+    }
+  }
+  if (button) button.disabled = false;
+  if (failed) toast(`有 ${failed} 项删除失败`, 'error');
+  else toast(`已删除 ${paths.length} 项`, 'success');
+  view.selection.clear();
+  updateAnalyzeDeleteButton();
+  await runAnalyze(view.path);
+  void loadDir(tab.cwd, { tab, skipHistory: true });
+}
+
+function renderAnalyzeCrumbs(path) {
+  const box = $('#analyze-crumbs');
+  if (!box) return;
+  box.replaceChildren();
+
+  const rootChip = buttonEl('根目录', 'crumb');
+  rootChip.addEventListener('click', () => void runAnalyze('/'));
+  rootChip.disabled = path === '/';
+  box.append(rootChip);
+
+  const segments = analyzeSegments(path);
+  let current = '';
+  segments.forEach((segment, index) => {
+    current += `/${segment}`;
+    const target = current;
+    const sep = span('crumb-sep');
+    sep.textContent = '/';
+    box.append(sep);
+    const chip = buttonEl(segment, 'crumb');
+    const isLast = index === segments.length - 1;
+    chip.disabled = isLast;
+    if (isLast) chip.classList.add('active');
+    chip.addEventListener('click', () => void runAnalyze(target));
+    box.append(chip);
+  });
+}
+
+function renderAnalyzeVolumes(volumes, currentPath) {
+  const box = $('#analyze-vols');
+  if (!box) return;
+  box.replaceChildren();
+  if (!volumes || !volumes.length) return;
+  const tab = activeTab();
+  const currentRoot = tab.target.kind === 'local'
+    ? (state.app && state.app.local && state.app.local.root) || ''
+    : '';
+  // A remote server's data root is always its filesystem root.
+  const rootPath = tab.target.kind === 'local' ? currentRoot : '/';
+
+  for (const volume of volumes) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'volume-chip';
+    const same = Boolean(rootPath) && volume.path === rootPath;
+    if (same) chip.classList.add('current');
+    chip.title = same
+      ? `当前磁盘：${volume.path}`
+      : `切换到 ${volume.path} 并分析`;
+
+    const name = span('volume-name');
+    name.textContent = volume.name;
+    chip.append(name);
+
+    const track = span('volume-track');
+    const fill = span('volume-fill');
+    const ratio = volume.total ? Math.min((volume.used / volume.total) * 100, 100) : 0;
+    fill.style.width = `${ratio}%`;
+    fill.dataset.level = ratio > 92 ? 'critical' : ratio > 75 ? 'warn' : 'ok';
+    track.append(fill);
+    chip.append(track);
+
+    const used = span('volume-used');
+    used.textContent = volume.total ? `${Math.round(ratio)}%` : '—';
+    chip.append(used);
+
+    chip.addEventListener('click', () => void switchAnalyzeVolume(volume, rootPath));
+    box.append(chip);
+  }
+}
+
+/// Volumes outside the current data root are only reachable after the desktop
+/// companion re-roots its local service, the same call the 位置 selector makes.
+async function switchAnalyzeVolume(volume, currentRoot) {
+  const tab = activeTab();
+  if (!tab.session) return;
+  if (volume.path === currentRoot) {
+    await runAnalyze('/');
+    return;
+  }
+  if (!isPasswordless(tab.target)) {
+    toast('远程连接不能切换磁盘，请在服务器上分析根目录', 'error');
+    return;
+  }
+  try {
+    const response = await fetch('/app/local/root', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...targetHeaders(tab),
+      },
+      body: JSON.stringify({ path: volume.path }),
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    if (!response.ok) {
+      throw new Error(data && data.error ? data.error : '切换磁盘失败');
+    }
+    if (tab.target.kind === 'local') await refreshAppInfo();
+    await refreshTargetRoots(tab);
+    tab.cwd = '/';
+    tab.entries = [];
+    tab.list = emptyList();
+    tab.loaded = false;
+    tab.needsRefresh = true;
+    renderRootSelect();
+    await loadDir('/', { tab, skipHistory: true });
+    await runAnalyze('/');
+  } catch (error) {
+    toast(error.message || '切换磁盘失败', 'error');
+  }
 }
 
 /* ---------- Preview ---------- */
@@ -4311,6 +5110,9 @@ function runMenuAction(action) {
     const tab = activeTab();
     if (tab.session) selectAllEntries(tab);
   }
+  if (action === 'open-analyze') {
+    void openAnalyze();
+  }
 }
 
 function wireAppMenubar() {
@@ -4525,6 +5327,9 @@ async function activateTab(id, options = {}) {
   let tab = getTab(id);
   if (!tab && id === 'standalone') tab = state.standaloneTab;
   if (!tab) return;
+  // The panel is scoped to one target's file tree; switching targets must not
+  // leave a stale scan of the previous machine on screen.
+  if (state.analyzeOpen && state.analyzeTabId !== tab.id) closeAnalyze();
   state.activeTabId = state.tabs.has(id) ? id : null;
   loginTab = tab.session ? null : tab;
   renderConnectionPicker();
@@ -4726,6 +5531,13 @@ function applySettings(settings) {
     } catch {
       /* ignore */
     }
+  }
+  if (VIEW_MODES.includes(settings.view_mode) && settings.view_mode !== state.viewMode) {
+    setViewMode(settings.view_mode, { persist: false, rerender: false });
+  }
+  if (typeof settings.analyze_enabled === 'boolean') {
+    state.analyzeEnabled = settings.analyze_enabled;
+    syncAnalyzeChrome();
   }
 }
 
@@ -5691,6 +6503,54 @@ function bindEvents() {
     }
   });
   $('#toggle-hidden').checked = state.showHidden;
+  renderViewSwitch();
+  const viewSwitch = $('#view-switch');
+  if (viewSwitch) {
+    viewSwitch.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-view-mode]');
+      if (!button) return;
+      setViewMode(button.dataset.viewMode);
+    });
+  }
+
+  syncAnalyzeChrome();
+  const analyzeToggle = $('#toggle-analyze');
+  if (analyzeToggle) {
+    analyzeToggle.addEventListener('change', (event) => {
+      state.analyzeEnabled = event.target.checked;
+      syncAnalyzeChrome();
+      queueSettingsSave({ analyze_enabled: state.analyzeEnabled });
+      // Turning the extension on jumps straight into the panel; turning it off
+      // already closed the view inside syncAnalyzeChrome.
+      if (state.analyzeEnabled) void openAnalyze();
+    });
+  }
+  const analyzeButton = $('#btn-analyze');
+  if (analyzeButton) {
+    analyzeButton.addEventListener('click', () => void openAnalyze());
+  }
+  const analyzeClose = $('#analyze-close');
+  if (analyzeClose) analyzeClose.addEventListener('click', () => closeAnalyze());
+  const analyzeRescan = $('#analyze-rescan');
+  if (analyzeRescan) {
+    analyzeRescan.addEventListener('click', () => {
+      const view = state.analyze;
+      if (view) void runAnalyze(view.path);
+    });
+  }
+  const analyzeUp = $('#analyze-up');
+  if (analyzeUp) {
+    analyzeUp.addEventListener('click', () => {
+      const view = state.analyze;
+      if (!view || view.path === '/') return;
+      void runAnalyze(analyzeParent(view.path));
+    });
+  }
+  const analyzeDelete = $('#analyze-delete');
+  if (analyzeDelete) {
+    analyzeDelete.addEventListener('click', () => void deleteAnalyzeSelection());
+  }
+
   $('#toggle-hidden').addEventListener('change', (event) => {
     state.showHidden = event.target.checked;
     try {
