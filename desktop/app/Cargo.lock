@@ -4222,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "rockbadger"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4250,7 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "rockbadger-app"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "rockbadger",
  "rockbadger-desktop-common",
@@ -4262,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "rockbadger-desktop-common"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
