@@ -13,6 +13,7 @@ pub mod error;
 pub mod files;
 pub mod preview;
 pub mod rate;
+pub mod raw;
 pub mod server;
 pub mod state;
 pub mod stream;

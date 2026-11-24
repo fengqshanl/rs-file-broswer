@@ -44,6 +44,9 @@ const IMAGE_PREVIEW_BYTES = 128 * 1024 * 1024;
 const PDF_PREVIEW_BYTES = 256 * 1024 * 1024;
 const MEDIA_PREVIEW_BYTES = 512 * 1024 * 1024;
 const HTML_PREVIEW_BYTES = 32 * 1024 * 1024;
+/** A previewed document resolves assets for as long as it stays open, so its
+ *  ticket outlives the five minutes a media element needs. */
+const DOCUMENT_TICKET_TTL = 3600;
 const BLOB_DOWNLOAD_LIMIT = 1024 * 1024 * 1024;
 const SHEET_MAX_ROWS = 2000;
 const SHEET_MAX_COLS = 80;
@@ -4023,7 +4026,10 @@ function previewByteLimit(kind) {
     case 'pdf':
       return PDF_PREVIEW_BYTES;
     case 'html':
-      return HTML_PREVIEW_BYTES;
+      // A `/raw` document is streamed by the browser, never buffered here; only
+      // the legacy blob fallback reads it whole, and that path checks the limit
+      // itself.
+      return 0;
     case 'video':
     case 'audio':
       return MEDIA_PREVIEW_BYTES;
@@ -4049,8 +4055,16 @@ const PREVIEW_HTML_CSP =
   "media-src data: blob:; font-src data: blob:; script-src 'none'; " +
   "connect-src 'none'; base-uri 'none'; form-action 'none';";
 
-/** Injects a restrictive CSP because a blob document no longer gets the
- * server's response headers. Scripts and network requests stay disabled. */
+/**
+ * Fallback for servers that predate `/raw`: the document is handed over as a
+ * blob with a `<meta>` CSP.
+ *
+ * This path cannot render a normal page correctly and is only kept for older
+ * backends — a blob document inherits this app's own CSP (policy container
+ * inheritance for local schemes, and every policy is enforced), so the
+ * `'unsafe-inline'` below is vetoed by the app's `style-src 'self'`, and
+ * relative URLs have no directory to resolve against.
+ */
 function securePreviewHtml(html) {
   const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_HTML_CSP}">`;
   const head = /<head\b[^>]*>/i.exec(html);
@@ -4203,32 +4217,36 @@ function parentPath(path) {
 const streamTickets = new Map();
 /** Servers that predate range streaming keep the encrypted preview path. */
 const streamUnsupported = new Set();
+/** Servers that predate `/raw` keep the blob-based document preview. */
+const rawPreviewUnsupported = new Set();
 /** In-flight ticket requests, so a grid does not ask four times at once. */
 const streamTicketRequests = new Map();
 const STREAM_TICKET_MARGIN_MS = 20_000;
 
-function streamTicketFor(dirPath, tab) {
+function streamTicketFor(dirPath, tab, options = {}) {
   if (!tab.session || streamUnsupported.has(tab.id)) return Promise.resolve(null);
-  const key = `${tab.id}|${dirPath}`;
+  const ttl = options.ttl || 0;
+  const key = ttl ? `${tab.id}|${dirPath}|ttl=${ttl}` : `${tab.id}|${dirPath}`;
   const cached = streamTickets.get(key);
   if (cached && cached.expiresAt - STREAM_TICKET_MARGIN_MS > Date.now()) {
     return Promise.resolve(cached.ticket);
   }
   const pending = streamTicketRequests.get(key);
   if (pending) return pending;
-  const request = requestStreamTicket(key, dirPath, tab).finally(() => {
+  const request = requestStreamTicket(key, dirPath, tab, ttl).finally(() => {
     streamTicketRequests.delete(key);
   });
   streamTicketRequests.set(key, request);
   return request;
 }
 
-async function requestStreamTicket(key, dirPath, tab) {
+async function requestStreamTicket(key, dirPath, tab, ttl = 0) {
   const endpoint = '/api/stream/ticket';
   const aad = `POST ${endpoint}`;
   let response;
   try {
-    const envelope = await encryptWithKey(tab.session.key, aad, { path: dirPath, dir: true });
+    const payload = ttl ? { path: dirPath, dir: true, ttl } : { path: dirPath, dir: true };
+    const envelope = await encryptWithKey(tab.session.key, aad, payload);
     response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -4274,6 +4292,51 @@ async function streamUrl(path, tab, options = {}) {
     `${endpoint}?path=${encodeURIComponent(path)}&ticket=${encodeURIComponent(ticket)}` +
     `${size}${targetQuery(tab)}`
   );
+}
+
+/**
+ * The target a `/raw` document belongs to travels in the path, not in a query
+ * string: a page's own stylesheet and image requests carry neither the target
+ * header nor the query it was opened with, but they do keep the path prefix.
+ */
+function rawTargetPrefix(tab) {
+  if (!state.app || !tab || !tab.target || tab.target.kind === 'standalone') return '';
+  return `${encodeURIComponent(tab.id)}/`;
+}
+
+/**
+ * URL for a previewed HTML document.
+ *
+ * Serving it from its real path is what makes `<link href="style.css">` or
+ * `<img src="img/a.png">` resolve at all: inside a blob document those pointed
+ * into a URL that owns no directory. The blob also inherited this app's CSP,
+ * which is why the page's own `<style>` blocks were dropped and every HTML
+ * preview looked unstyled.
+ */
+async function previewDocumentUrl(path, tab) {
+  if (rawPreviewUnsupported.has(tab.id)) return null;
+  const segments = path
+    .split('/')
+    .filter((part) => part.length > 0)
+    .map(encodeURIComponent)
+    .join('/');
+  if (!segments) return null;
+  const ticket = await streamTicketFor(parentPath(path), tab, { ttl: DOCUMENT_TICKET_TTL });
+  if (!ticket) return null;
+  const url = `/raw/${rawTargetPrefix(tab)}${encodeURIComponent(ticket)}/${segments}`;
+  try {
+    const probe = await fetch(url, {
+      method: 'HEAD',
+      cache: 'no-store',
+      headers: targetHeaders(tab),
+    });
+    if (probe.ok) return url;
+    // A server that predates `/raw` answers 404/405 here: keep the blob path.
+    if (probe.status === 404 || probe.status === 405) rawPreviewUnsupported.add(tab.id);
+  } catch {
+    /* Transient failure: fall back for this preview only. */
+  }
+  return null;
 }
 
 /**
@@ -4551,14 +4614,37 @@ async function renderPreview({ content, entry, kind, trackUrl, tab = activeTab()
   if (kind === 'html') {
     content.classList.add('media-mode');
     const note = div('preview-banner');
-    note.textContent = 'HTML 在隔离沙箱中静态渲染：脚本与外部网络请求已禁用。';
+    note.textContent = '正在准备 HTML 预览…';
     const frameWrap = div('preview-media-wrap');
-    const status = mediaStatus('正在接收 HTML…');
+    const status = mediaStatus('正在准备预览…');
     frameWrap.append(status);
     const wrapper = div('preview-stack');
     wrapper.append(note, frameWrap);
     content.replaceChildren(wrapper);
 
+    const documentUrl = await previewDocumentUrl(path, tab);
+    if (!wrapper.isConnected) return;
+
+    if (documentUrl) {
+      note.textContent =
+        'HTML 在隔离沙箱中渲染：样式、图片与页面内脚本正常加载，外部网络请求已禁用。';
+      const frame = document.createElement('iframe');
+      frame.className = 'preview-frame';
+      frame.title = entry.name;
+      // No `allow-same-origin`: the document gets an opaque origin, so its
+      // scripts cannot touch this app's DOM, storage or session token.
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      status.textContent = '正在加载 HTML…';
+      frame.addEventListener('load', () => status.remove(), { once: true });
+      frame.src = documentUrl;
+      frameWrap.append(frame);
+      return;
+    }
+
+    // Server predates `/raw`: a self-contained document still renders through
+    // the blob path, though its stylesheets cannot (see `securePreviewHtml`).
+    note.textContent = 'HTML 在隔离沙箱中静态渲染：脚本与外部网络请求已禁用。';
     const data = await readPreviewBytes(path, tab, {
       limit: HTML_PREVIEW_BYTES,
       onProgress: (received, total) =>

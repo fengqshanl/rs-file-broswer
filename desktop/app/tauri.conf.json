@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "RockBadger",
   "mainBinaryName": "rockbadger",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "identifier": "com.rockbadger.files",
   "build": {
     "frontendDist": "../web"

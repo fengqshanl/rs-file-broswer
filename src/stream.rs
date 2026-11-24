@@ -56,6 +56,9 @@ const STREAM_CHUNK: usize = 256 * 1024;
 /// A ticket only has to survive the moment between the API call and the browser
 /// opening the media element. Five minutes covers a slow connection.
 const TICKET_TTL_SECS: u64 = 300;
+/// A previewed HTML document keeps resolving its assets for as long as the
+/// dialog is open, so it may ask for a longer window. This is the ceiling.
+const TICKET_TTL_MAX_SECS: u64 = 3600;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -85,6 +88,10 @@ struct TicketRequest {
     path: String,
     #[serde(default)]
     dir: bool,
+    /// Requested lifetime in seconds. Clamped, so a client can neither mint a
+    /// decade-long ticket nor one that expires before it arrives.
+    #[serde(default)]
+    ttl: Option<u64>,
 }
 
 /// Issues the ticket a media element (or thumbnail `<img>`) will present.
@@ -108,7 +115,12 @@ pub async fn issue_ticket(
         (Scope::File, clean)
     };
 
-    let expires_at = now_secs().saturating_add(TICKET_TTL_SECS);
+    let expires_at = now_secs().saturating_add(
+        request
+            .ttl
+            .unwrap_or(TICKET_TTL_SECS)
+            .clamp(60, TICKET_TTL_MAX_SECS),
+    );
     let signature = sign(&state.stream_secret, scope, &clean, expires_at);
     let ticket = format!("v1.{expires_at}.{}.{signature}", scope.code());
     encrypted_response(

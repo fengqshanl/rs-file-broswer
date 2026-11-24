@@ -75,6 +75,7 @@ const FORWARD_RESPONSE_HEADERS: &[&str] = &[
     "x-encrypted-end",
     "x-content-type-options",
     "content-security-policy",
+    "access-control-allow-origin",
     "x-frame-options",
     "referrer-policy",
     "cross-origin-resource-policy",
@@ -515,6 +516,21 @@ fn split_query_target(path_and_query: &str) -> (Option<String>, String) {
         format!("{path}?{}", kept.join("&"))
     };
     (target, forwarded)
+}
+
+/// `/raw/{target}/{ticket}/{path}` → target id plus the path to forward.
+///
+/// A previewed HTML document resolves its own stylesheets, images and fonts,
+/// and those browser-initiated requests carry neither the target header nor a
+/// query string. The target therefore has to travel in the path, where relative
+/// references keep it intact.
+fn split_path_target(path_and_query: &str) -> Option<(String, String)> {
+    let rest = path_and_query.strip_prefix("/raw/")?;
+    let (target, tail) = rest.split_once('/')?;
+    if target.is_empty() {
+        return None;
+    }
+    Some((percent_decode(target), format!("/raw/{tail}")))
 }
 
 fn percent_decode(value: &str) -> String {
@@ -1287,7 +1303,13 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
         .unwrap_or("/")
         .to_owned();
     let (query_target, forwarded_path) = split_query_target(&raw_path_and_query);
-    let requested = target_header(request.headers()).or(query_target);
+    let (forwarded_path, path_target) = match split_path_target(&forwarded_path) {
+        Some((target, path)) => (path, Some(target)),
+        None => (forwarded_path, None),
+    };
+    let requested = target_header(request.headers())
+        .or(path_target)
+        .or(query_target);
     let (target_id, route) = match requested {
         Some(id) => match route_for(&front, &id).await {
             Some(route) => (id, route),
@@ -1350,14 +1372,38 @@ async fn proxy(State(front): State<Arc<FrontState>>, request: Request) -> Respon
     let stream = response.bytes_stream();
     let mut out = Response::new(Body::from_stream(stream));
     *out.status_mut() = status;
+    // A previewed document runs on *this* origin, not the upstream one the
+    // target saw, so its policy is rebuilt here instead of copied: the frame's
+    // CSP has to name the host the browser is actually talking to.
+    let document = forwarded_path.starts_with("/raw/");
     for name in FORWARD_RESPONSE_HEADERS {
+        if document && matches!(*name, "content-security-policy" | "x-frame-options") {
+            continue;
+        }
         if let Some(value) = response_headers.get(*name) {
             if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
                 out.headers_mut().insert(header_name, value.clone());
             }
         }
     }
+    if document && is_html_response(&response_headers) {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok());
+        if let Ok(value) = HeaderValue::from_str(&rockbadger::raw::html_csp(host)) {
+            out.headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, value);
+        }
+    }
     out
+}
+
+fn is_html_response(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().starts_with("text/html"))
+        .unwrap_or(false)
 }
 
 fn to_reqwest_method(method: &Method) -> reqwest::Method {
@@ -1367,6 +1413,28 @@ fn to_reqwest_method(method: &Method) -> reqwest::Method {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_documents_carry_their_target_in_the_path() {
+        let (target, forwarded) = split_path_target(
+            "/raw/abc123/v1.1700000000.d.sig/docs/index.html",
+        )
+        .unwrap();
+        assert_eq!(target, "abc123");
+        assert_eq!(forwarded, "/raw/v1.1700000000.d.sig/docs/index.html");
+
+        // Relative references keep the prefix, which is the whole point.
+        assert_eq!(
+            split_path_target("/raw/abc123/v1.sig/docs/css/site.css?v=2")
+                .unwrap()
+                .1,
+            "/raw/v1.sig/docs/css/site.css?v=2"
+        );
+
+        assert!(split_path_target("/api/stream").is_none());
+        assert!(split_path_target("/raw/").is_none());
+        assert!(split_path_target("/raw/onlytarget").is_none());
+    }
 
     #[test]
     fn query_target_is_split_off_before_forwarding() {

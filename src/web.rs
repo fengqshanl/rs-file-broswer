@@ -14,7 +14,9 @@ use axum::{
 };
 use tokio::time::MissedTickBehavior;
 
-use crate::{analyze, app, auth, error::log, files, preview, state::AppState, stream, thumbnail};
+use crate::{
+    analyze, app, auth, error::log, files, preview, raw, state::AppState, stream, thumbnail,
+};
 
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none';";
 
@@ -46,6 +48,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/preview/stream", post(preview::stream))
         .route("/api/stream", get(stream::stream))
         .route("/api/stream/ticket", post(stream::issue_ticket))
+        // Preview documents and the assets they reference, addressed from
+        // their real path so relative URLs keep working.
+        .route("/raw/{ticket}/{*path}", get(raw::serve))
         .route("/api/upload/init", post(files::upload_init))
         .route("/api/upload/chunk/{id}/{seq}", put(files::upload_chunk))
         .route("/api/upload/finish", post(files::upload_finish))
@@ -128,6 +133,21 @@ async fn security_headers(request: Request, next: Next) -> Response {
     let is_api = path.starts_with("/api/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    if path.starts_with("/raw/") {
+        // A previewed document carries its own CSP (see `raw::html_csp`), has to
+        // stay framable, and its sandboxed frame runs in an opaque origin: the
+        // usual `cross-origin-resource-policy: same-origin` would block every
+        // stylesheet, image and font the page loads.
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+        return response;
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
